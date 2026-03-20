@@ -6,6 +6,7 @@ authors = [
     {name = "dg", email = "dg@gelotto.io"}
 ]
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "torch>=2.0",

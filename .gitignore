@@ -26,7 +26,7 @@ data/
 # Model checkpoints and training artifacts (never commit these!)
 *.pt
 *.ckpt
-.pth
+*.pth
 # Ignore runtime diagnostic output dirs by operator type (not source code)
 results/
 runs/

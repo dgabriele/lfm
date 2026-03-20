@@ -15,6 +15,18 @@ Agents that operate over grounded, potentially non-human representations need to
 
 LFM sits between the agent's internal world model and its communication channel, shaping messages to be compositional, structurally regular, reusable, and adaptable — while letting semantics emerge from interaction rather than being inherited from human language.
 
+### The bridge to human language
+
+The emergent language that LFM produces is not human language — but it is *language-like*. It has morphology, syntax, phrase structure, and phonotactically pronounceable surface forms. This is by design: the structural inductive biases that shape it are drawn from the same typological universals that underlie all human languages.
+
+This means the emergent language is optimally positioned for translation by pretrained multilingual LLMs. An LLM that already understands the structural patterns of hundreds of human languages — agreement, word order, constituency, inflection — can learn to translate LFM's emergent language through self-supervised fine-tuning, without any hand-crafted parallel corpus. The LLM acts as a bridge: agents communicate in their own structurally rich language, and humans read the translation.
+
+Crucially, this is translation, not alignment. Latent space alignment methods — which map agent representations into a human language embedding space — tend to collapse the agent's natural semantics onto human categories, destroying whatever novel or alien perspective the agent may have developed. Translation preserves the source language's own conceptual structure and merely finds the best human-language approximation. The agent's ontology stays intact; the LLM does the interpretive work, the same way a human translator mediates between languages with fundamentally different conceptual systems.
+
+The bigger picture: agents that learn from complex systems — physical simulations, markets, biological processes, adversarial environments — develop internal representations shaped by their own empirical experience. These representations encode perspectives that are genuinely alien to us, grounded in dynamics we may not have language for. LFM gives those perspectives a voice. The goal is not just agent-to-agent coordination but the ability to listen in — to hear what an agent trained on turbulent fluid dynamics or protein folding "thinks" is worth saying, in its own terms, and to have that translated into something we can engage with. This requires that the agent's language be structured enough for an LLM to translate, but not so constrained that it can only express what we already know how to say.
+
+The alternative — agents communicating in raw latent vectors or degenerate codes — gives an LLM nothing to work with. Structure is what makes translation possible.
+
 ## The Pipeline
 
 LFM provides a configurable pipeline of neural modules:
@@ -41,7 +53,7 @@ LFM is developed and validated through agent-based communication games. An agent
 
 **Relational scene graphs (controlled diagnostic)** — Procedurally generated CLEVR-style scenes with multiple objects, discrete attributes, and spatial relations. A scene with 3 objects and pairwise relations *cannot* be described by a flat code — it demands compositional, hierarchical expression. Single-object scenes serve as a control condition where LFM structure adds nothing. The gap between single-object and multi-object performance directly measures LFM's value-add. Scenes are pure GPU tensors with tunable complexity.
 
-**LLM latent representations (primary driver)** — Precomputed embeddings from a frozen LLM encoder (e.g., stella_en_400M_v5) over rich text passages. These embeddings encode enormously complex compositional structure — argument relations, temporal structure, causality, reference chains — all implicit and compressed. Unlike scene graphs where the "right" decomposition is known in advance, here the LFM must *discover* how to externalize latent structure as language. Embeddings are clustered hierarchically for stratified curriculum sampling: easy cross-cluster contrasts early in training, hard within-cluster contrasts later.
+**LLM latent representations (primary driver)** — Precomputed embeddings from a frozen LLM encoder over rich text passages. These embeddings encode enormously complex compositional structure — argument relations, temporal structure, causality, reference chains — all implicit and compressed. Unlike scene graphs where the "right" decomposition is known in advance, here the LFM must *discover* how to externalize latent structure as language. Embeddings are clustered hierarchically for stratified curriculum sampling: easy cross-cluster contrasts early in training, hard within-cluster contrasts later.
 
 ### Game types
 
@@ -80,4 +92,4 @@ The architectural scaffold and agent game infrastructure are in place. Next: imp
 
 ## License
 
-TBD
+MIT
