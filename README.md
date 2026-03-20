@@ -1,6 +1,6 @@
 # LFM — Language Faculty Model
 
-A framework for giving GPU-based agents a natural language faculty.
+A framework for giving neural agents a natural language faculty.
 
 LFM is a learnable system that imposes morphosyntactic and sentence-level constraints on sequences, enabling agents to express internal representations in structured, compositional form — without encoding predefined semantics. It models the *faculty* of language, not any particular human language.
 
