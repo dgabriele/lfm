@@ -1,0 +1,96 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+checkpoints/
+data/
+
+# Model checkpoints and training artifacts (never commit these!)
+*.pt
+*.ckpt
+.pth
+# Ignore runtime diagnostic output dirs by operator type (not source code)
+results/
+runs/
+*.npz
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# Poetry
+poetry.lock
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data (large files)
+data/
+*.h5
+*.hdf5
+*.zarr/
+
+# Logs
+*.log
+logs/
+
+# Example outputs
+output/
+examples/*/output/
+*.mp4
+*.gif
+*.png
+!docs/**/images/*.png
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CUDA & Compiled artifacts
+*.ptx
+*.cubin
+*.o
+*.a
+.env
+datasets/*.backup
+
+# Temporary scripts and PID files
+/*.sh
+*.pid
+
+# Temporary session notes (should be in docs/sessions/)
+/*_SUMMARY.md
+/RESUME_*.md
