@@ -43,15 +43,15 @@ LFM provides a configurable pipeline of neural modules:
 
 **Phonology** — Constrains surface forms to be pronounceable, biased toward English phonotactics by default
 
-**Morphology** — Learns subword structure (prefixes, stems, suffixes) with productive recombination
+**Morphology** — The main structural engine. Learns subword structure (prefixes, stems, suffixes) with productive recombination, and produces learned grammatical feature vectors per token — emergent analogues of case, number, tense, aspect. These features are not predefined categories; they are latent dimensions shaped by communication pressure. In agglutinative and polysynthetic languages, a single word can encode what English needs an entire clause for — subject, object, tense, evidentiality — all packed into morpheme sequences. LFM's morphology works the same way: structure lives in the morphemes, not in a separate grammar.
 
-**Syntax** — Structural agreement and ordering pressure -- phrase structure emerges from morphological constraints rather than being imposed by explicit grammars
+**Agreement and Ordering** — Lightweight structural pressure that operates on morphological features, not parse trees. Learns soft agreement constraints (if position i marks agent-case, there should be a patient-case marker elsewhere) and information-theoretic ordering preferences (high-information tokens first, consistent topic-comment structure). Phrase structure emerges from these morphological constraints rather than being imposed by an explicit grammar. This is how free word-order languages with rich case marking actually work.
 
 **Sentence Structure** — Differentiates sentence types and detects boundaries
 
 **Channel** — Handles the discrete communication bottleneck between agents
 
-Each module is optional and swappable. The framework trains in phases — first learning structural priors, then progressively introducing corruption pressure, morphological emergence, paraphrastic diversity, and finally agent-integrated training where meaning emerges through interaction.
+Each module is optional and swappable. The framework trains in phases — first learning structural priors from multilingual LLM latents (not just English, but diverse language families — SOV, agglutinative, fusional, polysynthetic — giving LFM the flexibility to adapt its structural strategy to whatever a particular agent scenario demands), then progressively introducing corruption pressure, morphological emergence, paraphrastic diversity, and finally agent-integrated training where meaning emerges through interaction.
 
 ## Proof-of-concept Agent Games for Development
 
