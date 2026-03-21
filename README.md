@@ -53,7 +53,7 @@ LFM provides a configurable pipeline of neural modules:
 
 Each module is optional and swappable. The framework trains in phases — first learning structural priors, then progressively introducing corruption pressure, morphological emergence, paraphrastic diversity, and finally agent-integrated training where meaning emerges through interaction.
 
-## Agent Games
+## Proof-of-concept Agent Games for Development
 
 LFM is developed and validated through agent-based communication games. An agent must pass information through the LFM bottleneck — the structural constraints shape the resulting language while the game provides the communication pressure that drives learning.
 
