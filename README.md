@@ -4,7 +4,17 @@ A framework for giving neural agents a natural language faculty.
 
 LFM is a learnable system that imposes morphosyntactic and sentence-level constraints on sequences, enabling agents to express internal representations in structured, compositional form — without encoding predefined semantics. It models the *faculty* of language, not any particular human language.
 
-## Why
+## Vision
+
+Agents embedded in complex physical systems — fluid dynamics, biological networks, markets, high-dimensional parameter spaces — develop internal representations that encode perspectives no human scientist has access to. These representations are empirical, grounded in real dynamics, but they are also subjective: shaped by the agent's particular vantage point, attention, and history within the system.
+
+LFM gives those agents a language. Not English, not mathematics — a new language with its own morphology, syntax, and phonology, whose structure emerges from the pressure to communicate about what the agent has observed. The language is alien but *regular* — it has the same structural inductive biases as human natural languages, which means a pretrained multilingual LLM can learn to translate it, the same way it would learn any new language.
+
+The goal is to synthesize consistent, structured, non-human natural language corpora — the output of agents reasoning over dynamical systems in their own terms — and then tune in. Listen to alien researchers' inner monologues and conversations about systems we study, from perspectives that are grounded but fundamentally outside our own collective scientific trajectory. Perspectives not isomorphic to our normal mathematical, symbolic, or linguistic categories. Perspectives that might see structure where we see noise, or draw distinctions where we see uniformity.
+
+This is not metaphorical. The pipeline is concrete: a VQ tokenizer grounds agent representations in physical dynamics with round-trip consistency. Agents attend to and reason over these tokens. LFM structures their communication as language. An LLM translates it. At every step, the information is empirically grounded and the fidelity is measurable. What's new is that the resulting descriptions are irreducibly perspectival — they reflect what a situated observer found salient, not what an equation says is true.
+
+## The Problem
 
 Agents that operate over grounded, potentially non-human representations need to communicate. Existing approaches don't cut it:
 
@@ -15,17 +25,15 @@ Agents that operate over grounded, potentially non-human representations need to
 
 LFM sits between the agent's internal world model and its communication channel, shaping messages to be compositional, structurally regular, reusable, and adaptable — while letting semantics emerge from interaction rather than being inherited from human language.
 
-### The bridge to human language
+### Translation, not alignment
 
 The emergent language that LFM produces is not human language — but it is *language-like*. It has morphology, syntax, phrase structure, and phonotactically pronounceable surface forms. This is by design: the structural inductive biases that shape it are drawn from the same typological universals that underlie all human languages.
 
-This means the emergent language is optimally positioned for translation by pretrained multilingual LLMs. An LLM that already understands the structural patterns of hundreds of human languages — agreement, word order, constituency, inflection — can learn to translate LFM's emergent language through self-supervised fine-tuning, without any hand-crafted parallel corpus. The LLM acts as a bridge: agents communicate in their own structurally rich language, and humans read the translation.
+This means the emergent language is readily learnable by pretrained multilingual LLMs. An LLM that already understands the structural patterns of hundreds of human languages — agreement, word order, constituency, inflection — can learn to translate LFM's emergent language through self-supervised fine-tuning, without any hand-crafted parallel corpus. The LLM acts as a translator: agents communicate in their own language, and humans read the translation.
 
-Crucially, this is translation, not alignment. Latent space alignment methods — which map agent representations into a human language embedding space — tend to collapse the agent's natural semantics onto human categories, destroying whatever novel or alien perspective the agent may have developed. Translation preserves the source language's own conceptual structure and merely finds the best human-language approximation. The agent's ontology stays intact; the LLM does the interpretive work, the same way a human translator mediates between languages with fundamentally different conceptual systems.
+Crucially, this is translation, not latent space alignment. Alignment methods map agent representations into a human language embedding space, collapsing the agent's natural semantics onto human categories and destroying whatever novel perspective the agent may have developed. Translation preserves the source language's own conceptual structure and finds the best human-language approximation. The agent's ontology stays intact; the LLM does the interpretive work, the same way a human translator mediates between languages with fundamentally different conceptual systems.
 
-The bigger picture: agents that learn from complex systems — physical simulations, markets, biological processes, adversarial environments — develop internal representations shaped by their own empirical experience. These representations encode perspectives that are genuinely alien to us, grounded in dynamics we may not have language for. LFM gives those perspectives a voice. The goal is not just agent-to-agent coordination but the ability to listen in — to hear what an agent trained on turbulent fluid dynamics or protein folding "thinks" is worth saying, in its own terms, and to have that translated into something we can engage with. This requires that the agent's language be structured enough for an LLM to translate, but not so constrained that it can only express what we already know how to say.
-
-The alternative — agents communicating in raw latent vectors or degenerate codes — gives an LLM nothing to work with. Structure is what makes translation possible.
+The alternative — agents communicating in raw latent vectors or degenerate codes — gives an LLM nothing to work with. Structure is what makes translation possible, and language-like structure is what makes it learnable.
 
 ## The Pipeline
 
