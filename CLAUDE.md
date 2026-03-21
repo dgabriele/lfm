@@ -11,7 +11,7 @@ LFM models the *faculty* of language, not any particular human language.
 - **Language Faculty**: A constraint layer over communication — a bias toward language-like structure, a scaffold for emergent semantics. It does NOT define meaning, ontology, or enforce alignment with human concepts.
 - **Agent Pipeline**: Grounded system -> representation (e.g. VQ-VAE codes) -> internal inference -> LFM (language faculty) -> emergent communication -> optional projection layer for human interpretation.
 - **Structural Properties**: Compositionality, morphological structure, emergent structure -- phrase-like organization arising from morphological agreement, case marking, and information-theoretic ordering -- sentence type differentiation, paraphrastic capacity.
-- **Phonotactic Constraints**: Emergent morphemes and words must be pronounceable (English-biased phonotactics by default). This is a form constraint, not a meaning constraint.
+- **Phonotactic Constraints**: Emergent morphemes and words must be pronounceable. Phonotactic constraint is achieved via implicit surface-form smoothness — a GRU-based sequential predictor, energy contour regularization, and batch diversity pressure — without encoding explicit phonological categories (vowels, consonants, sonority). This is a form constraint, not a meaning constraint.
 
 ## Design Principles
 

@@ -47,11 +47,12 @@ class SegmentationCoherenceLoss(LFMLoss):
 
 @register("loss", "pronounceability")
 class PronounceabilityLoss(LFMLoss):
-    """Penalizes phonotactically invalid (unpronounceable) word forms.
+    """Penalizes unpronounceable surface forms.
 
-    Uses the pronounceability scores from the phonology module to
-    penalize tokens that violate phonotactic constraints, encouraging
-    the system to produce pronounceable surface forms.
+    Uses the pronounceability scores from the surface phonology module
+    to penalize tokens whose surface-form sequences are not smooth —
+    encouraging the system to produce surface forms that are well-formed
+    within its own emergent phonotactic constraints.
 
     Args:
         config: Optional loss configuration.

@@ -1,9 +1,9 @@
 """Abstract base class for phonology modules.
 
 All phonology implementations must subclass ``PhonologyModule`` and implement
-the required abstract interface.  The phonology module imposes phonotactic
-constraints on discrete token representations, biasing them toward
-pronounceable forms with well-defined syllable structure.
+the required abstract interface.  The phonology module maps discrete tokens to
+continuous surface-form vectors subject to implicit phonotactic constraints
+that emerge from communication pressure.
 """
 
 from __future__ import annotations
@@ -18,24 +18,25 @@ from lfm.core.module import LFMModule
 
 
 class PhonologyModule(LFMModule):
-    """Abstract base for phonology modules.
+    """Base class for phonology modules.
 
-    A phonology module maps discrete tokens and their embeddings to
-    phoneme sequences, syllable structures, and pronounceability scores.
-    It enriches token embeddings with phonological information for use
-    by downstream morphological and syntactic modules.
+    Phonology maps discrete tokens to continuous surface-form vectors
+    subject to implicit phonotactic constraints.  No explicit phonological
+    categories (vowels, consonants, sonority hierarchies) are encoded —
+    structure emerges from smoothness, energy, and diversity pressures.
 
     Subclasses must implement:
-        - ``forward``: full phonological analysis returning phoneme sequences,
-          syllable structure, pronounceability scores, and enriched embeddings.
-        - ``to_phonemes``: mapping from discrete tokens to phoneme sequences.
+        - ``forward``: full phonological processing returning surface forms,
+          energy contour, pronounceability scores, and enriched embeddings.
+        - ``to_surface_forms``: mapping from tokens/embeddings to continuous
+          surface-form vectors.
     """
 
     output_prefix: ClassVar[str] = "phonology"
 
     @abstractmethod
     def forward(self, tokens: TokenIds, embeddings: TokenEmbeddings) -> dict[str, Tensor]:
-        """Run phonological analysis on a batch of token sequences.
+        """Run phonological processing on a batch of token sequences.
 
         Args:
             tokens: Integer token indices of shape ``(batch, seq_len)``.
@@ -45,10 +46,10 @@ class PhonologyModule(LFMModule):
         Returns:
             Dictionary with the following keys:
 
-            - ``phoneme_sequences`` — phoneme index tensor, shape
-              ``(batch, seq_len, max_phonemes)``.
-            - ``syllable_structure`` — syllable boundary indicators, shape
-              ``(batch, seq_len, max_syllables)``.
+            - ``surface_forms`` — continuous surface vectors, shape
+              ``(batch, seq_len, max_surface_len, surface_dim)``.
+            - ``energy_contour`` — scalar energy per surface position,
+              shape ``(batch, seq_len, max_surface_len)``.
             - ``pronounceability_score`` — scalar score per token, shape
               ``(batch, seq_len)``.
             - ``embeddings`` — phonologically enriched embeddings, shape
@@ -57,13 +58,16 @@ class PhonologyModule(LFMModule):
         ...
 
     @abstractmethod
-    def to_phonemes(self, tokens: TokenIds) -> Tensor:
-        """Map discrete tokens to phoneme sequences.
+    def to_surface_forms(self, tokens: TokenIds, embeddings: TokenEmbeddings) -> Tensor:
+        """Map tokens to continuous surface-form vectors.
 
         Args:
             tokens: Integer token indices of shape ``(batch, seq_len)``.
+            embeddings: Dense token embeddings of shape
+                ``(batch, seq_len, dim)``.
 
         Returns:
-            Phoneme index tensor of shape ``(batch, seq_len, max_phonemes)``.
+            Surface-form tensor of shape
+            ``(batch, seq_len, max_surface_len, surface_dim)``.
         """
         ...

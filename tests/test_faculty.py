@@ -78,4 +78,4 @@ def test_registry_populated_after_faculty():
     assert "lfq" in list_registered("quantizer")
     assert "morphological_well_formedness" in list_registered("loss")
     assert "morpheme_reuse" in list_registered("loss")
-    assert "pronounceable" in list_registered("phonology")
+    assert "surface" in list_registered("phonology")

@@ -24,7 +24,7 @@ class FacultyConfig(LFMBaseConfig):
         max_seq_len: Maximum sequence length for token sequences.
         quantizer: Quantization stage config, or ``None`` to skip.
         phonology: Phonology stage config, or ``None`` to skip.
-            Enabled by default with English phonotactic constraints.
+            Enabled by default with learnable phonotactic constraints.
         morphology: Morphology stage config, or ``None`` to skip.
         syntax: Syntax stage config, or ``None`` to skip.
         sentence: Sentence-level stage config, or ``None`` to skip.

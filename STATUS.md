@@ -38,9 +38,15 @@ Last updated: 2026-03-20
 - `metrics/base.py` — `Metric` (compute, update, result, reset)
 - All configs for each module
 
+**Phonotactic structural priors (optional pre-training):**
+- `phonology/priors.py` — Pre-train smoothness GRU on WikiPron IPA data (337 languages, PanPhon features)
+- Cross-linguistic balancing (configurable per-language cap), broad transcription preference
+- Checkpoint loads into `SurfacePhonology` via `PhonologyConfig.pretrained_smoothness_path`
+- Optional dependency: `panphon>=0.20` (in `[tool.poetry.group.phonology]`)
+
 **Registered stubs (correct class hierarchy, @register, raise NotImplementedError):**
 - Quantizers: `vqvae`, `fsq`, `lfq`
-- Phonology: `pronounceable`, `constraints`, `inventory`
+- Phonology: `surface` (implicit phonotactics via surface-form smoothness)
 - Morphology: `mdl_segmenter`, `composer`, `hierarchical`
 - Syntax: `structural_agreement`, `ordering_pressure`
 - Sentence: `type_head`, `boundary_detector`
@@ -132,7 +138,7 @@ The pipeline code exists but hasn't been run on a real corpus yet. Needs: a text
 2. **Registry/factory** — `@register("category", "name")` + `create()` for all swappable components
 3. **Frozen Pydantic configs** — immutable, `extra="forbid"`, hierarchically composable
 4. **Phase-based training** — each phase = different loss weights + frozen modules configuration
-5. **Phonology enabled by default** — English-biased phonotactics; emergent words must be pronounceable
+5. **Phonology enabled by default** — learnable phonotactics with universal constraints; emergent words must be pronounceable
 6. **Lazy registration** — concrete modules imported via `_ensure_registry()` only when LanguageFaculty is instantiated
 7. **extra_losses** — intrinsic module losses (commitment, etc.) always active, separate from phase-dependent CompositeLoss
 8. **Morphology-centric architecture** — structure emerges from morphological agreement, case marking, and information-theoretic ordering rather than being imposed by explicit grammars (e.g., Neural PCFG). Syntax provides agreement and ordering pressure; phrase-like organization is an emergent property of morphological constraints.

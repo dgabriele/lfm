@@ -4,6 +4,21 @@ A framework for giving neural agents a natural language faculty.
 
 LFM is a learnable system that imposes morphosyntactic and sentence-level constraints on sequences, enabling agents to express internal representations in structured, compositional form — without encoding predefined semantics. It models the *faculty* of language, not any particular human language.
 
+---
+
+**Contents**
+
+1. [Vision](#vision)
+2. [The Problem](#the-problem)
+3. [The Pipeline](#the-pipeline)
+4. [Approach to Phonetics](#approach-to-phonetics)
+5. [Agent Games](#proof-of-concept-agent-games-for-development)
+6. [Design](#design)
+7. [Quick Start](#quick-start)
+8. [Status](#status)
+
+---
+
 ## Vision
 
 Agents embedded in complex physical systems — fluid dynamics, biological networks, markets, high-dimensional parameter spaces — develop internal representations that encode perspectives no human scientist has access to. These representations are empirical, grounded in real dynamics, but they are also subjective: shaped by the agent's particular vantage point, attention, and history within the system.
@@ -39,19 +54,68 @@ The alternative — agents communicating in raw latent vectors or degenerate cod
 
 LFM provides a configurable pipeline of neural modules:
 
-**Quantization** — The entry point. An agent's continuous internal state — a dense vector encoding whatever it has observed, inferred, or decided — must become discrete before it can be language. The quantizer maps this continuous representation into a sequence of discrete tokens drawn from a learned codebook. This is analogous to the transition from pre-linguistic thought to the discrete units of speech. Multiple quantization strategies are supported (VQ-VAE, Finite Scalar Quantization, Lookup-Free Quantization), each with different tradeoffs between codebook utilization, training stability, and representational capacity. The codebook size and sequence length are configurable — more tokens means higher fidelity but longer utterances.
+### Quantization
 
-**Phonology** — The emergent language must be pronounceable. Without this constraint, the system would happily produce sequences of arbitrary symbols that carry information but have no phonological structure — no syllables, no rhythm, no way for a human to even attempt to say them aloud. The phonology module maps discrete tokens to phoneme-like sequences constrained by configurable phonotactic rules (onset/nucleus/coda syllable structure, sonority sequencing). By default these are biased toward English phonotactics, but the inventory and rules are configurable. This matters for the translation pipeline: a language with recognizable sound patterns is far more learnable by an LLM than an arbitrary symbol stream, and it makes the emergent language something humans can engage with directly — reading it, speaking it, developing intuitions about it.
+The entry point. An agent's continuous internal state — a dense vector encoding whatever it has observed, inferred, or decided — must become discrete before it can be language. The quantizer maps this continuous representation into a sequence of discrete tokens drawn from a learned codebook. This is analogous to the transition from pre-linguistic thought to the discrete units of speech. Multiple quantization strategies are supported (VQ-VAE, Finite Scalar Quantization, Lookup-Free Quantization), each with different tradeoffs between codebook utilization, training stability, and representational capacity. The codebook size and sequence length are configurable — more tokens means higher fidelity but longer utterances.
 
-**Morphology** — The main structural engine. Learns subword segmentation and composition, and produces learned grammatical feature vectors per token — latent dimensions shaped by communication pressure, not predefined linguistic categories. The morphology module doesn't prescribe any particular typological strategy. The emergent language might be isolating (like Mandarin — minimal morphology, structure carried by word order and particles), agglutinative (like Turkish — transparent morpheme chains), polysynthetic (like Mohawk — entire clauses packed into single words), fusional, or some hybrid with no human analogue. What emerges is determined by the communication pressure of the agent's scenario, not by the architecture.
+### Phonology
 
-**Agreement and Ordering** — Lightweight structural pressure that operates on morphological features. Learns soft agreement constraints between positions and information-theoretic ordering preferences. There is no explicit grammar — no parse trees, no constituency rules. Structure emerges from whatever combination of morphological marking and word order the system finds most effective. A scenario with limited bandwidth might favor dense morphological packing. A scenario where ordering is cheap might favor isolating structure with strict word order. The system adapts.
+The emergent language must be pronounceable. Without this constraint, the system would happily produce sequences of arbitrary symbols that carry information but have no phonological structure — no syllables, no rhythm, no way for a human to even attempt to say them aloud. The phonology module maps discrete tokens to phoneme-like sequences constrained by universal phonotactic rules (onset/nucleus/coda syllable structure, sonority sequencing) while letting the specific phoneme inventory, cluster rules, and harmony patterns emerge from training. The system might converge on a small Hawaiian-like inventory, a complex Georgian-like cluster system, or something with no human analogue — whatever communication pressure selects for. This matters for the translation pipeline: a language with recognizable sound patterns is far more learnable by an LLM than an arbitrary symbol stream, and it makes the emergent language something humans can engage with directly — reading it, speaking it, developing intuitions about it.
 
-**Sentence Structure** — Not all utterances serve the same function. Statements, questions, imperatives, and exclamations have distinct structural signatures in every human language — different word orders, particles, intonation patterns, morphological markers. The sentence module learns to differentiate these and to detect boundaries between sentences within longer sequences. This gives the emergent language discourse structure: the ability to ask and answer, to assert and qualify, to build multi-sentence narratives rather than producing an undifferentiated stream.
+### Morphology
 
-**Channel** — The communication bottleneck. Everything upstream produces a rich, structured representation; the channel compresses it into a discrete message that can be transmitted to another agent. This bottleneck is what creates the pressure for all the upstream structure — morphological economy, agreement patterns, efficient ordering all exist because the channel is finite. The channel supports differentiable discrete transmission (Gumbel-Softmax, straight-through estimation) so gradients flow back through the entire pipeline during training, and configurable noise/capacity constraints that can be tuned to create more or less pressure for compression.
+The main structural engine. Learns subword segmentation and composition, and produces learned grammatical feature vectors per token — latent dimensions shaped by communication pressure, not predefined linguistic categories. The morphology module doesn't prescribe any particular typological strategy. The emergent language might be isolating (like Mandarin — minimal morphology, structure carried by word order and particles), agglutinative (like Turkish — transparent morpheme chains), polysynthetic (like Mohawk — entire clauses packed into single words), fusional, or some hybrid with no human analogue. What emerges is determined by the communication pressure of the agent's scenario, not by the architecture.
+
+### Agreement and Ordering
+
+Lightweight structural pressure that operates on morphological features. Learns soft agreement constraints between positions and information-theoretic ordering preferences. There is no explicit grammar — no parse trees, no constituency rules. Structure emerges from whatever combination of morphological marking and word order the system finds most effective. A scenario with limited bandwidth might favor dense morphological packing. A scenario where ordering is cheap might favor isolating structure with strict word order. The system adapts.
+
+### Sentence Structure
+
+Not all utterances serve the same function. Statements, questions, imperatives, and exclamations have distinct structural signatures in every human language — different word orders, particles, intonation patterns, morphological markers. The sentence module learns to differentiate these and to detect boundaries between sentences within longer sequences. This gives the emergent language discourse structure: the ability to ask and answer, to assert and qualify, to build multi-sentence narratives rather than producing an undifferentiated stream.
+
+### Channel
+
+The communication bottleneck. Everything upstream produces a rich, structured representation; the channel compresses it into a discrete message that can be transmitted to another agent. This bottleneck is what creates the pressure for all the upstream structure — morphological economy, agreement patterns, efficient ordering all exist because the channel is finite. The channel supports differentiable discrete transmission (Gumbel-Softmax, straight-through estimation) so gradients flow back through the entire pipeline during training, and configurable noise/capacity constraints that can be tuned to create more or less pressure for compression.
+
+### Training Phases
 
 Each module is optional and swappable. The framework trains in phases — first learning structural priors from multilingual LLM latents (not just English, but diverse language families — SOV, agglutinative, fusional, polysynthetic — giving LFM the flexibility to adapt its structural strategy to whatever a particular agent scenario demands), then progressively introducing corruption pressure, morphological emergence, paraphrastic diversity, and finally agent-integrated training where meaning emerges through interaction.
+
+## Approach to Phonetics
+
+LFM's phonology module doesn't encode explicit phonological categories. There are no vowels, no consonants, no sonority hierarchy — just a GRU that predicts each surface vector from preceding ones, where prediction error equals pronounceability penalty. Smooth, predictable sequences are "pronounceable"; erratic ones are not. The specific inventory and phonotactic patterns emerge from communication pressure.
+
+But a randomly initialized GRU has no idea what "pronounceable" means. This is where **phonotactic structural priors** come in.
+
+### Cross-linguistic pre-training
+
+The smoothness GRU is pre-trained on real pronunciation data from [WikiPron](https://github.com/CUNY-CL/wikipron) — 3.1 million word/pronunciation pairs across 337 languages — converted to articulatory feature vectors via [PanPhon](https://github.com/dmort27/panphon). Each IPA segment becomes a vector of articulatory features (voicing, place, manner, etc.), and the pre-training task is identical to the runtime task: predict the next articulatory vector from the preceding ones.
+
+```
+WikiPron TSV (word -> IPA, per language)
+  -> PanPhon articulatory features (24-dim, values in {-1, 0, +1})
+    -> Learned projection to surface_dim
+      -> GRU next-step prediction (MSE loss)
+        -> Checkpoint: smoothness_gru + smoothness_head weights
+```
+
+After pre-training, the GRU has learned cross-linguistic phonotactic patterns: that stops tend to precede vowels, that certain cluster types are universally rare, that syllable-like rhythms are the norm. These patterns transfer directly to the pipeline because the architecture and loss function are identical.
+
+### Why this works
+
+| Concern | How it's addressed |
+|---|---|
+| **Typological bias** | WikiPron over-represents Indo-European; per-language sample caps (default 5,000) enforce balance across all 337 languages |
+| **Phonemic vs. phonetic** | Broad (phonemic) transcriptions preferred — we want phonotactic patterns, not allophonic detail |
+| **Dimension mismatch** | A learned linear projection maps PanPhon features into the module's `surface_dim` space; the GRU and prediction head operate entirely in `surface_dim`, so they load directly with no mismatch |
+| **Backward compatibility** | Pre-training is optional — `pretrained_smoothness_path=None` (the default) means random init, identical to previous behavior |
+
+### What the GRU learns vs. what it doesn't
+
+The pre-trained GRU learns **distributional phonotactic universals** — sequential constraints on articulatory features that hold across human languages. It does *not* learn any specific language's phoneme inventory, phonological rules, or morphophonemic alternations. The emergent language is free to develop its own sound system; the prior just ensures that system starts in a region of phonotactic space that humans would recognize as language-like rather than random noise.
+
+This is analogous to how a child's auditory system is pre-tuned to speech-like sounds before learning any specific language. The structural prior is a bias toward *language-likeness*, not toward any particular language.
 
 ## Proof-of-concept Agent Games for Development
 
@@ -90,6 +154,31 @@ from lfm import LanguageFaculty, FacultyConfig, QuantizationConfig
 faculty = LanguageFaculty(FacultyConfig(
     dim=256,
     quantizer=QuantizationConfig(name="vqvae", codebook_size=1024),
+))
+```
+
+Pre-train phonotactic priors (optional, requires `panphon`):
+
+```bash
+poetry install --with phonology
+```
+
+```python
+from lfm.phonology.priors import pretrain_phonotactic_prior, PhonotacticPriorConfig
+
+metrics = pretrain_phonotactic_prior(PhonotacticPriorConfig(
+    wikipron_dir="path/to/wikipron/data/scrape/tsv",
+    surface_dim=12,
+    smoothness_hidden_dim=32,
+))
+
+# Then use in the pipeline:
+from lfm.phonology import PhonologyConfig
+
+faculty = LanguageFaculty(FacultyConfig(
+    phonology=PhonologyConfig(
+        pretrained_smoothness_path="data/phonotactic_prior.pt",
+    ),
 ))
 ```
 
