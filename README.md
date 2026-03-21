@@ -16,7 +16,7 @@ This is not metaphorical. The pipeline is concrete: a VQ tokenizer grounds agent
 
 ## The Problem
 
-Agents that operate over grounded, potentially non-human representations need to communicate. Existing approaches don't cut it:
+Agents that operate over grounded, potentially non-human representations need to communicate. Existing approaches have problems that collectively motivate the creation of LFM:
 
 - **Natural language** imposes human ontology and semantic bias
 - **Latent vector communication** lacks structure and interpretability
