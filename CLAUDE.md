@@ -10,7 +10,7 @@ LFM models the *faculty* of language, not any particular human language.
 
 - **Language Faculty**: A constraint layer over communication — a bias toward language-like structure, a scaffold for emergent semantics. It does NOT define meaning, ontology, or enforce alignment with human concepts.
 - **Agent Pipeline**: Grounded system -> representation (e.g. VQ-VAE codes) -> internal inference -> LFM (language faculty) -> emergent communication -> optional projection layer for human interpretation.
-- **Structural Properties**: Compositionality, morphological structure, hierarchical syntax, sentence type differentiation, paraphrastic capacity.
+- **Structural Properties**: Compositionality, morphological structure, emergent structure -- phrase-like organization arising from morphological agreement, case marking, and information-theoretic ordering -- sentence type differentiation, paraphrastic capacity.
 - **Phonotactic Constraints**: Emergent morphemes and words must be pronounceable (English-biased phonotactics by default). This is a form constraint, not a meaning constraint.
 
 ## Design Principles
@@ -38,6 +38,8 @@ LFM models the *faculty* of language, not any particular human language.
 AgentState -> Quantizer -> Phonology -> Morphology -> Syntax -> Sentence -> Channel -> Message
 ```
 
+Syntax provides structural agreement and ordering pressure -- phrase structure emerges from morphological constraints rather than being imposed by explicit grammars.
+
 Each stage is optional (set config to None to skip). Phonology is enabled by default.
 
 ### Package Structure
@@ -51,7 +53,7 @@ src/lfm/
   quantization/         # Quantizer ABC + VQ-VAE, FSQ, LFQ implementations
   phonology/            # PhonologyModule ABC + pronounceability scorer, phonotactics
   morphology/           # MorphologyModule ABC + MDL segmenter, composer, tree tokenizer
-  syntax/               # SyntaxModule ABC + Neural PCFG, structural attention, ordered neurons
+  syntax/               # SyntaxModule ABC + structural agreement, ordering pressure
   sentence/             # SentenceModule ABC + type head, boundary detector
   channel/              # Channel ABC + straight-through, Gumbel-softmax, noisy channel
   losses/               # Structural, compositionality, information, diversity, morphological losses

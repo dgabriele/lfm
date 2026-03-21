@@ -42,10 +42,10 @@ Last updated: 2026-03-20
 - Quantizers: `vqvae`, `fsq`, `lfq`
 - Phonology: `pronounceable`, `constraints`, `inventory`
 - Morphology: `mdl_segmenter`, `composer`, `hierarchical`
-- Syntax: `neural_pcfg`, `structural_attention`, `ordered_neurons`
+- Syntax: `structural_agreement`, `ordering_pressure`
 - Sentence: `type_head`, `boundary_detector`
 - Channel: `gumbel`, `straight_through`, `noisy`
-- Losses: `tree_consistency`, `well_formedness`, `morpheme_reuse`, `productive_combination`, `codebook_utilization`, `entropy_regularization`, `paraphrastic_diversity`, `anti_collapse`, `segmentation_coherence`, `pronounceability`
+- Losses: `agreement_consistency`, `morphological_well_formedness`, `ordering_regularity`, `case_marking_pressure`, `morpheme_reuse`, `productive_combination`, `codebook_utilization`, `entropy_regularization`, `paraphrastic_diversity`, `anti_collapse`, `segmentation_coherence`, `pronounceability`
 - Metrics: 11 metric classes across compositionality, structural, information, expressivity, non-isomorphism
 - Data: `CorpusDataset`, `MultilingualCorpusDataset`, `AgentDataset`, `variable_length_collate`
 - Training phases: `structural_priors`, `corruption`, `morphological_emergence`, `paraphrastic`, `agent_integration`
@@ -102,7 +102,7 @@ Last updated: 2026-03-20
 ## What Does NOT Exist Yet
 
 ### No concrete neural implementations for LFM pipeline modules
-Every module's `forward()` raises NotImplementedError. No actual VQ-VAE, no PCFG, no morphology algorithms, no phonotactic scoring — just interfaces. Both game systems (scene-based and embedding-based) are fully wired but can't run end-to-end until these are implemented.
+Every module's `forward()` raises NotImplementedError. No actual VQ-VAE, no morphology algorithms, no agreement/ordering modules, no phonotactic scoring -- just interfaces. Both game systems (scene-based and embedding-based) are fully wired but can't run end-to-end until these are implemented.
 
 ### No precomputed embedding store
 The pipeline code exists but hasn't been run on a real corpus yet. Needs: a text corpus, GPU time for encoding, and disk space for the store.
@@ -123,7 +123,7 @@ The pipeline code exists but hasn't been run on a real corpus yet. Needs: a text
 ### Priority 3: Remaining modules (driven by game results)
 - Phonology (pronounceability)
 - MDL morphological segmenter
-- Neural PCFG syntax
+- Syntax: agreement and ordering pressure modules
 - Remaining losses and metrics
 
 ## Key Design Decisions Made
@@ -135,3 +135,4 @@ The pipeline code exists but hasn't been run on a real corpus yet. Needs: a text
 5. **Phonology enabled by default** — English-biased phonotactics; emergent words must be pronounceable
 6. **Lazy registration** — concrete modules imported via `_ensure_registry()` only when LanguageFaculty is instantiated
 7. **extra_losses** — intrinsic module losses (commitment, etc.) always active, separate from phase-dependent CompositeLoss
+8. **Morphology-centric architecture** — structure emerges from morphological agreement, case marking, and information-theoretic ordering rather than being imposed by explicit grammars (e.g., Neural PCFG). Syntax provides agreement and ordering pressure; phrase-like organization is an emergent property of morphological constraints.

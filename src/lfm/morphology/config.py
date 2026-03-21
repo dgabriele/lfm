@@ -18,6 +18,8 @@ class MorphologyConfig(LFMBaseConfig):
         morpheme_dim: Dimensionality of each morpheme embedding.
         min_morpheme_len: Minimum length of a single morpheme segment.
         max_morpheme_len: Maximum length of a single morpheme segment.
+        num_grammatical_features: Number of learned latent grammatical feature
+            dimensions.
     """
 
     name: str = "mdl_segmenter"
@@ -25,3 +27,4 @@ class MorphologyConfig(LFMBaseConfig):
     morpheme_dim: int = 32
     min_morpheme_len: int = 1
     max_morpheme_len: int = 8
+    num_grammatical_features: int = 16

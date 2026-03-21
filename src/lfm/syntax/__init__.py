@@ -1,7 +1,15 @@
 """Syntax subsystem for the LFM framework.
 
 Provides the abstract ``SyntaxModule`` base class and ``SyntaxConfig``
-for inducing hierarchical constituency structure over token sequences.
+for learning structural agreement and ordering constraints over token
+sequences. Phrase structure emerges from morphological agreement and
+information-theoretic ordering pressures rather than explicit grammar
+induction.
+
+Implementations:
+    - ``agreement`` -- soft agreement constraints via multi-head attention
+    - ``morphological_attention`` -- attention biased by feature similarity
+    - ``ordering_pressure`` -- information-theoretic ordering scores
 """
 
 from __future__ import annotations

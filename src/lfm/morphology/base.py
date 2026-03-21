@@ -53,6 +53,9 @@ class MorphologyModule(LFMModule):
               ``(batch, seq_len, dim)``.
             - ``segment_log_probs`` — log-probabilities of segmentation
               decisions, shape ``(batch, seq_len)``.
+            - ``grammatical_features`` — learned latent grammatical
+              categories per token (emergent case, number, tense, aspect,
+              etc.), shape ``(batch, seq_len, num_features)``.
         """
         ...
 

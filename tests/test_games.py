@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 
 from lfm.games.config import (
     ReconstructionGameConfig,
@@ -12,11 +12,10 @@ from lfm.games.config import (
     SceneDecoderConfig,
     SceneEncoderConfig,
 )
-from lfm.games.scenes import SceneGenerator
-from lfm.games.encoder import SceneEncoder, SceneDecoder, MessagePooler
+from lfm.games.encoder import MessagePooler, SceneDecoder, SceneEncoder
 from lfm.games.reconstruction import ReconstructionGame
 from lfm.games.referential import ReferentialGame
-
+from lfm.games.scenes import SceneGenerator
 
 # -- Scene generation --
 
@@ -120,9 +119,11 @@ def test_message_pooler():
 
 def test_reconstruction_game_encode():
     """ReconstructionGame.encode_scene returns correct shape."""
-    game = ReconstructionGame(ReconstructionGameConfig(
-        encoder=SceneEncoderConfig(output_dim=128),
-    ))
+    game = ReconstructionGame(
+        ReconstructionGameConfig(
+            encoder=SceneEncoderConfig(output_dim=128),
+        )
+    )
     gen = SceneGenerator(SceneConfig(), device="cpu")
     scene = gen.generate(8)
     agent_state = game.encode_scene(scene)
@@ -131,9 +132,11 @@ def test_reconstruction_game_encode():
 
 def test_referential_game_encode():
     """ReferentialGame.encode_target returns correct shape."""
-    game = ReferentialGame(ReferentialGameConfig(
-        encoder=SceneEncoderConfig(output_dim=128),
-    ))
+    game = ReferentialGame(
+        ReferentialGameConfig(
+            encoder=SceneEncoderConfig(output_dim=128),
+        )
+    )
     gen = SceneGenerator(SceneConfig(), device="cpu")
     scene = gen.generate(8)
     agent_state = game.encode_target(scene)

@@ -1,56 +1,55 @@
-"""Structural attention masking module.
+"""Morphological attention module.
 
-Implements Transformer Grammars-style structural attention masking,
-where the attention pattern is constrained to follow the syntactic
-structure induced over the input sequence.
+Implements attention biased by morphological feature similarity. Tokens with
+compatible grammatical features attend more strongly to each other, creating
+implicit phrase structure: words that share case marking, number, or other
+features form natural groups without explicit constituency parsing.
 """
 
 from __future__ import annotations
 
-from torch import Tensor, nn
+from torch import Tensor
 
 from lfm._registry import register
-from lfm._types import Mask, TokenEmbeddings
+from lfm._types import GrammaticalFeatures, Mask, TokenEmbeddings
 from lfm.syntax.base import SyntaxModule
 from lfm.syntax.config import SyntaxConfig
 
 
-@register("syntax", "structural_attention")
-class StructuralAttentionMask(SyntaxModule):
-    """Transformer Grammars-style structural attention masking.
+@register("syntax", "morphological_attention")
+class MorphologicalAttention(SyntaxModule):
+    """Attention biased by morphological feature similarity.
 
-    Produces attention masks that enforce syntactic locality: tokens can
-    only attend to other tokens within the same syntactic constituent
-    or to constituents that are structurally adjacent.  This biases the
-    model toward learning hierarchically structured representations.
+    Tokens with compatible grammatical features attend more strongly to
+    each other. This creates implicit phrase structure: words that share
+    case marking, number, or other features form natural groups without
+    explicit constituency parsing.
 
     Args:
-        config: Syntax configuration specifying grammar size and latent
+        config: Syntax configuration specifying agreement heads and latent
             dimensionality.
     """
 
     def __init__(self, config: SyntaxConfig) -> None:
         super().__init__(config)
+        # Placeholder layers for future implementation
 
-        self.latent_dim = config.latent_dim
-
-        # Placeholder layer for computing structural scores
-        self.structure_proj = nn.Linear(config.latent_dim, config.latent_dim)
-
-    # ------------------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------------------
-
-    def forward(self, embeddings: TokenEmbeddings, mask: Mask) -> dict[str, Tensor]:
-        """Compute structural attention masks from token embeddings.
+    def forward(
+        self,
+        embeddings: TokenEmbeddings,
+        mask: Mask,
+        grammatical_features: GrammaticalFeatures | None = None,
+    ) -> dict[str, Tensor]:
+        """Compute attention scores biased by morphological feature similarity.
 
         Args:
-            embeddings: Dense token embeddings of shape
-                ``(batch, seq_len, dim)``.
-            mask: Boolean padding mask of shape ``(batch, seq_len)``.
+            embeddings: Token embeddings, shape (batch, seq_len, dim).
+            mask: Boolean padding mask, shape (batch, seq_len).
+            grammatical_features: Optional morphological feature vectors,
+                shape (batch, seq_len, num_features).
 
         Returns:
-            Dictionary with tree log-probabilities, attention mask,
-            constituent representations, and parse depth.
+            Dictionary with agreement_scores, ordering_scores, and
+            structural_features.
         """
-        raise NotImplementedError("StructuralAttentionMask.forward() not yet implemented")
+        raise NotImplementedError("MorphologicalAttention.forward() not yet implemented")

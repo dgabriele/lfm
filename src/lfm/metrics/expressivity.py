@@ -1,7 +1,7 @@
 """Expressivity metrics.
 
 Metrics for evaluating the expressive capacity of the emergent language,
-including structural diversity and effective vocabulary size.
+including morpheme segmentation diversity and effective vocabulary size.
 """
 
 from __future__ import annotations
@@ -11,27 +11,27 @@ from torch import Tensor
 from lfm.metrics.base import Metric
 
 
-class UniqueStructuresMetric(Metric):
-    """Number of distinct structural patterns produced.
+class UniqueSegmentationsMetric(Metric):
+    """Number of distinct morpheme segmentation patterns produced.
 
-    Counts the number of unique parse tree structures induced across
-    a batch of inputs.  Higher counts indicate greater structural
-    diversity in the emergent language.
+    Measures the diversity of structural expression -- more unique
+    segmentations indicate the language has more ways to compose
+    its morphemes.
     """
 
     def __init__(self) -> None:
-        super().__init__("unique_structures")
+        super().__init__("unique_segmentations")
 
     def compute(self, outputs: dict[str, Tensor]) -> float:
-        """Count unique structural patterns in a batch.
+        """Count unique segmentation patterns in a batch.
 
         Args:
-            outputs: Pipeline output dictionary containing syntax outputs.
+            outputs: Pipeline output dictionary containing morphology outputs.
 
         Returns:
-            Number of distinct structures (as a float for API consistency).
+            Number of distinct segmentations (as a float for API consistency).
         """
-        raise NotImplementedError("UniqueStructuresMetric.compute() not yet implemented")
+        raise NotImplementedError("UniqueSegmentationsMetric.compute() not yet implemented")
 
 
 class VocabularySizeMetric(Metric):

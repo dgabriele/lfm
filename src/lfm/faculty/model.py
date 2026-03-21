@@ -34,7 +34,7 @@ _CONCRETE_MODULES: list[str] = [
     "lfm.morphology.segmenter",
     "lfm.morphology.composer",
     "lfm.morphology.tree",
-    "lfm.syntax.pcfg",
+    "lfm.syntax.agreement",
     "lfm.syntax.attention",
     "lfm.syntax.ordering",
     "lfm.sentence.typing",
@@ -273,7 +273,8 @@ class LanguageFaculty(nn.Module):
         # ---- Syntax ------------------------------------------------------
         assert mask is not None  # guaranteed by quantizer or fallback above
         if self.syntax is not None and embeddings is not None:
-            sx_out = self.syntax(embeddings, mask)
+            gram_feats = outputs.get("morphology.grammatical_features")
+            sx_out = self.syntax(embeddings, mask, grammatical_features=gram_feats)
             self._merge(outputs, self.syntax.output_prefix, sx_out)
 
         # ---- Sentence ----------------------------------------------------

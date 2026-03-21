@@ -26,5 +26,5 @@ Logits: TypeAlias = Tensor
 Mask: TypeAlias = Tensor
 """Boolean attention/padding mask — shape ``(batch, seq_len)``, dtype ``bool``."""
 
-TreeLogProbs: TypeAlias = Tensor
-"""Log-probability of a parse tree — shape ``(batch,)``."""
+GrammaticalFeatures: TypeAlias = Tensor
+"""Learned latent grammatical categories per token — shape ``(batch, seq_len, num_features)``."""

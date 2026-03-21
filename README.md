@@ -29,7 +29,7 @@ LFM sits between the agent's internal world model and its communication channel,
 
 The emergent language that LFM produces is not human language — but it is *language-like*. It has morphology, syntax, phrase structure, and phonotactically pronounceable surface forms. This is by design: the structural inductive biases that shape it are drawn from the same typological universals that underlie all human languages.
 
-This means the emergent language is readily learnable by pretrained multilingual LLMs. An LLM that already understands the structural patterns of hundreds of human languages — agreement, word order, constituency, inflection — can learn to translate LFM's emergent language through self-supervised fine-tuning, without any hand-crafted parallel corpus. The LLM acts as a translator: agents communicate in their own language, and humans read the translation.
+This means the emergent language is readily learnable by pretrained multilingual LLMs. An LLM that already understands the structural patterns of hundreds of human languages — agreement, word order, morphological case, inflection — can learn to translate LFM's emergent language through self-supervised fine-tuning, without any hand-crafted parallel corpus. The LLM acts as a translator: agents communicate in their own language, and humans read the translation.
 
 Crucially, this is translation, not latent space alignment. Alignment methods map agent representations into a human language embedding space, collapsing the agent's natural semantics onto human categories and destroying whatever novel perspective the agent may have developed. Translation preserves the source language's own conceptual structure and finds the best human-language approximation. The agent's ontology stays intact; the LLM does the interpretive work, the same way a human translator mediates between languages with fundamentally different conceptual systems.
 
@@ -45,7 +45,7 @@ LFM provides a configurable pipeline of neural modules:
 
 **Morphology** — Learns subword structure (prefixes, stems, suffixes) with productive recombination
 
-**Syntax** — Induces hierarchical phrase structure via neural grammar induction
+**Syntax** — Structural agreement and ordering pressure -- phrase structure emerges from morphological constraints rather than being imposed by explicit grammars
 
 **Sentence Structure** — Differentiates sentence types and detects boundaries
 
@@ -85,18 +85,17 @@ poetry install
 ```
 
 ```python
-from lfm import LanguageFaculty, FacultyConfig, QuantizationConfig, SyntaxConfig
+from lfm import LanguageFaculty, FacultyConfig, QuantizationConfig
 
 faculty = LanguageFaculty(FacultyConfig(
     dim=256,
     quantizer=QuantizationConfig(name="vqvae", codebook_size=1024),
-    syntax=SyntaxConfig(name="neural_pcfg"),
 ))
 ```
 
 ## Status
 
-The architectural scaffold and agent game infrastructure are in place. Next: implementing the concrete neural modules (VQ-VAE, Gumbel channel, Neural PCFG) to enable end-to-end training runs.
+The architectural scaffold and agent game infrastructure are in place. Next: implementing the concrete neural modules (VQ-VAE, Gumbel channel, morphological agreement/ordering) to enable end-to-end training runs.
 
 ## License
 

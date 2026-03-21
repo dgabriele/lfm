@@ -1,59 +1,58 @@
-"""Ordered Neurons module.
+"""Information-theoretic ordering pressure module.
 
-Implements ON-LSTM-style ordered neuron integration for implicit syntactic
-hierarchy.  Neuron activations are ordered so that higher-level (more
-slowly changing) syntactic constituents are represented by higher-indexed
-neurons, providing an implicit tree structure without explicit parsing.
+Learns to score token positions by information content, encouraging consistent
+ordering strategies (e.g., high-information tokens first, topic-comment
+structure, given-new ordering). This replaces explicit word-order rules with
+a learned soft preference that adapts to the agent's communication pressures.
 """
 
 from __future__ import annotations
 
-from torch import Tensor, nn
+from torch import Tensor
 
 from lfm._registry import register
-from lfm._types import Mask, TokenEmbeddings
+from lfm._types import GrammaticalFeatures, Mask, TokenEmbeddings
 from lfm.syntax.base import SyntaxModule
 from lfm.syntax.config import SyntaxConfig
 
 
-@register("syntax", "ordered_neurons")
-class OrderedNeurons(SyntaxModule):
-    """ON-LSTM-style ordered neuron integration for implicit hierarchy.
+@register("syntax", "ordering_pressure")
+class OrderingPressure(SyntaxModule):
+    """Information-theoretic ordering pressure.
 
-    Uses ordered neuron gates (master forget and master input gates with
-    cumulative softmax) to enforce a hierarchy among hidden dimensions.
-    Lower-indexed neurons encode short-range (leaf-level) information
-    while higher-indexed neurons encode long-range (phrase/sentence-level)
-    structure.
+    Learns to score token positions by information content, encouraging
+    consistent ordering strategies (e.g., high-information tokens first,
+    topic-comment structure, given-new ordering).
+
+    This replaces explicit word-order rules with a learned soft preference
+    that adapts to the agent's communication pressures.
 
     Args:
-        config: Syntax configuration specifying grammar size and latent
-            dimensionality.
+        config: Syntax configuration specifying ordering temperature and
+            latent dimensionality.
     """
 
     def __init__(self, config: SyntaxConfig) -> None:
         super().__init__(config)
+        self._temperature = config.ordering_temperature
+        # Placeholder layers for future implementation
 
-        self.latent_dim = config.latent_dim
-
-        # Placeholder layers for ordered neuron gates
-        self.master_forget = nn.Linear(config.latent_dim, config.latent_dim)
-        self.master_input = nn.Linear(config.latent_dim, config.latent_dim)
-
-    # ------------------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------------------
-
-    def forward(self, embeddings: TokenEmbeddings, mask: Mask) -> dict[str, Tensor]:
-        """Compute implicit hierarchical structure via ordered neurons.
+    def forward(
+        self,
+        embeddings: TokenEmbeddings,
+        mask: Mask,
+        grammatical_features: GrammaticalFeatures | None = None,
+    ) -> dict[str, Tensor]:
+        """Compute ordering pressure scores for token positions.
 
         Args:
-            embeddings: Dense token embeddings of shape
-                ``(batch, seq_len, dim)``.
-            mask: Boolean padding mask of shape ``(batch, seq_len)``.
+            embeddings: Token embeddings, shape (batch, seq_len, dim).
+            mask: Boolean padding mask, shape (batch, seq_len).
+            grammatical_features: Optional morphological feature vectors,
+                shape (batch, seq_len, num_features).
 
         Returns:
-            Dictionary with tree log-probabilities, attention mask,
-            constituent representations, and parse depth.
+            Dictionary with agreement_scores, ordering_scores, and
+            structural_features.
         """
-        raise NotImplementedError("OrderedNeurons.forward() not yet implemented")
+        raise NotImplementedError("OrderingPressure.forward() not yet implemented")

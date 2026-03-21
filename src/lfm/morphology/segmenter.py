@@ -63,6 +63,7 @@ class MDLSegmenter(MorphologyModule):
 
         Returns:
             Dictionary with segments, segment mask, composed embeddings,
-            and segment log-probabilities.
+            segment log-probabilities, and grammatical_features (learned
+            latent grammatical categories per token).
         """
         raise NotImplementedError("MDLSegmenter.forward() not yet implemented")

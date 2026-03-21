@@ -1,7 +1,8 @@
 """Structural metrics.
 
-Metrics for evaluating the structural properties of induced parse trees,
-including depth, branching factor, and consistency.
+Metrics for evaluating the morphological structure of emergent language,
+including morpheme nesting depth, morpheme variety, agreement consistency,
+and ordering regularity.
 """
 
 from __future__ import annotations
@@ -11,69 +12,89 @@ from torch import Tensor
 from lfm.metrics.base import Metric
 
 
-class TreeDepthMetric(Metric):
-    """Average depth of induced parse trees.
+class MorphemeNestingDepth(Metric):
+    """Average nesting depth of morpheme hierarchy per token.
 
-    Computes the mean depth of parse trees induced by the syntax module
-    across a batch.  Deeper trees indicate more hierarchical structure.
+    Measures how deeply nested the morphological structure is -- tokens
+    with more morpheme levels indicate richer morphological composition.
     """
 
     def __init__(self) -> None:
-        super().__init__("tree_depth")
+        super().__init__("morpheme_nesting_depth")
 
     def compute(self, outputs: dict[str, Tensor]) -> float:
-        """Compute average tree depth for a batch.
+        """Compute average morpheme nesting depth for a batch.
 
         Args:
-            outputs: Pipeline output dictionary containing syntax outputs
-                with a ``depth`` key.
+            outputs: Pipeline output dictionary containing morphology outputs.
 
         Returns:
-            Scalar average tree depth.
+            Scalar average nesting depth.
         """
-        raise NotImplementedError("TreeDepthMetric.compute() not yet implemented")
+        raise NotImplementedError("MorphemeNestingDepth.compute() not yet implemented")
 
 
-class BranchingFactorMetric(Metric):
-    """Average branching factor of induced parse trees.
+class MorphemeVariety(Metric):
+    """Diversity of the morpheme inventory.
 
-    Computes the mean branching factor (average number of children per
-    internal node) of the induced parse trees.
+    Measures the effective vocabulary size of morphemes -- higher variety
+    indicates a richer morphological system with more distinct units.
     """
 
     def __init__(self) -> None:
-        super().__init__("branching_factor")
+        super().__init__("morpheme_variety")
 
     def compute(self, outputs: dict[str, Tensor]) -> float:
-        """Compute average branching factor for a batch.
+        """Compute morpheme variety for a batch.
+
+        Args:
+            outputs: Pipeline output dictionary containing morphology outputs.
+
+        Returns:
+            Scalar morpheme variety value.
+        """
+        raise NotImplementedError("MorphemeVariety.compute() not yet implemented")
+
+
+class AgreementConsistencyMetric(Metric):
+    """Measures how consistently morphological features agree at related positions.
+
+    High consistency indicates the language has developed reliable
+    agreement patterns (like case or number agreement).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("agreement_consistency")
+
+    def compute(self, outputs: dict[str, Tensor]) -> float:
+        """Compute agreement consistency for a batch.
+
+        Args:
+            outputs: Pipeline output dictionary containing syntax and
+                morphology outputs.
+
+        Returns:
+            Scalar agreement consistency value.
+        """
+        raise NotImplementedError("AgreementConsistencyMetric.compute() not yet implemented")
+
+
+class OrderingRegularityMetric(Metric):
+    """Measures consistency of token ordering across different inputs.
+
+    High regularity indicates stable word-order patterns have emerged.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("ordering_regularity")
+
+    def compute(self, outputs: dict[str, Tensor]) -> float:
+        """Compute ordering regularity for a batch.
 
         Args:
             outputs: Pipeline output dictionary containing syntax outputs.
 
         Returns:
-            Scalar average branching factor.
+            Scalar ordering regularity value.
         """
-        raise NotImplementedError("BranchingFactorMetric.compute() not yet implemented")
-
-
-class StructuralConsistencyMetric(Metric):
-    """Consistency of structural patterns across different inputs.
-
-    Measures how consistently the model applies the same structural
-    patterns to inputs that share relevant features, indicating whether
-    the induced grammar is systematic rather than arbitrary.
-    """
-
-    def __init__(self) -> None:
-        super().__init__("structural_consistency")
-
-    def compute(self, outputs: dict[str, Tensor]) -> float:
-        """Compute structural consistency for a batch.
-
-        Args:
-            outputs: Pipeline output dictionary containing syntax outputs.
-
-        Returns:
-            Scalar structural consistency value.
-        """
-        raise NotImplementedError("StructuralConsistencyMetric.compute() not yet implemented")
+        raise NotImplementedError("OrderingRegularityMetric.compute() not yet implemented")
