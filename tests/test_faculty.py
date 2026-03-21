@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+import torch
+
 from lfm import list_registered
 from lfm.faculty.config import FacultyConfig
 from lfm.faculty.model import LanguageFaculty
@@ -79,3 +82,75 @@ def test_registry_populated_after_faculty():
     assert "morphological_well_formedness" in list_registered("loss")
     assert "morpheme_reuse" in list_registered("loss")
     assert "surface" in list_registered("phonology")
+
+
+# -- Pre-tokenized path tests -----------------------------------------------
+
+
+def test_faculty_pretokenized_forward():
+    """Pre-tokenized (tokens, embeddings) bypass quantizer."""
+    fc = FacultyConfig(dim=64, quantizer=None, phonology=None)
+    faculty = LanguageFaculty(fc)
+    tokens = torch.randint(0, 100, (2, 10))
+    embeddings = torch.randn(2, 10, 64)
+    out = faculty(tokens=tokens, embeddings=embeddings)
+    assert "pretokenized.tokens" in out
+    assert "pretokenized.embeddings" in out
+    assert "quantization.tokens" not in out
+
+
+def test_faculty_pretokenized_dim_projection():
+    """Pre-tokenized embeddings projected when pretokenized_dim set."""
+    fc = FacultyConfig(dim=64, pretokenized_dim=32, quantizer=None, phonology=None)
+    faculty = LanguageFaculty(fc)
+    tokens = torch.randint(0, 100, (2, 10))
+    embeddings = torch.randn(2, 10, 32)
+    out = faculty(tokens=tokens, embeddings=embeddings)
+    assert "pretokenized.embeddings" in out
+
+
+def test_faculty_pretokenized_rejects_both():
+    """ValueError when both agent_state and tokens provided."""
+    fc = FacultyConfig(dim=64, quantizer=None, phonology=None)
+    faculty = LanguageFaculty(fc)
+    with pytest.raises(ValueError, match="not both"):
+        faculty(
+            agent_state=torch.randn(2, 64),
+            tokens=torch.randint(0, 10, (2, 5)),
+            embeddings=torch.randn(2, 5, 64),
+        )
+
+
+def test_faculty_pretokenized_rejects_partial():
+    """ValueError when only tokens or only embeddings provided."""
+    fc = FacultyConfig(dim=64, quantizer=None, phonology=None)
+    faculty = LanguageFaculty(fc)
+    with pytest.raises(ValueError, match="both tokens and embeddings"):
+        faculty(tokens=torch.randint(0, 10, (2, 5)))
+
+
+def test_faculty_pretokenized_rejects_dim_mismatch():
+    """ValueError on dim mismatch without pretokenized_dim configured."""
+    fc = FacultyConfig(dim=64, quantizer=None, phonology=None)
+    faculty = LanguageFaculty(fc)
+    with pytest.raises(ValueError, match="pretokenized_dim"):
+        faculty(tokens=torch.randint(0, 10, (2, 5)), embeddings=torch.randn(2, 5, 32))
+
+
+def test_faculty_pretokenized_with_phonology():
+    """Pre-tokenized input flows through phonology."""
+    fc = FacultyConfig(dim=64, quantizer=None)  # phonology on by default
+    faculty = LanguageFaculty(fc)
+    tokens = torch.randint(0, 100, (2, 10))
+    embeddings = torch.randn(2, 10, 64)
+    out = faculty(tokens=tokens, embeddings=embeddings)
+    assert "phonology.surface_forms" in out
+    assert "phonology.pronounceability_score" in out
+
+
+def test_faculty_agent_state_still_works():
+    """Existing agent_state path unaffected by new signature."""
+    fc = FacultyConfig(dim=64, pretokenized_dim=32, quantizer=None)
+    faculty = LanguageFaculty(fc)
+    out = faculty(torch.randn(2, 64))  # positional, as before
+    assert "phonology.surface_forms" in out

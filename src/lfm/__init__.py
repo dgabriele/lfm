@@ -17,6 +17,7 @@ __version__ = "0.1.0"
 
 # --- Core abstractions ---
 from lfm._registry import create, list_registered, register
+from lfm._types import TokenBridge, TokenBridgeOutput
 
 # --- Configs ---
 from lfm.channel.config import ChannelConfig
@@ -71,6 +72,9 @@ __all__ = [
     "SentenceConfig",
     "SyntaxConfig",
     "TrainingConfig",
+    # Types
+    "TokenBridge",
+    "TokenBridgeOutput",
     # Faculty
     "LanguageFaculty",
     # Training

@@ -17,7 +17,7 @@ import torch
 from torch import Tensor, nn
 
 from lfm._registry import create
-from lfm._types import AgentState, Mask
+from lfm._types import AgentState, Mask, TokenEmbeddings, TokenIds
 from lfm.core.module import LFMModule
 from lfm.faculty.config import FacultyConfig
 
@@ -145,6 +145,13 @@ class LanguageFaculty(nn.Module):
             if q_cfg.codebook_dim != dim:
                 projections["quantizer_to_faculty"] = nn.Linear(q_cfg.codebook_dim, dim)
 
+        # Pre-tokenized external input -> faculty dim.
+        if self.config.pretokenized_dim is not None:
+            if self.config.pretokenized_dim != dim:
+                projections["pretokenized_to_faculty"] = nn.Linear(
+                    self.config.pretokenized_dim, dim
+                )
+
         # Syntax latent dim -> faculty dim (for constituent representations).
         if self.syntax is not None:
             s_cfg = self.config.syntax
@@ -185,18 +192,28 @@ class LanguageFaculty(nn.Module):
 
     def forward(
         self,
-        agent_state: AgentState,
+        agent_state: AgentState | None = None,
         mask: Mask | None = None,
+        *,
+        tokens: TokenIds | None = None,
+        embeddings: TokenEmbeddings | None = None,
     ) -> dict[str, Any]:
         """Run the full LFM pipeline.
+
+        Accepts either a raw ``agent_state`` (existing path, runs through the
+        quantizer) **or** pre-tokenized ``tokens`` + ``embeddings`` (bypasses
+        the quantizer).  Providing both or neither raises ``ValueError``.
 
         Args:
             agent_state: Continuous agent state tensor of shape
                 ``(batch, dim)``.
             mask: Optional boolean padding mask of shape
                 ``(batch, seq_len)`` where ``True`` marks valid positions.
-                If ``None``, a mask of all ``True`` is created after the
-                quantizer produces a sequence length.
+                If ``None``, a mask of all ``True`` is created automatically.
+            tokens: Pre-tokenized integer token indices of shape
+                ``(batch, seq_len)``.  Keyword-only.
+            embeddings: Pre-tokenized dense embeddings of shape
+                ``(batch, seq_len, emb_dim)``.  Keyword-only.
 
         Returns:
             A flat dictionary whose keys are namespaced as
@@ -204,34 +221,66 @@ class LanguageFaculty(nn.Module):
             ``"extra_losses"`` key mapping loss names to scalar tensors.
         """
         outputs: dict[str, Any] = {}
-        batch = agent_state.size(0)
 
-        # Flowing representations that get refined at each stage.
-        tokens: Tensor | None = None
-        embeddings: Tensor | None = None
+        has_pretokenized = tokens is not None or embeddings is not None
+        has_agent_state = agent_state is not None
 
-        # ---- Quantizer ---------------------------------------------------
-        if self.quantizer is not None:
-            q_out = self.quantizer(agent_state)
-            self._merge(outputs, self.quantizer.output_prefix, q_out)
+        if has_pretokenized and has_agent_state:
+            raise ValueError("Provide agent_state OR (tokens, embeddings), not both.")
+        if not has_pretokenized and not has_agent_state:
+            raise ValueError("Must provide agent_state or both tokens and embeddings.")
 
-            tokens = q_out["tokens"]
-            embeddings = q_out["embeddings"]
+        if has_pretokenized:
+            # -- Pre-tokenized path: bypass quantizer --------------------------
+            if tokens is None or embeddings is None:
+                raise ValueError("Pre-tokenized path requires both tokens and embeddings.")
 
-            # Project codebook_dim -> faculty dim if necessary.
-            if "quantizer_to_faculty" in self.projections:
-                embeddings = self.projections["quantizer_to_faculty"](embeddings)
+            batch = tokens.size(0)
+            outputs["pretokenized.tokens"] = tokens
+            outputs["pretokenized.embeddings"] = embeddings
 
-            # Build a default mask if none was provided.
+            if "pretokenized_to_faculty" in self.projections:
+                embeddings = self.projections["pretokenized_to_faculty"](embeddings)
+            elif embeddings.size(-1) != self.config.dim:
+                raise ValueError(
+                    f"Pre-tokenized embeddings dim {embeddings.size(-1)} != faculty dim "
+                    f"{self.config.dim} and no pretokenized_dim configured."
+                )
+
             if mask is None:
-                seq_len = tokens.size(1)
-                mask = torch.ones(batch, seq_len, dtype=torch.bool, device=agent_state.device)
+                mask = torch.ones(
+                    batch, tokens.size(1), dtype=torch.bool, device=tokens.device
+                )
         else:
-            # Without a quantizer the agent_state itself is treated as a
-            # single-step embedding: (batch, dim) -> (batch, 1, dim).
-            embeddings = agent_state.unsqueeze(1)
-            if mask is None:
-                mask = torch.ones(batch, 1, dtype=torch.bool, device=agent_state.device)
+            # -- Existing agent_state path -------------------------------------
+            assert agent_state is not None  # for type narrowing
+            batch = agent_state.size(0)
+
+            if self.quantizer is not None:
+                q_out = self.quantizer(agent_state)
+                self._merge(outputs, self.quantizer.output_prefix, q_out)
+
+                tokens = q_out["tokens"]
+                embeddings = q_out["embeddings"]
+
+                # Project codebook_dim -> faculty dim if necessary.
+                if "quantizer_to_faculty" in self.projections:
+                    embeddings = self.projections["quantizer_to_faculty"](embeddings)
+
+                # Build a default mask if none was provided.
+                if mask is None:
+                    seq_len = tokens.size(1)
+                    mask = torch.ones(
+                        batch, seq_len, dtype=torch.bool, device=agent_state.device
+                    )
+            else:
+                # Without a quantizer the agent_state itself is treated as a
+                # single-step embedding: (batch, dim) -> (batch, 1, dim).
+                embeddings = agent_state.unsqueeze(1)
+                if mask is None:
+                    mask = torch.ones(
+                        batch, 1, dtype=torch.bool, device=agent_state.device
+                    )
 
         # ---- Phonology ---------------------------------------------------
         if self.phonology is not None and embeddings is not None:
@@ -303,20 +352,20 @@ class LanguageFaculty(nn.Module):
 
     def encode(
         self,
-        agent_state: AgentState,
+        agent_state: AgentState | None = None,
         mask: Mask | None = None,
+        *,
+        tokens: TokenIds | None = None,
+        embeddings: TokenEmbeddings | None = None,
     ) -> dict[str, Any]:
-        """Alias for ``forward`` — encode an agent state through the faculty.
+        """Alias for ``forward`` — encode input through the faculty.
 
-        Args:
-            agent_state: Continuous agent state tensor of shape
-                ``(batch, dim)``.
-            mask: Optional boolean padding mask.
+        Accepts the same arguments as ``forward``.
 
         Returns:
             The same namespaced output dictionary as ``forward``.
         """
-        return self.forward(agent_state, mask=mask)
+        return self.forward(agent_state, mask=mask, tokens=tokens, embeddings=embeddings)
 
     def extra_losses(self) -> dict[str, Tensor]:
         """Aggregate ``extra_losses`` from all active sub-modules.

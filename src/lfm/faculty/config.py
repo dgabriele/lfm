@@ -33,6 +33,9 @@ class FacultyConfig(LFMBaseConfig):
 
     dim: int = 256
     max_seq_len: int = 64
+    pretokenized_dim: int | None = None
+    """Embedding dim of pre-tokenized external input. Creates a projection
+    to ``dim`` when set. ``None`` (default) disables."""
     quantizer: QuantizationConfig | None = None
     phonology: PhonologyConfig | None = PhonologyConfig()
     morphology: MorphologyConfig | None = None

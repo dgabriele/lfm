@@ -7,7 +7,7 @@ conveying the intended shape and dtype of each tensor argument.
 
 from __future__ import annotations
 
-from typing import TypeAlias
+from typing import Any, Protocol, TypeAlias, TypedDict
 
 from torch import Tensor
 
@@ -28,3 +28,17 @@ Mask: TypeAlias = Tensor
 
 GrammaticalFeatures: TypeAlias = Tensor
 """Learned latent grammatical categories per token — shape ``(batch, seq_len, num_features)``."""
+
+
+class TokenBridgeOutput(TypedDict):
+    """Output contract for external tokenizers bridging into LFM."""
+
+    tokens: TokenIds
+    embeddings: TokenEmbeddings
+    mask: Mask | None
+
+
+class TokenBridge(Protocol):
+    """Structural type for external tokenizer adapters."""
+
+    def __call__(self, observation: Any) -> TokenBridgeOutput: ...
