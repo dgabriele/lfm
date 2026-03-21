@@ -22,6 +22,7 @@ LFM models the *faculty* of language, not any particular human language.
 5. **Constraint, Not Prescription** — LFM constrains outputs toward structured forms without dictating exact expressions.
 6. **Non-Invertibility** — Mappings from internal representations to language must not be perfectly reversible.
 7. **Structure Without Semantics** — Training rewards well-formedness, compositional reuse, structural consistency. NOT semantic correctness relative to human language.
+8. **Typological Neutrality** — The architecture and losses must not bias toward any particular language typology. Whether the emergent language is isolating (Chinese-like), agglutinative (Turkish-like), polysynthetic (Mohawk-like), fusional (Latin-like), or a hybrid with no human analogue — that is determined by communication pressure, not architectural bias. Losses reward structural consistency and communicative success, not any particular kind of structure.
 
 ## What LFM Is NOT
 
