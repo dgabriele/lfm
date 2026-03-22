@@ -373,6 +373,7 @@ def _vae_forward(
     repetition_penalty: float = 1.0,
     repetition_window: int = 8,
     _rope_freqs: Tensor | None = None,
+    _cached_mask: Tensor | None = None,
     _cfg: object | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Run one VAE forward pass (teacher-forced).
@@ -418,14 +419,17 @@ def _vae_forward(
         dec_input = dec_token_embedding(dec_input_ids)
         if not isinstance(dec_pos_embedding, nn.Identity):
             dec_input = dec_input + dec_pos_embedding(pos_ids)
-        # Multi-scale mask
-        tgt_mask = multiscale_causal_mask(
-            seq_len,
-            num_heads=_cfg.decoder_num_heads,
-            head_windows=_cfg.attention_head_windows,
-            global_every=_cfg.attention_global_every,
-            device=device,
-        )
+        # Multi-scale mask (precomputed, sliced to seq_len)
+        if _cached_mask is not None:
+            tgt_mask = _cached_mask[:, :seq_len, :seq_len]
+        else:
+            tgt_mask = multiscale_causal_mask(
+                seq_len,
+                num_heads=_cfg.decoder_num_heads,
+                head_windows=_cfg.attention_head_windows,
+                global_every=_cfg.attention_global_every,
+                device=device,
+            )
         dec_out = decoder(
             dec_input, memory, tgt_mask=tgt_mask, rope_freqs=_rope_freqs
         )
@@ -662,7 +666,8 @@ class VAEPretrainer:
         modules = self._build_model(cfg, hidden, full_vocab, device)
         all_params: list[nn.Parameter] = []
         for m in modules.values():
-            all_params.extend(m.parameters())
+            if isinstance(m, nn.Module):
+                all_params.extend(m.parameters())
 
         optimizer = torch.optim.AdamW(all_params, lr=cfg.lr)
         scaler = torch.amp.GradScaler(enabled=cfg.use_amp)
@@ -721,7 +726,12 @@ class VAEPretrainer:
         num_batches = len(train_loader)
 
         # Parameter count for logging
-        total_params = sum(p.numel() for m in modules.values() for p in m.parameters())
+        total_params = sum(
+            p.numel()
+            for m in modules.values()
+            if isinstance(m, nn.Module)
+            for p in m.parameters()
+        )
         logger.info(
             "Model: %d params (%.1fM), %d train batches/epoch",
             total_params,
@@ -732,7 +742,8 @@ class VAEPretrainer:
         for epoch in range(start_epoch, cfg.num_epochs):
             # -- Train --
             for m in modules.values():
-                m.train()
+                if isinstance(m, nn.Module):
+                    m.train()
 
             train_ce_sum = 0.0
             train_kl_sum = 0.0
@@ -964,7 +975,8 @@ class VAEPretrainer:
 
             # -- Validate --
             for m in modules.values():
-                m.eval()
+                if isinstance(m, nn.Module):
+                    m.eval()
 
             val_ce_sum = 0.0
             val_kl_sum = 0.0
@@ -1240,7 +1252,11 @@ class VAEPretrainer:
                     "epoch": epoch + 1,
                     "global_step": global_step,
                     "best_val_loss": best_val_loss,
-                    "modules": {k: m.state_dict() for k, m in modules.items()},
+                    "modules": {
+                        k: m.state_dict()
+                        for k, m in modules.items()
+                        if isinstance(m, nn.Module)
+                    },
                     "optimizer": optimizer.state_dict(),
                     "scaler": scaler.state_dict(),
                 },
@@ -1280,6 +1296,7 @@ class VAEPretrainer:
         # Decoder (linguistic architecture — must match GeneratorConfig)
         from lfm.generator.layers import (
             LinguisticDecoder,
+            multiscale_causal_mask,
             precompute_rope_freqs,
         )
 
@@ -1312,6 +1329,15 @@ class VAEPretrainer:
                 head_dim, cfg.max_seq_len, device=device
             )
 
+        # Precompute multi-scale causal mask (constant for fixed seq_len)
+        cached_mask = multiscale_causal_mask(
+            cfg.max_seq_len,
+            num_heads=cfg.decoder_num_heads,
+            head_windows=cfg.attention_head_windows,
+            global_every=cfg.attention_global_every,
+            device=device,
+        )
+
         return {
             "enc_token_embedding": enc_token_embedding,
             "enc_pos_embedding": enc_pos_embedding,
@@ -1323,7 +1349,8 @@ class VAEPretrainer:
             "decoder": decoder,
             "output_head": output_head,
             "_rope_freqs": rope_freqs,
-            "_cfg": cfg,  # stash for mask building
+            "_cached_mask": cached_mask,
+            "_cfg": cfg,
         }
 
 

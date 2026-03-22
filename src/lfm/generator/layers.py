@@ -114,31 +114,36 @@ def multiscale_causal_mask(
         f"head_windows length {len(head_windows)} != num_heads {num_heads}"
     )
 
-    # (H, S, S)
+    # Vectorized construction — no Python loops over seq positions
+    # Row indices (i) and column indices (j)
+    rows = torch.arange(seq_len, device=device).unsqueeze(1)  # (S, 1)
+    cols = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, S)
+    # Causal: future positions always masked
+    causal = cols > rows  # (S, S) True = future
+
+    # Global positions mask: cols or rows that are multiples of global_every
+    is_global_col = (cols % global_every) == 0  # (1, S)
+    is_global_row = (rows % global_every) == 0  # (S, 1)
+
     mask = torch.zeros(num_heads, seq_len, seq_len, device=device)
 
+    neg_inf = torch.tensor(float("-inf"), device=device)
+    zero = torch.tensor(0.0, device=device)
+
     for h, window in enumerate(head_windows):
-        for i in range(seq_len):
-            if window == 0:
-                # Full causal: attend to everything <= i
-                mask[h, i, i + 1:] = float("-inf")
-            else:
-                # Sliding window + causal
-                for j in range(seq_len):
-                    if j > i:
-                        # Future: always masked
-                        mask[h, i, j] = float("-inf")
-                    elif i - j >= window:
-                        # Outside window: masked
-                        mask[h, i, j] = float("-inf")
-
-            # Global positions: unmask all globals <= i
-            for g in range(0, i + 1, global_every):
-                mask[h, i, g] = 0.0
-
-            # If I am a global position, unmask everything <= i
-            if i % global_every == 0:
-                mask[h, i, : i + 1] = 0.0
+        if window == 0:
+            # Full causal
+            mask[h] = torch.where(causal, neg_inf, zero)
+        else:
+            # Outside window OR future → masked
+            outside_window = (rows - cols) >= window  # (S, S)
+            blocked = causal | outside_window
+            # Unblock: global columns (attend TO globals) and
+            # global rows (attend FROM globals to everything causal)
+            unblocked_by_global_col = is_global_col & ~causal
+            unblocked_by_global_row = is_global_row & ~causal
+            blocked = blocked & ~unblocked_by_global_col & ~unblocked_by_global_row
+            mask[h] = torch.where(blocked, neg_inf, zero)
 
     return mask
 
