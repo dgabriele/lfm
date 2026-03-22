@@ -13,6 +13,9 @@ dependencies = [
     "pydantic>=2.0",
     "numpy>=1.24",
     "unidecode (>=1.4.0,<2.0.0)",
+    "clean-text (>=0.7.1,<0.8.0)",
+    "epitran (>=1.34.0,<2.0.0)",
+    "g2p-en (>=2.1.0,<3.0.0)",
 ]
 
 [tool.poetry]

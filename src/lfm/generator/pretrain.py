@@ -82,6 +82,12 @@ class VAEPretrainConfig(LFMBaseConfig):
         seed: Random seed for reproducibility.
         device: Torch device string.
         output_path: Where to save the pretrained decoder checkpoint.
+        repetition_penalty: Multiplicative penalty on logits for tokens
+            that appeared in the recent ``repetition_window`` positions.
+            ``1.0`` disables.  Applied during both teacher-forced training
+            and free-run decoding to suppress degenerate loops.
+        repetition_window: Number of recent positions to check for
+            repeated tokens.
         topo_weight: Weight for topological regularization loss.
             Penalizes distance mismatches between latent pairs and their
             decoded output pairs, enforcing Lipschitz continuity.
@@ -110,6 +116,8 @@ class VAEPretrainConfig(LFMBaseConfig):
     decoder_num_heads: int = 4
     decoder_dropout: float = 0.2
     max_seq_len: int = 64
+    repetition_penalty: float = 1.2
+    repetition_window: int = 8
     kl_weight: float = 0.5
     kl_free_bits: float = 0.5
     kl_warmup_steps: int = 10000
@@ -124,7 +132,7 @@ class VAEPretrainConfig(LFMBaseConfig):
     output_path: str = "data/vae_decoder.pt"
 
     # Topological regularization (smooth latent → smooth output)
-    topo_weight: float = 0.1
+    topo_weight: float = 0.0
     topo_sample_pairs: int = 32
 
     # Adversarial structural discriminator
@@ -356,6 +364,8 @@ def _vae_forward(
     full_vocab: int,
     kl_free_bits: float,
     compute_kl: bool = True,
+    repetition_penalty: float = 1.0,
+    repetition_window: int = 8,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Run one VAE forward pass (teacher-forced).
 
@@ -656,12 +666,32 @@ class VAEPretrainer:
 
             _topo_dist_cache = PhoneticDistanceCache()
 
-        # 6. Training loop
+        # 6. Resume from checkpoint if available
+        import math
         import time
 
         best_val_loss = float("inf")
         best_metrics: dict[str, float] = {}
         global_step = 0
+        start_epoch = 0
+
+        resume_path = Path(output_dir) / "vae_resume.pt"
+        if resume_path.exists():
+            logger.info("Resuming from %s", resume_path)
+            ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+            for k, m in modules.items():
+                m.load_state_dict(ckpt["modules"][k])
+            optimizer.load_state_dict(ckpt["optimizer"])
+            scaler.load_state_dict(ckpt["scaler"])
+            start_epoch = ckpt["epoch"]
+            global_step = ckpt["global_step"]
+            best_val_loss = ckpt["best_val_loss"]
+            logger.info(
+                "Resumed at epoch %d, step %d, best_val=%.4f",
+                start_epoch, global_step, best_val_loss,
+            )
+
+        # 7. Training loop
         accum = cfg.gradient_accumulation_steps
         log_every = 50  # log every N batches
         num_batches = len(train_loader)
@@ -675,7 +705,7 @@ class VAEPretrainer:
             num_batches,
         )
 
-        for epoch in range(cfg.num_epochs):
+        for epoch in range(start_epoch, cfg.num_epochs):
             # -- Train --
             for m in modules.values():
                 m.train()
@@ -684,6 +714,7 @@ class VAEPretrainer:
             train_kl_sum = 0.0
             train_topo_sum = 0.0
             train_count = 0
+            last_grad_norm = 0.0
             optimizer.zero_grad()
             epoch_start = time.time()
             batch_start = time.time()
@@ -705,6 +736,8 @@ class VAEPretrainer:
                             full_vocab=full_vocab,
                             kl_free_bits=cfg.kl_free_bits,
                             compute_kl=_do_kl,
+                            repetition_penalty=cfg.repetition_penalty,
+                            repetition_window=cfg.repetition_window,
                             **modules,
                         )
                     )
@@ -834,7 +867,9 @@ class VAEPretrainer:
 
                 if (i + 1) % accum == 0 or (i + 1) == len(train_loader):
                     scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(all_params, max_norm=10.0)
+                    last_grad_norm = nn.utils.clip_grad_norm_(
+                        all_params, max_norm=10.0
+                    ).item()
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
@@ -852,39 +887,49 @@ class VAEPretrainer:
                         log_every * b * cfg.max_seq_len / max(elapsed, 0.01)
                     )
                     # Active dims in this batch (raw KL > 0.1)
-                    raw_kl = kl_per_dim_train.detach()
-                    active = int(
-                        (raw_kl.mean(dim=0) > 0.1).sum().item()
-                    )
                     # GPU memory
                     if device.type == "cuda":
                         mem_mb = torch.cuda.memory_allocated(device) / 1e6
                     else:
                         mem_mb = 0.0
 
-                    adv_str = ""
+                    # Perplexity (exp(CE) — more interpretable)
+                    ppl = min(math.exp(ce_loss.item()), 99999.0)
+
+                    # Build optional metric strings
+                    extra_parts: list[str] = [
+                        f"PPL={ppl:.0f}",
+                        f"gnorm={last_grad_norm:.2f}",
+                    ]
+                    if _do_kl:
+                        raw_kl = kl_per_dim_train.detach()
+                        active = int(
+                            (raw_kl.mean(dim=0) > 0.1).sum().item()
+                        )
+                        extra_parts.append(
+                            f"KL={kl_loss.item():.3f} "
+                            f"kl_scale={kl_scale:.4f} "
+                            f"active={active}/{cfg.latent_dim}"
+                        )
+                    if cfg.topo_weight > 0:
+                        extra_parts.append(f"topo={topo_loss.item():.4f}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
-                        adv_str = (
-                            f" D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
+                        extra_parts.append(
+                            f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
                             f" adv={adv_loss_val:.3f}"
                         )
+                    extra_str = (" " + " ".join(extra_parts)) if extra_parts else ""
 
                     logger.info(
-                        "  [%d/%d] step=%d CE=%.3f KL=%.3f topo=%.4f "
-                        "kl_scale=%.4f active=%d/%d "
+                        "  [%d/%d] step=%d CE=%.3f "
                         "%.0f tok/s %.0fMB%s",
                         i + 1,
                         num_batches,
                         global_step,
                         ce_loss.item(),
-                        kl_loss.item(),
-                        topo_loss.item(),
-                        kl_scale,
-                        active,
-                        cfg.latent_dim,
                         tokens_per_sec,
                         mem_mb,
-                        adv_str,
+                        extra_str,
                     )
                     batch_start = time.time()
 
@@ -932,41 +977,40 @@ class VAEPretrainer:
             val_kl = val_kl_sum / max(val_count, 1)
             val_loss = val_ce + cfg.kl_weight * val_kl
 
-            # Active latent dims: mean KL > threshold per dimension
-            kl_cat = torch.cat(all_kl_per_dim, dim=0)  # (N, latent_dim)
-            mean_kl_per_dim = kl_cat.mean(dim=0)  # (latent_dim,)
-            active_dims = int((mean_kl_per_dim > 0.1).sum().item())
-
             epoch_time = time.time() - epoch_start
 
-            logger.info(
-                "Epoch %d/%d (%.0fs) — train: CE=%.4f KL=%.4f topo=%.4f "
-                "total=%.4f | val: CE=%.4f KL=%.4f total=%.4f | "
-                "active_dims=%d/%d",
-                epoch + 1,
-                cfg.num_epochs,
-                epoch_time,
-                train_ce,
-                train_kl,
-                train_topo,
-                train_loss,
-                val_ce,
-                val_kl,
-                val_loss,
-                active_dims,
-                cfg.latent_dim,
-            )
+            # Build epoch summary with only active components
+            epoch_parts = [f"Epoch {epoch + 1}/{cfg.num_epochs} ({epoch_time:.0f}s)"]
+            epoch_parts.append(f"train: CE={train_ce:.4f}")
+            if _do_kl:
+                epoch_parts.append(f"KL={train_kl:.4f}")
+            if cfg.topo_weight > 0:
+                epoch_parts.append(f"topo={train_topo:.4f}")
+            epoch_parts.append(f"total={train_loss:.4f}")
+            epoch_parts.append(f"| val: CE={val_ce:.4f}")
+            if _do_kl:
+                epoch_parts.append(f"KL={val_kl:.4f}")
+            epoch_parts.append(f"total={val_loss:.4f}")
+            if _do_kl and all_kl_per_dim:
+                kl_cat = torch.cat(all_kl_per_dim, dim=0)
+                mean_kl_per_dim = kl_cat.mean(dim=0)
+                active_dims = int((mean_kl_per_dim > 0.1).sum().item())
+                epoch_parts.append(f"| active={active_dims}/{cfg.latent_dim}")
+
+            logger.info("  ".join(epoch_parts))
 
             # -- Epoch-end evaluation: reconstruction, interpolation, perturbation, random --
             with torch.no_grad():
 
                 def _greedy_decode(z: Tensor) -> list[str]:
-                    """Greedy decode z -> token ids -> text."""
+                    """Greedy decode z -> token ids -> text with rep penalty."""
                     n = z.size(0)
                     mem = modules["latent_to_decoder"](z).unsqueeze(1)
                     ids = torch.full(
                         (n, 1), bos_id, dtype=torch.long, device=device
                     )
+                    pen = cfg.repetition_penalty
+                    win = cfg.repetition_window
                     for _t in range(cfg.max_seq_len - 1):
                         p = torch.arange(ids.size(1), device=device).unsqueeze(0)
                         tgt = modules["dec_token_embedding"](ids) + modules["dec_pos_embedding"](p)
@@ -974,7 +1018,25 @@ class VAEPretrainer:
                             ids.size(1), device=device
                         )
                         out = modules["decoder"](tgt=tgt, memory=mem, tgt_mask=cm)
-                        nxt = modules["output_head"](out[:, -1:]).argmax(dim=-1)
+                        logits = modules["output_head"](out[:, -1])  # (n, V)
+                        # Repetition penalty: only penalize tokens that
+                        # appear 3+ times in the window.  1-2 occurrences
+                        # are natural (reduplication, function words).
+                        if pen > 1.0 and ids.size(1) > 1:
+                            start = max(1, ids.size(1) - win)
+                            recent = ids[:, start:]  # (n, W)
+                            for bi in range(n):
+                                toks = recent[bi].tolist()
+                                from collections import Counter
+                                counts = Counter(toks)
+                                for tid, cnt in counts.items():
+                                    if cnt >= 3:  # only penalize 3+ repeats
+                                        scale = pen ** (cnt - 2)  # progressive
+                                        if logits[bi, tid] > 0:
+                                            logits[bi, tid] /= scale
+                                        else:
+                                            logits[bi, tid] *= scale
+                        nxt = logits.argmax(dim=-1, keepdim=True)
                         ids = torch.cat([ids, nxt], dim=1)
                     texts = []
                     for j in range(n):
@@ -1044,6 +1106,45 @@ class VAEPretrainer:
                 for j, txt in enumerate(random_texts):
                     logger.info("  random[%d]: %s", j, txt[:100])
 
+                # --- 5. Structural health metrics ---
+                all_eval_texts = recon_texts + interp_texts + perturb_texts + random_texts
+
+                def _struct_metrics(texts: list[str]) -> dict[str, float]:
+                    ttrs, rep_rates, word_lens = [], [], []
+                    for t in texts:
+                        words = t.split()
+                        if not words:
+                            continue
+                        # Type-token ratio
+                        ttrs.append(len(set(words)) / len(words))
+                        # Bigram repetition rate
+                        bigrams = [
+                            (words[i], words[i + 1])
+                            for i in range(len(words) - 1)
+                        ]
+                        if bigrams:
+                            rep_rates.append(
+                                1.0 - len(set(bigrams)) / len(bigrams)
+                            )
+                        # Mean word length (IPA chars)
+                        word_lens.extend(len(w) for w in words)
+                    return {
+                        "ttr": sum(ttrs) / max(len(ttrs), 1),
+                        "rep_rate": sum(rep_rates) / max(len(rep_rates), 1),
+                        "mean_word_len": (
+                            sum(word_lens) / max(len(word_lens), 1)
+                        ),
+                    }
+
+                m = _struct_metrics(all_eval_texts)
+                logger.info(
+                    "  struct: TTR=%.3f rep_rate=%.3f "
+                    "mean_word_len=%.1f",
+                    m["ttr"],
+                    m["rep_rate"],
+                    m["mean_word_len"],
+                )
+
             # Save best checkpoint (decoder only)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -1052,12 +1153,13 @@ class VAEPretrainer:
                     "val_loss": val_loss,
                     "val_ce": val_ce,
                     "val_kl": val_kl,
-                    "active_latent_dims": float(active_dims),
                     "num_samples": float(len(token_ids_list)),
+                    "epoch": float(epoch + 1),
                 }
 
                 output_path = Path(cfg.output_path)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
+                # Save decoder-only checkpoint (for inference)
                 torch.save(
                     {
                         "latent_dim": cfg.latent_dim,
@@ -1083,6 +1185,20 @@ class VAEPretrainer:
                     output_path,
                 )
                 logger.info("Saved best decoder checkpoint to %s", output_path)
+
+            # Save full training state for resume (every epoch)
+            resume_path = Path(output_dir) / "vae_resume.pt"
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "best_val_loss": best_val_loss,
+                    "modules": {k: m.state_dict() for k, m in modules.items()},
+                    "optimizer": optimizer.state_dict(),
+                    "scaler": scaler.state_dict(),
+                },
+                resume_path,
+            )
 
         return best_metrics
 

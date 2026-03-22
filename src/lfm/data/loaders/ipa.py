@@ -44,7 +44,7 @@ _EPITRAN_LANGS: dict[str, str] = {
     "hin": "hin-Deva",
     "kor": "kor-Hang",
     "ara": "ara-Arab",
-    "jpn": "jpn-Kana",
+    # "jpn": "jpn-Kana",  # produces kana, not IPA — excluded until proper G2P
 }
 
 
