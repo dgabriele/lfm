@@ -46,12 +46,12 @@ class GeneratorConfig(LFMBaseConfig):
     """
 
     name: str = "multilingual_vae"
-    latent_dim: int = 128
+    latent_dim: int = 256
     vocab_size: int = 8000
     max_output_len: int = 64
-    decoder_hidden_dim: int = 256
-    decoder_num_layers: int = 2
-    decoder_num_heads: int = 4
+    decoder_hidden_dim: int = 512
+    decoder_num_layers: int = 4
+    decoder_num_heads: int = 8
     decoder_dropout: float = 0.2
     kl_weight: float = 0.1
     kl_free_bits: float = 0.5
@@ -60,6 +60,19 @@ class GeneratorConfig(LFMBaseConfig):
     temperature_anneal_steps: int = 10000
     hard_sample: bool = True
     pooling: str = "mean"
+    # Linguistic attention structure
+    attention_head_windows: tuple[int, ...] = (3, 3, 7, 7, 15, 15, 0, 0)
+    """Per-head sliding window sizes for multi-scale attention.  ``0`` means
+    full causal.  Length must equal ``decoder_num_heads``.  Set all to ``0``
+    to disable and use standard full causal attention."""
+    attention_global_every: int = 7
+    """Spacing of global attention positions (composition points)."""
+    use_rope: bool = True
+    """Use Rotary Positional Embeddings instead of learned absolute positions.
+    Enables translation-invariant pattern learning."""
+    share_decoder_layers: bool = True
+    """Use N/2 unique layers each applied twice (literal recursion)."""
+
     pretrained_decoder_path: str | None = None
     spm_model_path: str | None = None
     freeze_decoder: bool = True

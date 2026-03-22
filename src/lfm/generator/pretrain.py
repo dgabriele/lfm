@@ -109,12 +109,18 @@ class VAEPretrainConfig(LFMBaseConfig):
     corpus_paths: list[str] = []
     spm_model_path: str | None = None
     spm_vocab_size: int = 8000
-    latent_dim: int = 128
+    latent_dim: int = 256
     encoder_num_layers: int = 2
-    decoder_hidden_dim: int = 256
-    decoder_num_layers: int = 2
-    decoder_num_heads: int = 4
-    decoder_dropout: float = 0.2
+    decoder_hidden_dim: int = 512
+    decoder_num_layers: int = 4
+    decoder_num_heads: int = 8
+    decoder_dropout: float = 0.1
+
+    # Linguistic attention structure
+    attention_head_windows: tuple[int, ...] = (3, 3, 7, 7, 15, 15, 0, 0)
+    attention_global_every: int = 7
+    use_rope: bool = True
+    share_decoder_layers: bool = True
     max_seq_len: int = 64
     repetition_penalty: float = 1.2
     repetition_window: int = 8
@@ -353,12 +359,12 @@ def _vae_forward(
     *,
     enc_token_embedding: nn.Embedding,
     enc_pos_embedding: nn.Embedding,
-    encoder: nn.TransformerEncoder,
+    encoder: nn.Module,
     enc_to_latent: nn.Linear,
     latent_to_decoder: nn.Linear,
     dec_token_embedding: nn.Embedding,
-    dec_pos_embedding: nn.Embedding,
-    decoder: nn.TransformerDecoder,
+    dec_pos_embedding: nn.Module,
+    decoder: nn.Module,
     output_head: nn.Linear,
     bos_id: int,
     full_vocab: int,
@@ -366,20 +372,19 @@ def _vae_forward(
     compute_kl: bool = True,
     repetition_penalty: float = 1.0,
     repetition_window: int = 8,
+    _rope_freqs: Tensor | None = None,
+    _cfg: object | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Run one VAE forward pass (teacher-forced).
 
-    Args:
-        compute_kl: If ``False``, skip KL computation entirely and return
-            zeros.  Saves compute when ``kl_weight=0``.
+    Supports both standard ``nn.TransformerDecoder`` and the custom
+    ``LinguisticDecoder`` with RoPE and multi-scale attention.
 
     Returns:
-        Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden)`` where:
-
-        - ``kl_per_dim``: ``(batch, latent_dim)`` for active-dims analysis.
-        - ``z``: ``(batch, latent_dim)`` sampled latent codes.
-        - ``dec_hidden``: ``(batch, seq_len, hidden)`` decoder output states.
+        Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden)``.
     """
+    from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
+
     device = batch_tokens.device
     b, seq_len = batch_tokens.shape
 
@@ -407,11 +412,30 @@ def _vae_forward(
     memory = latent_to_decoder(z).unsqueeze(1)
     bos_col = torch.full((b, 1), bos_id, dtype=torch.long, device=device)
     dec_input_ids = torch.cat([bos_col, batch_tokens[:, :-1]], dim=1)
-    dec_input = dec_token_embedding(dec_input_ids) + dec_pos_embedding(pos_ids)
-    tgt_mask = nn.Transformer.generate_square_subsequent_mask(
-        seq_len, device=device
-    )
-    dec_out = decoder(tgt=dec_input, memory=memory, tgt_mask=tgt_mask)
+
+    if isinstance(decoder, LinguisticDecoder):
+        # Linguistic decoder: token embedding only (RoPE handles positions)
+        dec_input = dec_token_embedding(dec_input_ids)
+        if not isinstance(dec_pos_embedding, nn.Identity):
+            dec_input = dec_input + dec_pos_embedding(pos_ids)
+        # Multi-scale mask
+        tgt_mask = multiscale_causal_mask(
+            seq_len,
+            num_heads=_cfg.decoder_num_heads,
+            head_windows=_cfg.attention_head_windows,
+            global_every=_cfg.attention_global_every,
+            device=device,
+        )
+        dec_out = decoder(
+            dec_input, memory, tgt_mask=tgt_mask, rope_freqs=_rope_freqs
+        )
+    else:
+        # Standard decoder (fallback)
+        dec_input = dec_token_embedding(dec_input_ids) + dec_pos_embedding(pos_ids)
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(
+            seq_len, device=device
+        )
+        dec_out = decoder(tgt=dec_input, memory=memory, tgt_mask=tgt_mask)
     logits = output_head(dec_out)
 
     # Reconstruction loss (masked CE)
@@ -1004,6 +1028,15 @@ class VAEPretrainer:
 
                 def _greedy_decode(z: Tensor) -> list[str]:
                     """Greedy decode z -> token ids -> text with rep penalty."""
+                    from collections import Counter
+
+                    from lfm.generator.layers import (
+                        LinguisticDecoder,
+                        multiscale_causal_mask,
+                    )
+
+                    _dec = modules["decoder"]
+                    _is_linguistic = isinstance(_dec, LinguisticDecoder)
                     n = z.size(0)
                     mem = modules["latent_to_decoder"](z).unsqueeze(1)
                     ids = torch.full(
@@ -1012,26 +1045,40 @@ class VAEPretrainer:
                     pen = cfg.repetition_penalty
                     win = cfg.repetition_window
                     for _t in range(cfg.max_seq_len - 1):
-                        p = torch.arange(ids.size(1), device=device).unsqueeze(0)
-                        tgt = modules["dec_token_embedding"](ids) + modules["dec_pos_embedding"](p)
-                        cm = nn.Transformer.generate_square_subsequent_mask(
-                            ids.size(1), device=device
-                        )
-                        out = modules["decoder"](tgt=tgt, memory=mem, tgt_mask=cm)
-                        logits = modules["output_head"](out[:, -1])  # (n, V)
-                        # Repetition penalty: only penalize tokens that
-                        # appear 3+ times in the window.  1-2 occurrences
-                        # are natural (reduplication, function words).
+                        if _is_linguistic:
+                            tgt = modules["dec_token_embedding"](ids)
+                            if not isinstance(modules["dec_pos_embedding"], nn.Identity):
+                                p = torch.arange(ids.size(1), device=device).unsqueeze(0)
+                                tgt = tgt + modules["dec_pos_embedding"](p)
+                            cm = multiscale_causal_mask(
+                                ids.size(1),
+                                num_heads=cfg.decoder_num_heads,
+                                head_windows=cfg.attention_head_windows,
+                                global_every=cfg.attention_global_every,
+                                device=device,
+                            )
+                            out = _dec(
+                                tgt, mem, tgt_mask=cm,
+                                rope_freqs=modules.get("_rope_freqs"),
+                            )
+                        else:
+                            p = torch.arange(ids.size(1), device=device).unsqueeze(0)
+                            tok = modules["dec_token_embedding"](ids)
+                            tgt = tok + modules["dec_pos_embedding"](p)
+                            cm = nn.Transformer.generate_square_subsequent_mask(
+                                ids.size(1), device=device
+                            )
+                            out = _dec(tgt=tgt, memory=mem, tgt_mask=cm)
+                        logits = modules["output_head"](out[:, -1])
+                        # Repetition penalty: only 3+ repeats in window
                         if pen > 1.0 and ids.size(1) > 1:
                             start = max(1, ids.size(1) - win)
-                            recent = ids[:, start:]  # (n, W)
+                            recent = ids[:, start:]
                             for bi in range(n):
-                                toks = recent[bi].tolist()
-                                from collections import Counter
-                                counts = Counter(toks)
+                                counts = Counter(recent[bi].tolist())
                                 for tid, cnt in counts.items():
-                                    if cnt >= 3:  # only penalize 3+ repeats
-                                        scale = pen ** (cnt - 2)  # progressive
+                                    if cnt >= 3:
+                                        scale = pen ** (cnt - 2)
                                         if logits[bi, tid] > 0:
                                             logits[bi, tid] /= scale
                                         else:
@@ -1230,21 +1277,40 @@ class VAEPretrainer:
         ).to(device)
         enc_to_latent = nn.Linear(hidden, cfg.latent_dim * 2).to(device)
 
-        # Decoder (architecture must match GeneratorConfig)
+        # Decoder (linguistic architecture — must match GeneratorConfig)
+        from lfm.generator.layers import (
+            LinguisticDecoder,
+            precompute_rope_freqs,
+        )
+
         latent_to_decoder = nn.Linear(cfg.latent_dim, hidden).to(device)
         dec_token_embedding = nn.Embedding(full_vocab, hidden).to(device)
-        dec_pos_embedding = nn.Embedding(cfg.max_seq_len, hidden).to(device)
-        decoder_layer = nn.TransformerDecoderLayer(
+
+        # Positional embedding: only used when RoPE is disabled
+        dec_pos_embedding: nn.Module
+        if cfg.use_rope:
+            # Dummy — not used, but kept in module dict for checkpoint compat
+            dec_pos_embedding = nn.Identity()
+        else:
+            dec_pos_embedding = nn.Embedding(cfg.max_seq_len, hidden).to(device)
+
+        decoder = LinguisticDecoder(
             d_model=hidden,
             nhead=cfg.decoder_num_heads,
+            num_layers=cfg.decoder_num_layers,
             dim_feedforward=hidden * 4,
             dropout=cfg.decoder_dropout,
-            batch_first=True,
-        )
-        decoder = nn.TransformerDecoder(
-            decoder_layer, num_layers=cfg.decoder_num_layers
+            share_layers=cfg.share_decoder_layers,
         ).to(device)
         output_head = nn.Linear(hidden, full_vocab).to(device)
+
+        # Precompute RoPE frequencies
+        rope_freqs = None
+        if cfg.use_rope:
+            head_dim = hidden // cfg.decoder_num_heads
+            rope_freqs = precompute_rope_freqs(
+                head_dim, cfg.max_seq_len, device=device
+            )
 
         return {
             "enc_token_embedding": enc_token_embedding,
@@ -1256,6 +1322,8 @@ class VAEPretrainer:
             "dec_pos_embedding": dec_pos_embedding,
             "decoder": decoder,
             "output_head": output_head,
+            "_rope_freqs": rope_freqs,
+            "_cfg": cfg,  # stash for mask building
         }
 
 

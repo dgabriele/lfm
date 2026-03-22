@@ -63,25 +63,29 @@ def test_pretrain_config_defaults():
     from lfm.generator.pretrain import VAEPretrainConfig
 
     cfg = VAEPretrainConfig(corpus_paths=[])
-    assert cfg.decoder_hidden_dim == 256
-    assert cfg.decoder_num_layers == 2
-    assert cfg.decoder_num_heads == 4
-    assert cfg.latent_dim == 128
+    assert cfg.decoder_hidden_dim == 512
+    assert cfg.decoder_num_layers == 4
+    assert cfg.decoder_num_heads == 8
+    assert cfg.latent_dim == 256
+    assert cfg.use_rope is True
+    assert cfg.share_decoder_layers is True
     assert cfg.kl_free_bits == 0.5
     assert cfg.batch_size == 32
     assert cfg.gradient_accumulation_steps == 2
     assert cfg.use_amp is True
-    assert cfg.decoder_dropout == 0.2
+    assert cfg.decoder_dropout == 0.1
 
 
-def test_generator_config_conservative_defaults():
-    """GeneratorConfig defaults match conservative pretrain config."""
+def test_generator_config_defaults():
+    """GeneratorConfig defaults match pretrain config."""
     from lfm.generator.config import GeneratorConfig
 
     cfg = GeneratorConfig()
-    assert cfg.decoder_hidden_dim == 256
-    assert cfg.decoder_num_layers == 2
-    assert cfg.decoder_num_heads == 4
-    assert cfg.latent_dim == 128
+    assert cfg.decoder_hidden_dim == 512
+    assert cfg.decoder_num_layers == 4
+    assert cfg.decoder_num_heads == 8
+    assert cfg.latent_dim == 256
     assert cfg.kl_free_bits == 0.5
     assert cfg.decoder_dropout == 0.2
+    assert cfg.use_rope is True
+    assert cfg.share_decoder_layers is True

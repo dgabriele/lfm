@@ -18,11 +18,15 @@ def _small_config(**overrides: object) -> GeneratorConfig:
         vocab_size=50,
         max_output_len=8,
         decoder_hidden_dim=64,
-        decoder_num_layers=1,
+        decoder_num_layers=2,
         decoder_num_heads=2,
         decoder_dropout=0.0,
         kl_weight=0.1,
         freeze_decoder=False,
+        attention_head_windows=(3, 0),
+        attention_global_every=4,
+        use_rope=True,
+        share_decoder_layers=True,
     )
     defaults.update(overrides)
     return GeneratorConfig(**defaults)

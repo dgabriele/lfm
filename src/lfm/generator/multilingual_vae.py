@@ -60,22 +60,43 @@ class MultilingualVAEGenerator(GeneratorModule):
         self._input_proj: nn.Linear | None = None
         self._attention_pool_query: nn.Parameter | None = None
 
-        # -- Decoder --
+        # -- Decoder (linguistic architecture) --
+        from lfm.generator.layers import (
+            LinguisticDecoder,
+            precompute_rope_freqs,
+        )
+
         self.latent_to_decoder = nn.Linear(config.latent_dim, config.decoder_hidden_dim)
         self.token_embedding = nn.Embedding(self._full_vocab, config.decoder_hidden_dim)
-        self.pos_embedding = nn.Embedding(config.max_output_len, config.decoder_hidden_dim)
 
-        decoder_layer = nn.TransformerDecoderLayer(
+        # Positional embedding: only used when RoPE is disabled
+        if config.use_rope:
+            self.pos_embedding: nn.Module = nn.Identity()
+        else:
+            self.pos_embedding = nn.Embedding(
+                config.max_output_len, config.decoder_hidden_dim
+            )
+
+        self.decoder = LinguisticDecoder(
             d_model=config.decoder_hidden_dim,
             nhead=config.decoder_num_heads,
+            num_layers=config.decoder_num_layers,
             dim_feedforward=config.decoder_hidden_dim * 4,
             dropout=config.decoder_dropout,
-            batch_first=True,
-        )
-        self.decoder = nn.TransformerDecoder(
-            decoder_layer, num_layers=config.decoder_num_layers
+            share_layers=config.share_decoder_layers,
         )
         self.output_head = nn.Linear(config.decoder_hidden_dim, self._full_vocab)
+
+        # Precompute RoPE frequencies (not a parameter, just a buffer)
+        self._rope_freqs: Tensor | None = None
+        if config.use_rope:
+            head_dim = config.decoder_hidden_dim // config.decoder_num_heads
+            self.register_buffer(
+                "_rope_freqs_buf",
+                precompute_rope_freqs(head_dim, config.max_output_len),
+                persistent=False,
+            )
+            self._rope_freqs = self._rope_freqs_buf
 
         # -- Tokenizer (lazy, loaded from spm_model_path) --
         self._tokenizer: SubwordTokenizer | None = None
@@ -148,7 +169,8 @@ class MultilingualVAEGenerator(GeneratorModule):
 
         self.latent_to_decoder.load_state_dict(checkpoint["latent_to_decoder"])
         self.token_embedding.load_state_dict(checkpoint["token_embedding"])
-        self.pos_embedding.load_state_dict(checkpoint["pos_embedding"])
+        if "pos_embedding" in checkpoint and not isinstance(self.pos_embedding, nn.Identity):
+            self.pos_embedding.load_state_dict(checkpoint["pos_embedding"])
         self.decoder.load_state_dict(checkpoint["decoder"])
         self.output_head.load_state_dict(checkpoint["output_head"])
         logger.info("Loaded pretrained VAE decoder from %s", path)
@@ -235,18 +257,27 @@ class MultilingualVAEGenerator(GeneratorModule):
 
         for t in range(max_len):
             seq_len = generated_embeds.size(1)
-            pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-            decoder_input = generated_embeds + self.pos_embedding(pos_ids)
+            decoder_input = generated_embeds
+            if not isinstance(self.pos_embedding, nn.Identity):
+                pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+                decoder_input = decoder_input + self.pos_embedding(pos_ids)
 
-            # Causal mask
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(
-                seq_len, device=device
+            # Multi-scale causal mask
+            from lfm.generator.layers import multiscale_causal_mask
+
+            tgt_mask = multiscale_causal_mask(
+                seq_len,
+                num_heads=self.config.decoder_num_heads,
+                head_windows=self.config.attention_head_windows,
+                global_every=self.config.attention_global_every,
+                device=device,
             )
 
             decoder_out = self.decoder(
-                tgt=decoder_input,
-                memory=memory,
+                decoder_input,
+                memory,
                 tgt_mask=tgt_mask,
+                rope_freqs=self._rope_freqs,
             )  # (B, seq_len, H)
 
             last_hidden = decoder_out[:, -1:, :]  # (B, 1, H)
