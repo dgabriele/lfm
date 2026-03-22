@@ -82,6 +82,20 @@ class VAEPretrainConfig(LFMBaseConfig):
         seed: Random seed for reproducibility.
         device: Torch device string.
         output_path: Where to save the pretrained decoder checkpoint.
+        topo_weight: Weight for topological regularization loss.
+            Penalizes distance mismatches between latent pairs and their
+            decoded output pairs, enforcing Lipschitz continuity.
+        topo_sample_pairs: Number of random pairs per batch for topo loss.
+        use_adversarial: Enable structural adversarial discriminator.
+        adv_weight: Weight of adversarial loss in total generator loss.
+        adv_lr: Learning rate for discriminator (separate from VAE).
+        adv_disc_hidden: Discriminator CNN channel width.
+        adv_disc_embed_dim: Discriminator embedding dimensionality.
+        adv_warmup_steps: Train discriminator alone for this many steps
+            before adding adversarial signal to generator.
+        adv_free_run_len: Max length for free-run decoding during
+            adversarial training (shorter than ``max_seq_len`` for speed).
+        adv_spectral_norm: Apply spectral normalization to discriminator.
     """
 
     corpus_loader: str | None = "leipzig"
@@ -96,8 +110,8 @@ class VAEPretrainConfig(LFMBaseConfig):
     decoder_num_heads: int = 4
     decoder_dropout: float = 0.2
     max_seq_len: int = 64
-    kl_weight: float = 0.1
-    kl_free_bits: float = 2.0
+    kl_weight: float = 0.5
+    kl_free_bits: float = 0.5
     kl_warmup_steps: int = 10000
     batch_size: int = 32
     gradient_accumulation_steps: int = 2
@@ -108,6 +122,20 @@ class VAEPretrainConfig(LFMBaseConfig):
     seed: int = 42
     device: str = "cuda"
     output_path: str = "data/vae_decoder.pt"
+
+    # Topological regularization (smooth latent → smooth output)
+    topo_weight: float = 0.1
+    topo_sample_pairs: int = 32
+
+    # Adversarial structural discriminator
+    use_adversarial: bool = True
+    adv_weight: float = 0.1
+    adv_lr: float = 1e-4
+    adv_disc_hidden: int = 256
+    adv_disc_embed_dim: int = 128
+    adv_warmup_steps: int = 1000
+    adv_free_run_len: int = 32
+    adv_spectral_norm: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -124,10 +152,6 @@ def _load_corpus_lines(cfg: VAEPretrainConfig) -> list[str]:
     Returns:
         List of text line strings.
     """
-    # Transliterate all text to Latin alphabet for consistent subword
-    # vocabulary and pronounceable output.
-    from unidecode import unidecode
-
     if cfg.corpus_loader is not None:
         # Ensure concrete loaders are registered and build the typed config.
         # Each loader has its own config class; this mapping parallels the
@@ -162,10 +186,9 @@ def _load_corpus_lines(cfg: VAEPretrainConfig) -> list[str]:
         loader_cfg = config_cls(**loader_kwargs)
         loader = create("corpus_loader", cfg.corpus_loader, loader_cfg)
         samples = loader.load()
-        lines = [text for _, text in samples]
     else:
-        # Legacy fallback: plain text files
-        lines = []
+        # Legacy fallback: plain text files as "unknown" language
+        samples = []
         for path_str in cfg.corpus_paths:
             path = Path(path_str)
             files: list[Path] = []
@@ -181,13 +204,79 @@ def _load_corpus_lines(cfg: VAEPretrainConfig) -> list[str]:
                     for raw_line in fh:
                         raw_line = raw_line.strip()
                         if raw_line:
-                            lines.append(raw_line)
-        logger.info("Loaded %d lines from legacy corpus_paths", len(lines))
+                            samples.append(("eng", raw_line))
+        logger.info("Loaded %d lines from legacy corpus_paths", len(samples))
 
-    # Transliterate to Latin alphabet
-    lines = [unidecode(line) for line in lines]
-    logger.info("Transliterated %d lines to Latin alphabet", len(lines))
+    # Sanitize: drop lines with digits, URLs, emails, formatting artifacts
+    samples = _sanitize_samples(samples)
+    logger.info("Sanitized to %d lines (dropped noisy/short)", len(samples))
+
+    # Convert to IPA (uniform phonetic representation across languages)
+    from lfm.data.loaders.ipa import convert_corpus_to_ipa
+
+    lines = convert_corpus_to_ipa(samples, drop_unconvertible=True)
+    logger.info("IPA conversion complete: %d lines", len(lines))
     return lines
+
+
+def _sanitize_one(sample: tuple[str, str]) -> tuple[str, str] | None:
+    """Sanitize a single ``(lang, text)`` sample.  Returns ``None`` to drop."""
+    import re
+
+    from cleantext import clean
+
+    lang, line = sample
+
+    if re.search(r"\d", line):
+        return None
+
+    line = clean(
+        line,
+        fix_unicode=True,
+        to_ascii=False,
+        lower=False,
+        no_urls=True,
+        no_emails=True,
+        no_phone_numbers=True,
+        no_numbers=False,
+        no_digits=False,
+        no_currency_symbols=True,
+        no_punct=False,
+    )
+
+    line = line.replace("<NUMBER>", "").replace("<EMAIL>", "")
+    line = line.replace("<URL>", "").replace("<PHONE>", "")
+    line = " ".join(line.split())
+
+    if not line or len(line) < 20:
+        return None
+    alpha_ratio = sum(c.isalpha() for c in line) / max(len(line), 1)
+    if alpha_ratio < 0.7:
+        return None
+    return (lang, line)
+
+
+def _sanitize_samples(
+    samples: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Sanitize corpus samples using multiprocessing.
+
+    Drops lines with digits, strips URLs/emails/formatting via
+    ``clean-text``, filters by alphabetic ratio.  Uses all available
+    CPU cores for parallel processing.
+    """
+    import multiprocessing as mp
+    import os
+
+    num_workers = max(1, int(os.cpu_count() * 0.9))
+    logger.info(
+        "Sanitizing %d samples with %d workers...", len(samples), num_workers
+    )
+
+    with mp.Pool(num_workers) as pool:
+        results = pool.map(_sanitize_one, samples, chunksize=1000)
+
+    return [r for r in results if r is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -266,12 +355,20 @@ def _vae_forward(
     bos_id: int,
     full_vocab: int,
     kl_free_bits: float,
-) -> tuple[Tensor, Tensor, Tensor]:
+    compute_kl: bool = True,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Run one VAE forward pass (teacher-forced).
 
+    Args:
+        compute_kl: If ``False``, skip KL computation entirely and return
+            zeros.  Saves compute when ``kl_weight=0``.
+
     Returns:
-        Tuple of ``(ce_loss, kl_loss, kl_per_dim)`` where ``kl_per_dim``
-        has shape ``(batch, latent_dim)`` for active-dims analysis.
+        Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden)`` where:
+
+        - ``kl_per_dim``: ``(batch, latent_dim)`` for active-dims analysis.
+        - ``z``: ``(batch, latent_dim)`` sampled latent codes.
+        - ``dec_hidden``: ``(batch, seq_len, hidden)`` decoder output states.
     """
     device = batch_tokens.device
     b, seq_len = batch_tokens.shape
@@ -315,13 +412,92 @@ def _vae_forward(
     ).reshape(b, seq_len)
     ce_loss = (ce * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
 
-    # KL loss
-    kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
-    if kl_free_bits > 0:
-        kl_per_dim = torch.clamp(kl_per_dim, min=kl_free_bits)
-    kl_loss = kl_per_dim.sum(dim=-1).mean()
+    # KL loss (skipped when kl_weight=0)
+    if compute_kl:
+        kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
+        if kl_free_bits > 0:
+            kl_per_dim = torch.clamp(kl_per_dim, min=kl_free_bits)
+        kl_loss = kl_per_dim.sum(dim=-1).mean()
+    else:
+        kl_per_dim = torch.zeros(b, mu.size(-1), device=device)
+        kl_loss = torch.tensor(0.0, device=device)
 
-    return ce_loss, kl_loss, kl_per_dim
+    return ce_loss, kl_loss, kl_per_dim, z, dec_out
+
+
+# ---------------------------------------------------------------------------
+# Free-run decode (for adversarial training)
+# ---------------------------------------------------------------------------
+
+
+def _free_run_decode(
+    z: Tensor,
+    max_len: int,
+    *,
+    latent_to_decoder: nn.Linear,
+    dec_token_embedding: nn.Embedding,
+    dec_pos_embedding: nn.Embedding,
+    decoder: nn.TransformerDecoder,
+    output_head: nn.Linear,
+    bos_id: int,
+    temperature: float = 1.0,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Autoregressive decode from latent z with Gumbel-Softmax.
+
+    Uses Gumbel-Softmax (hard=True) at each step for differentiable
+    discrete generation.  Returns both hard token IDs and soft probability
+    distributions so the discriminator can receive gradients.
+
+    Args:
+        z: Latent codes ``(batch, latent_dim)``.
+        max_len: Maximum decode length.
+        temperature: Gumbel-Softmax temperature.
+
+    Returns:
+        Tuple of ``(token_ids, soft_probs, mask)`` where:
+
+        - ``token_ids``: ``(batch, max_len)`` hard token indices.
+        - ``soft_probs``: ``(batch, max_len, vocab)`` differentiable
+          Gumbel-Softmax distributions.
+        - ``mask``: ``(batch, max_len)`` boolean (all True).
+    """
+    from lfm.utils.sampling import gumbel_softmax
+
+    batch = z.size(0)
+    device = z.device
+
+    memory = latent_to_decoder(z).unsqueeze(1)  # (B, 1, H)
+    bos_embed = dec_token_embedding(
+        torch.full((batch, 1), bos_id, dtype=torch.long, device=device)
+    )
+    generated_embeds = bos_embed
+
+    all_probs: list[Tensor] = []
+
+    for _t in range(max_len):
+        seq_len = generated_embeds.size(1)
+        pos = torch.arange(seq_len, device=device).unsqueeze(0)
+        tgt = generated_embeds + dec_pos_embedding(pos)
+        causal = nn.Transformer.generate_square_subsequent_mask(
+            seq_len, device=device
+        )
+        out = decoder(tgt=tgt, memory=memory, tgt_mask=causal)
+        logits = output_head(out[:, -1])  # (B, V)
+
+        # Gumbel-Softmax: hard tokens forward, soft gradients backward
+        probs = gumbel_softmax(logits, tau=temperature, hard=True)
+        all_probs.append(probs.unsqueeze(1))
+
+        # Next input: differentiable embed via soft probs
+        next_embed = probs @ dec_token_embedding.weight  # (B, H)
+        generated_embeds = torch.cat(
+            [generated_embeds, next_embed.unsqueeze(1)], dim=1
+        )
+
+    soft_probs = torch.cat(all_probs, dim=1)  # (B, max_len, V)
+    token_ids = soft_probs.argmax(dim=-1)  # (B, max_len)
+    mask = torch.ones(batch, max_len, dtype=torch.bool, device=device)
+    return token_ids, soft_probs, mask
 
 
 # ---------------------------------------------------------------------------
@@ -353,19 +529,65 @@ class VAEPretrainer:
         torch.manual_seed(cfg.seed)
         device = torch.device(cfg.device)
 
-        # 1. Load corpus via loader system
-        lines = _load_corpus_lines(cfg)
-        if not lines:
-            raise RuntimeError("No text lines loaded from corpus")
+        # -- Preprocessing cache: skip load/sanitize/IPA/tokenize if cached --
+        output_dir = str(Path(cfg.output_path).parent)
+        cache_path = Path(output_dir) / "preprocessed_cache.pt"
+        spm_path_cached = Path(output_dir) / "spm.model"
 
-        # 2. Sentencepiece
-        if cfg.spm_model_path is not None:
-            spm_path = cfg.spm_model_path
+        if cache_path.exists() and spm_path_cached.exists():
+            logger.info("Loading preprocessed cache from %s", cache_path)
+            cache = torch.load(cache_path, weights_only=False)
+            token_ids_list = cache["token_ids_list"]
+            vocab_size = cache["vocab_size"]
+            spm_path = str(spm_path_cached)
         else:
-            output_dir = str(Path(cfg.output_path).parent)
-            spm_path = _train_sentencepiece(
-                lines, cfg.spm_vocab_size, output_dir
+            # 1. Load corpus via loader system
+            lines = _load_corpus_lines(cfg)
+            if not lines:
+                raise RuntimeError("No text lines loaded from corpus")
+
+            # 2. Sentencepiece
+            if cfg.spm_model_path is not None:
+                spm_path = cfg.spm_model_path
+            else:
+                spm_path = _train_sentencepiece(
+                    lines, cfg.spm_vocab_size, output_dir
+                )
+
+            try:
+                import sentencepiece as spm_lib
+            except ImportError as e:
+                raise ImportError(
+                    "sentencepiece is required for VAE pretraining."
+                ) from e
+
+            sp = spm_lib.SentencePieceProcessor(model_file=spm_path)
+            vocab_size = sp.vocab_size()
+
+            # 3. Tokenize
+            token_ids_list = []
+            for line in lines:
+                ids = sp.encode(line, out_type=int)
+                if ids:
+                    token_ids_list.append(ids)
+
+            logger.info(
+                "Tokenized %d sequences (vocab_size=%d)",
+                len(token_ids_list),
+                vocab_size,
             )
+
+            # Save cache
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {"token_ids_list": token_ids_list, "vocab_size": vocab_size},
+                cache_path,
+            )
+            logger.info("Saved preprocessed cache to %s", cache_path)
+
+        full_vocab = vocab_size + 2
+        bos_id = vocab_size
+        eos_id = vocab_size + 1
 
         try:
             import sentencepiece as spm_lib
@@ -375,23 +597,6 @@ class VAEPretrainer:
             ) from e
 
         sp = spm_lib.SentencePieceProcessor(model_file=spm_path)
-        vocab_size = sp.vocab_size()
-        full_vocab = vocab_size + 2
-        bos_id = vocab_size
-        eos_id = vocab_size + 1
-
-        # 3. Tokenize
-        token_ids_list: list[list[int]] = []
-        for line in lines:
-            ids = sp.encode(line, out_type=int)
-            if ids:
-                token_ids_list.append(ids)
-
-        logger.info(
-            "Tokenized %d sequences (vocab_size=%d)",
-            len(token_ids_list),
-            vocab_size,
-        )
 
         # 4. Build dataset and split
         dataset = MultilingualCorpusDataset(
@@ -428,6 +633,29 @@ class VAEPretrainer:
         optimizer = torch.optim.AdamW(all_params, lr=cfg.lr)
         scaler = torch.amp.GradScaler(enabled=cfg.use_amp)
 
+        # 5b. Build adversarial discriminator (optional)
+        disc: StructuralDiscriminator | None = None
+        disc_optimizer: torch.optim.AdamW | None = None
+        if cfg.use_adversarial:
+            from lfm.generator.discriminator import StructuralDiscriminator
+
+            disc = StructuralDiscriminator(
+                vocab_size=full_vocab,
+                embed_dim=cfg.adv_disc_embed_dim,
+                hidden_dim=cfg.adv_disc_hidden,
+                use_spectral_norm=cfg.adv_spectral_norm,
+            ).to(device)
+            disc_optimizer = torch.optim.AdamW(
+                disc.parameters(), lr=cfg.adv_lr
+            )
+
+        # 5c. Phonetic distance cache for topo loss
+        _topo_dist_cache = None
+        if cfg.topo_weight > 0:
+            from lfm.data.loaders.phonetic_distance import PhoneticDistanceCache
+
+            _topo_dist_cache = PhoneticDistanceCache()
+
         # 6. Training loop
         import time
 
@@ -454,6 +682,7 @@ class VAEPretrainer:
 
             train_ce_sum = 0.0
             train_kl_sum = 0.0
+            train_topo_sum = 0.0
             train_count = 0
             optimizer.zero_grad()
             epoch_start = time.time()
@@ -467,25 +696,145 @@ class VAEPretrainer:
                 with torch.amp.autocast(
                     device_type=device.type, enabled=cfg.use_amp
                 ):
-                    ce_loss, kl_loss, kl_per_dim_train = _vae_forward(
-                        batch_tokens,
-                        batch_lengths,
-                        bos_id=bos_id,
-                        full_vocab=full_vocab,
-                        kl_free_bits=cfg.kl_free_bits,
-                        **modules,
+                    _do_kl = cfg.kl_weight > 0
+                    ce_loss, kl_loss, kl_per_dim_train, z_batch, dec_hidden = (
+                        _vae_forward(
+                            batch_tokens,
+                            batch_lengths,
+                            bos_id=bos_id,
+                            full_vocab=full_vocab,
+                            kl_free_bits=cfg.kl_free_bits,
+                            compute_kl=_do_kl,
+                            **modules,
+                        )
                     )
 
-                    # KL warmup
-                    kl_scale = (
-                        min(global_step / max(cfg.kl_warmup_steps, 1), 1.0)
-                        * cfg.kl_weight
-                    )
-                    loss = (ce_loss + kl_scale * kl_loss) / accum
+                    # KL: cyclical annealing (ramp 0→1 over warmup, then hold,
+                    # repeat each epoch).  Each cycle lets the encoder
+                    # rediscover useful structure before KL compresses.
+                    if _do_kl:
+                        cycle_pos = global_step % max(cfg.kl_warmup_steps, 1)
+                        kl_scale = (
+                            min(cycle_pos / max(cfg.kl_warmup_steps, 1), 1.0)
+                            * cfg.kl_weight
+                        )
+                    else:
+                        kl_scale = 0.0
+
+                    # Topological regularization: nearby z → similar output.
+                    # Both distances are differentiable (cosine on decoder
+                    # hidden states).  Phonetic Hamming is logged as a
+                    # diagnostic but not used in the loss — its discrete,
+                    # noisy gradients destabilize training.
+                    topo_loss = torch.tensor(0.0, device=device)
+                    if cfg.topo_weight > 0 and b >= 4:
+                        n_pairs = min(cfg.topo_sample_pairs, b // 2)
+                        idx_a = torch.randperm(b, device=device)[:n_pairs]
+                        idx_b = torch.randperm(b, device=device)[:n_pairs]
+
+                        # Both sides differentiable
+                        d_z = (
+                            (z_batch[idx_a] - z_batch[idx_b])
+                            .pow(2)
+                            .sum(-1)
+                            .sqrt()
+                        )
+                        h_a = dec_hidden[idx_a].mean(dim=1)
+                        h_b = dec_hidden[idx_b].mean(dim=1)
+                        d_out = 1.0 - F.cosine_similarity(h_a, h_b, dim=-1)
+
+                        # Normalize to [0,1]
+                        d_z_norm = d_z / d_z.max().clamp(min=1e-6)
+                        d_out_norm = d_out / d_out.max().clamp(min=1e-6)
+                        topo_loss = (d_z_norm - d_out_norm).pow(2).mean()
+
+                    loss = (
+                        ce_loss + kl_scale * kl_loss + cfg.topo_weight * topo_loss
+                    ) / accum
 
                 scaler.scale(loss).backward()
 
+                # -- Adversarial step --
+                adv_loss_val = 0.0
+                d_real_val = 0.0
+                d_fake_val = 0.0
+
+                if (
+                    disc is not None
+                    and disc_optimizer is not None
+                    and global_step >= cfg.adv_warmup_steps
+                    and (i + 1) % 5 == 0  # run every 5th batch (speed)
+                ):
+                    dec_mods = {
+                        k: modules[k]
+                        for k in [
+                            "latent_to_decoder",
+                            "dec_token_embedding",
+                            "dec_pos_embedding",
+                            "decoder",
+                            "output_head",
+                        ]
+                    }
+
+                    # Use a small sub-batch for adversarial step to avoid OOM
+                    # (Gumbel-Softmax AR loop keeps full computation graph)
+                    adv_batch = min(b, 32)
+
+                    # Free-run decode (no grad — diagnostic only)
+                    with torch.no_grad():
+                        gen_tokens, _, gen_mask = _free_run_decode(
+                            torch.randn(adv_batch, cfg.latent_dim, device=device),
+                            cfg.adv_free_run_len,
+                            bos_id=bos_id,
+                            **dec_mods,
+                        )
+
+                    # Real sub-batch to match adversarial batch size
+                    real_tokens = batch_tokens[:adv_batch]
+                    real_lengths = batch_lengths[:adv_batch]
+                    real_mask = (
+                        torch.arange(
+                            real_tokens.size(1), device=device
+                        ).unsqueeze(0)
+                        < real_lengths.unsqueeze(1)
+                    )
+
+                    with torch.amp.autocast(
+                        device_type=device.type, enabled=cfg.use_amp
+                    ):
+                        # Discriminator update only
+                        real_logits = disc(real_tokens, real_mask)
+                        fake_logits = disc(gen_tokens, gen_mask)
+
+                        # Label smoothing: real=0.9, fake=0.1
+                        disc_loss = F.binary_cross_entropy_with_logits(
+                            real_logits,
+                            torch.full_like(real_logits, 0.9),
+                        ) + F.binary_cross_entropy_with_logits(
+                            fake_logits,
+                            torch.full_like(fake_logits, 0.1),
+                        )
+
+                    disc_optimizer.zero_grad()
+                    scaler.scale(disc_loss).backward()
+                    scaler.step(disc_optimizer)
+                    scaler.update()
+
+                    # Log discriminator scores as diagnostics only.
+                    # Generator adversarial gradient is disabled during
+                    # pretraining — the Gumbel-Softmax AR loop accumulates
+                    # unstable gradients over 32 steps causing NaN.  The
+                    # discriminator scores (D_r, D_f) serve as a monitoring
+                    # signal for output quality.  Adversarial generator
+                    # training is deferred to agent integration (frozen
+                    # decoder, single projection layer, stable gradient).
+                    adv_loss_val = disc_loss.item()
+                    d_real_val = torch.sigmoid(real_logits).mean().item()
+                    d_fake_val = torch.sigmoid(fake_logits).mean().item()
+
                 if (i + 1) % accum == 0 or (i + 1) == len(train_loader):
+                    scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(all_params, max_norm=10.0)
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
@@ -493,6 +842,7 @@ class VAEPretrainer:
 
                 train_ce_sum += ce_loss.item() * b
                 train_kl_sum += kl_loss.item() * b
+                train_topo_sum += topo_loss.item() * b
                 train_count += b
 
                 # -- Per-batch logging --
@@ -512,26 +862,36 @@ class VAEPretrainer:
                     else:
                         mem_mb = 0.0
 
+                    adv_str = ""
+                    if disc is not None and global_step >= cfg.adv_warmup_steps:
+                        adv_str = (
+                            f" D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
+                            f" adv={adv_loss_val:.3f}"
+                        )
+
                     logger.info(
-                        "  [%d/%d] step=%d CE=%.3f KL=%.3f "
+                        "  [%d/%d] step=%d CE=%.3f KL=%.3f topo=%.4f "
                         "kl_scale=%.4f active=%d/%d "
-                        "%.0f tok/s %.0fMB",
+                        "%.0f tok/s %.0fMB%s",
                         i + 1,
                         num_batches,
                         global_step,
                         ce_loss.item(),
                         kl_loss.item(),
+                        topo_loss.item(),
                         kl_scale,
                         active,
                         cfg.latent_dim,
                         tokens_per_sec,
                         mem_mb,
+                        adv_str,
                     )
                     batch_start = time.time()
 
             train_ce = train_ce_sum / max(train_count, 1)
             train_kl = train_kl_sum / max(train_count, 1)
-            train_loss = train_ce + cfg.kl_weight * train_kl
+            train_topo = train_topo_sum / max(train_count, 1)
+            train_loss = train_ce + cfg.kl_weight * train_kl + cfg.topo_weight * train_topo
 
             # -- Validate --
             for m in modules.values():
@@ -553,12 +913,13 @@ class VAEPretrainer:
                     with torch.amp.autocast(
                         device_type=device.type, enabled=cfg.use_amp
                     ):
-                        ce_loss, kl_loss, kl_per_dim = _vae_forward(
+                        ce_loss, kl_loss, kl_per_dim, _, _ = _vae_forward(
                             batch_tokens,
                             batch_lengths,
                             bos_id=bos_id,
                             full_vocab=full_vocab,
-                            kl_free_bits=0.0,  # raw KL for diagnostics
+                            kl_free_bits=0.0,
+                            compute_kl=_do_kl,
                             **modules,
                         )
 
@@ -579,14 +940,15 @@ class VAEPretrainer:
             epoch_time = time.time() - epoch_start
 
             logger.info(
-                "Epoch %d/%d (%.0fs) — train: CE=%.4f KL=%.4f total=%.4f | "
-                "val: CE=%.4f KL=%.4f total=%.4f | "
+                "Epoch %d/%d (%.0fs) — train: CE=%.4f KL=%.4f topo=%.4f "
+                "total=%.4f | val: CE=%.4f KL=%.4f total=%.4f | "
                 "active_dims=%d/%d",
                 epoch + 1,
                 cfg.num_epochs,
                 epoch_time,
                 train_ce,
                 train_kl,
+                train_topo,
                 train_loss,
                 val_ce,
                 val_kl,
@@ -595,40 +957,92 @@ class VAEPretrainer:
                 cfg.latent_dim,
             )
 
-            # -- Sample decoded output (greedy from random z) --
+            # -- Epoch-end evaluation: reconstruction, interpolation, perturbation, random --
             with torch.no_grad():
-                z_sample = torch.randn(3, cfg.latent_dim, device=device)
-                mem = modules["latent_to_decoder"](z_sample).unsqueeze(1)
-                dec_emb = modules["dec_token_embedding"]
-                dec_pos = modules["dec_pos_embedding"]
-                dec = modules["decoder"]
-                out_head = modules["output_head"]
 
-                gen_ids = torch.full(
-                    (3, 1), bos_id, dtype=torch.long, device=device
-                )
-                for t in range(cfg.max_seq_len - 1):
-                    pos = torch.arange(
-                        gen_ids.size(1), device=device
-                    ).unsqueeze(0)
-                    tgt = dec_emb(gen_ids) + dec_pos(pos)
-                    causal = nn.Transformer.generate_square_subsequent_mask(
-                        gen_ids.size(1), device=device
+                def _greedy_decode(z: Tensor) -> list[str]:
+                    """Greedy decode z -> token ids -> text."""
+                    n = z.size(0)
+                    mem = modules["latent_to_decoder"](z).unsqueeze(1)
+                    ids = torch.full(
+                        (n, 1), bos_id, dtype=torch.long, device=device
                     )
-                    out = dec(tgt=tgt, memory=mem, tgt_mask=causal)
-                    next_id = out_head(out[:, -1:]).argmax(dim=-1)
-                    gen_ids = torch.cat([gen_ids, next_id], dim=1)
+                    for _t in range(cfg.max_seq_len - 1):
+                        p = torch.arange(ids.size(1), device=device).unsqueeze(0)
+                        tgt = modules["dec_token_embedding"](ids) + modules["dec_pos_embedding"](p)
+                        cm = nn.Transformer.generate_square_subsequent_mask(
+                            ids.size(1), device=device
+                        )
+                        out = modules["decoder"](tgt=tgt, memory=mem, tgt_mask=cm)
+                        nxt = modules["output_head"](out[:, -1:]).argmax(dim=-1)
+                        ids = torch.cat([ids, nxt], dim=1)
+                    texts = []
+                    for j in range(n):
+                        toks = ids[j, 1:].cpu().tolist()
+                        if eos_id in toks:
+                            toks = toks[: toks.index(eos_id)]
+                        toks = [x for x in toks if x < vocab_size]
+                        texts.append(sp.decode(toks))
+                    return texts
 
-                # Decode to text via sentencepiece
-                for j in range(3):
-                    ids_list = gen_ids[j, 1:].cpu().tolist()  # skip BOS
-                    # Truncate at EOS
-                    if eos_id in ids_list:
-                        ids_list = ids_list[: ids_list.index(eos_id)]
-                    # Filter special tokens
-                    ids_list = [x for x in ids_list if x < vocab_size]
-                    text = sp.decode(ids_list)
-                    logger.info("  sample[%d]: %s", j, text[:120])
+                def _encode_text(tokens: Tensor, lengths: Tensor) -> Tensor:
+                    """Encode token batch -> z via the VAE encoder."""
+                    sl = tokens.size(1)
+                    src_mask = (
+                        torch.arange(sl, device=device).unsqueeze(0)
+                        < lengths.unsqueeze(1)
+                    )
+                    pos = torch.arange(sl, device=device).unsqueeze(0)
+                    enc_tok = modules["enc_token_embedding"](tokens)
+                    enc_in = enc_tok + modules["enc_pos_embedding"](pos)
+                    enc_out = modules["encoder"](enc_in, src_key_padding_mask=~src_mask)
+                    masked = enc_out * src_mask.unsqueeze(-1).float()
+                    denom = lengths.unsqueeze(-1).float().clamp(min=1)
+                    pooled = masked.sum(dim=1) / denom
+                    h = modules["enc_to_latent"](pooled)
+                    mu, _ = h.chunk(2, dim=-1)
+                    return mu  # deterministic at eval
+
+                # Grab 2 real sentences from validation set
+                val_batch_tokens, val_batch_lengths = next(iter(val_loader))
+                val_batch_tokens = val_batch_tokens[:2].to(device)
+                val_batch_lengths = torch.as_tensor(
+                    val_batch_lengths[:2], device=device
+                )
+
+                # --- 1. Reconstruction ---
+                z_real = _encode_text(val_batch_tokens, val_batch_lengths)
+                recon_texts = _greedy_decode(z_real)
+                for j in range(2):
+                    orig_ids = val_batch_tokens[j].cpu().tolist()
+                    orig_ids = [x for x in orig_ids[:val_batch_lengths[j]] if x < vocab_size]
+                    orig = sp.decode(orig_ids)
+                    logger.info("  recon[%d] orig: %s", j, orig[:100])
+                    logger.info("  recon[%d]  dec: %s", j, recon_texts[j][:100])
+
+                # --- 2. Interpolation (between the two sentences) ---
+                alphas = [0.0, 0.25, 0.5, 0.75, 1.0]
+                z_interp = torch.stack(
+                    [z_real[0] * (1 - a) + z_real[1] * a for a in alphas]
+                )
+                interp_texts = _greedy_decode(z_interp)
+                for k, (a, txt) in enumerate(zip(alphas, interp_texts)):
+                    logger.info("  interp[%.2f]: %s", a, txt[:100])
+
+                # --- 3. Perturbation (add small noise to z_real[0]) ---
+                noise_scales = [0.0, 0.1, 0.5, 1.0]
+                z_perturbed = torch.stack(
+                    [z_real[0] + s * torch.randn_like(z_real[0]) for s in noise_scales]
+                )
+                perturb_texts = _greedy_decode(z_perturbed)
+                for k, (s, txt) in enumerate(zip(noise_scales, perturb_texts)):
+                    logger.info("  perturb[σ=%.1f]: %s", s, txt[:100])
+
+                # --- 4. Random z (prior sampling) ---
+                z_random = torch.randn(3, cfg.latent_dim, device=device)
+                random_texts = _greedy_decode(z_random)
+                for j, txt in enumerate(random_texts):
+                    logger.info("  random[%d]: %s", j, txt[:100])
 
             # Save best checkpoint (decoder only)
             if val_loss < best_val_loss:
@@ -694,7 +1108,9 @@ class VAEPretrainer:
             batch_first=True,
         )
         encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=cfg.encoder_num_layers
+            encoder_layer,
+            num_layers=cfg.encoder_num_layers,
+            enable_nested_tensor=False,
         ).to(device)
         enc_to_latent = nn.Linear(hidden, cfg.latent_dim * 2).to(device)
 

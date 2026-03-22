@@ -54,7 +54,7 @@ class GeneratorConfig(LFMBaseConfig):
     decoder_num_heads: int = 4
     decoder_dropout: float = 0.2
     kl_weight: float = 0.1
-    kl_free_bits: float = 2.0
+    kl_free_bits: float = 0.5
     temperature: float = 1.0
     temperature_min: float = 0.5
     temperature_anneal_steps: int = 10000

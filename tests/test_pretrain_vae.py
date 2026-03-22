@@ -67,7 +67,7 @@ def test_pretrain_config_defaults():
     assert cfg.decoder_num_layers == 2
     assert cfg.decoder_num_heads == 4
     assert cfg.latent_dim == 128
-    assert cfg.kl_free_bits == 2.0
+    assert cfg.kl_free_bits == 0.5
     assert cfg.batch_size == 32
     assert cfg.gradient_accumulation_steps == 2
     assert cfg.use_amp is True
@@ -83,5 +83,5 @@ def test_generator_config_conservative_defaults():
     assert cfg.decoder_num_layers == 2
     assert cfg.decoder_num_heads == 4
     assert cfg.latent_dim == 128
-    assert cfg.kl_free_bits == 2.0
+    assert cfg.kl_free_bits == 0.5
     assert cfg.decoder_dropout == 0.2
