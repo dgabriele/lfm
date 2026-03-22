@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from lfm.channel.config import ChannelConfig
 from lfm.config.base import LFMBaseConfig
+from lfm.generator.config import GeneratorConfig
 from lfm.morphology.config import MorphologyConfig
 from lfm.phonology.config import PhonologyConfig
 from lfm.quantization.config import QuantizationConfig
@@ -22,6 +23,9 @@ class FacultyConfig(LFMBaseConfig):
     Attributes:
         dim: Default internal embedding dimension shared across stages.
         max_seq_len: Maximum sequence length for token sequences.
+        generator: Generator stage config, or ``None`` to skip.  When
+            configured, the generator runs after input processing and before
+            phonology, replacing flowing tokens/embeddings with its output.
         quantizer: Quantization stage config, or ``None`` to skip.
         phonology: Phonology stage config, or ``None`` to skip.
             Enabled by default with learnable phonotactic constraints.
@@ -36,6 +40,7 @@ class FacultyConfig(LFMBaseConfig):
     pretokenized_dim: int | None = None
     """Embedding dim of pre-tokenized external input. Creates a projection
     to ``dim`` when set. ``None`` (default) disables."""
+    generator: GeneratorConfig | None = None
     quantizer: QuantizationConfig | None = None
     phonology: PhonologyConfig | None = PhonologyConfig()
     morphology: MorphologyConfig | None = None

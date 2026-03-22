@@ -30,6 +30,7 @@ from lfm.faculty.config import FacultyConfig
 
 # --- Faculty ---
 from lfm.faculty.model import LanguageFaculty
+from lfm.generator.config import GeneratorConfig
 from lfm.morphology.config import MorphologyConfig
 from lfm.phonology.config import PhonologyConfig
 from lfm.quantization.config import QuantizationConfig
@@ -62,6 +63,7 @@ __all__ = [
     "DataConfig",
     "ExperimentConfig",
     "FacultyConfig",
+    "GeneratorConfig",
     "LFMBaseConfig",
     "MorphologyConfig",
     "OptimizerConfig",

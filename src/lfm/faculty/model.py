@@ -45,6 +45,8 @@ _CONCRETE_MODULES: list[str] = [
     "lfm.losses.information",
     "lfm.losses.diversity",
     "lfm.losses.morphological",
+    "lfm.generator.multilingual_vae",
+    "lfm.data.loaders.leipzig",
 ]
 
 _registry_loaded = False
@@ -97,12 +99,17 @@ class LanguageFaculty(nn.Module):
         _ensure_registry()
 
         # -- Instantiate sub-modules from configs via registry ---------------
+        self.generator: LFMModule | None = None
         self.quantizer: LFMModule | None = None
         self.phonology: LFMModule | None = None
         self.morphology: LFMModule | None = None
         self.syntax: LFMModule | None = None
         self.sentence: LFMModule | None = None
         self.channel: LFMModule | None = None
+
+        # Generator is handled separately — not a sequential pipeline stage.
+        if config.generator is not None:
+            self.generator = create("generator", config.generator.name, config.generator)
 
         stage_configs: dict[str, Any] = {
             "quantizer": config.quantizer,
@@ -150,6 +157,15 @@ class LanguageFaculty(nn.Module):
             if self.config.pretokenized_dim != dim:
                 projections["pretokenized_to_faculty"] = nn.Linear(
                     self.config.pretokenized_dim, dim
+                )
+
+        # Generator decoder_hidden_dim -> faculty dim.
+        if self.generator is not None:
+            g_cfg = self.config.generator
+            assert g_cfg is not None
+            if g_cfg.decoder_hidden_dim != dim:
+                projections["generator_to_faculty"] = nn.Linear(
+                    g_cfg.decoder_hidden_dim, dim
                 )
 
         # Syntax latent dim -> faculty dim (for constituent representations).
@@ -282,6 +298,20 @@ class LanguageFaculty(nn.Module):
                         batch, 1, dtype=torch.bool, device=agent_state.device
                     )
 
+        # ---- Generator (optional, runs before linguistic stages) ----------
+        if self.generator is not None and embeddings is not None:
+            assert mask is not None
+            g_out = self.generator(embeddings, mask)
+            self._merge(outputs, self.generator.output_prefix, g_out)
+
+            # Generator's decoder states become the new embeddings
+            embeddings = g_out["embeddings"]
+            if "generator_to_faculty" in self.projections:
+                embeddings = self.projections["generator_to_faculty"](embeddings)
+
+            tokens = g_out["tokens"]
+            mask = g_out["mask"]
+
         # ---- Phonology ---------------------------------------------------
         if self.phonology is not None and embeddings is not None:
             if tokens is None:
@@ -380,6 +410,10 @@ class LanguageFaculty(nn.Module):
             if module is not None:
                 for k, v in module.extra_losses().items():
                     losses[f"{module.output_prefix}.{k}"] = v
+        # Generator is not in _STAGES — aggregate its losses separately.
+        if self.generator is not None:
+            for k, v in self.generator.extra_losses().items():
+                losses[f"{self.generator.output_prefix}.{k}"] = v
         return losses
 
     # ------------------------------------------------------------------

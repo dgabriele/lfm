@@ -10,7 +10,7 @@ LFM is a learnable system that imposes morphosyntactic and sentence-level constr
 
 1. [Vision](#vision)
 2. [The Problem](#the-problem)
-3. [The Pipeline](#the-pipeline)
+3. [Pipelines](#pipelines)
 4. [Approach to Phonetics](#approach-to-phonetics)
 5. [Agent Games](#proof-of-concept-agent-games-for-development)
 6. [Design](#design)
@@ -50,37 +50,76 @@ Crucially, this is translation, not latent space alignment. Alignment methods ma
 
 The alternative — agents communicating in raw latent vectors or degenerate codes — gives an LLM nothing to work with. Structure is what makes translation possible, and language-like structure is what makes it learnable.
 
-## The Pipeline
+## Pipelines
 
-LFM provides a configurable pipeline of neural modules:
+LFM provides two approaches to imposing linguistic structure on agent communication. Both are configurable, composable, and produce the same dict-return output format. They can even run together — the generator's output feeds into the modular stages for further structural analysis.
 
-### Quantization
+### Pipeline A: Modular Linguistic Stages
+
+A sequence of independently configurable neural modules, each imposing a specific structural constraint:
+
+#### Quantization
 
 The entry point. An agent's continuous internal state — a dense vector encoding whatever it has observed, inferred, or decided — must become discrete before it can be language. The quantizer maps this continuous representation into a sequence of discrete tokens drawn from a learned codebook. This is analogous to the transition from pre-linguistic thought to the discrete units of speech. Multiple quantization strategies are supported (VQ-VAE, Finite Scalar Quantization, Lookup-Free Quantization), each with different tradeoffs between codebook utilization, training stability, and representational capacity. The codebook size and sequence length are configurable — more tokens means higher fidelity but longer utterances.
 
-### Phonology
+#### Phonology
 
 The emergent language must be pronounceable. Without this constraint, the system would happily produce sequences of arbitrary symbols that carry information but have no phonological structure — no syllables, no rhythm, no way for a human to even attempt to say them aloud. The phonology module maps discrete tokens to phoneme-like sequences constrained by universal phonotactic rules (onset/nucleus/coda syllable structure, sonority sequencing) while letting the specific phoneme inventory, cluster rules, and harmony patterns emerge from training. The system might converge on a small Hawaiian-like inventory, a complex Georgian-like cluster system, or something with no human analogue — whatever communication pressure selects for. This matters for the translation pipeline: a language with recognizable sound patterns is far more learnable by an LLM than an arbitrary symbol stream, and it makes the emergent language something humans can engage with directly — reading it, speaking it, developing intuitions about it.
 
-### Morphology
+#### Morphology
 
 The main structural engine. Learns subword segmentation and composition, and produces learned grammatical feature vectors per token — latent dimensions shaped by communication pressure, not predefined linguistic categories. The morphology module doesn't prescribe any particular typological strategy. The emergent language might be isolating (like Mandarin — minimal morphology, structure carried by word order and particles), agglutinative (like Turkish — transparent morpheme chains), polysynthetic (like Mohawk — entire clauses packed into single words), fusional, or some hybrid with no human analogue. What emerges is determined by the communication pressure of the agent's scenario, not by the architecture.
 
-### Agreement and Ordering
+#### Agreement and Ordering
 
 Lightweight structural pressure that operates on morphological features. Learns soft agreement constraints between positions and information-theoretic ordering preferences. There is no explicit grammar — no parse trees, no constituency rules. Structure emerges from whatever combination of morphological marking and word order the system finds most effective. A scenario with limited bandwidth might favor dense morphological packing. A scenario where ordering is cheap might favor isolating structure with strict word order. The system adapts.
 
-### Sentence Structure
+#### Sentence Structure
 
 Not all utterances serve the same function. Statements, questions, imperatives, and exclamations have distinct structural signatures in every human language — different word orders, particles, intonation patterns, morphological markers. The sentence module learns to differentiate these and to detect boundaries between sentences within longer sequences. This gives the emergent language discourse structure: the ability to ask and answer, to assert and qualify, to build multi-sentence narratives rather than producing an undifferentiated stream.
 
-### Channel
+#### Channel
 
 The communication bottleneck. Everything upstream produces a rich, structured representation; the channel compresses it into a discrete message that can be transmitted to another agent. This bottleneck is what creates the pressure for all the upstream structure — morphological economy, agreement patterns, efficient ordering all exist because the channel is finite. The channel supports differentiable discrete transmission (Gumbel-Softmax, straight-through estimation) so gradients flow back through the entire pipeline during training, and configurable noise/capacity constraints that can be tuned to create more or less pressure for compression.
 
-### Training Phases
+#### Training Phases
 
 Each module is optional and swappable. The framework trains in phases — first learning structural priors from multilingual LLM latents (not just English, but diverse language families — SOV, agglutinative, fusional, polysynthetic — giving LFM the flexibility to adapt its structural strategy to whatever a particular agent scenario demands), then progressively introducing corruption pressure, morphological emergence, paraphrastic diversity, and finally agent-integrated training where meaning emerges through interaction.
+
+### Pipeline B: Generative Linguistic Bottleneck
+
+An alternative approach that imposes linguistic structure holistically via a pretrained multilingual VAE. Instead of hand-specifying each structural constraint, a VAE decoder trained on typologically diverse natural language data learns the joint distribution of all structural properties simultaneously — phonotactic well-formedness, morphological organization, compositional regularity — from the data itself.
+
+#### How it works
+
+1. Agent embeddings are pooled and projected into the VAE's latent space (μ, σ)
+2. A sample z is decoded through a frozen autoregressive transformer into variable-length subword tokens
+3. The decoder's pretraining on multilingual data ensures outputs are phonotactically valid, morphologically structured, and compositionally organized — without any stage-by-stage constraint specification
+
+The VAE decoder is **frozen** after pretraining on multilingual natural language data — only the projection from agent embeddings to latent space is learned during agent training. This preserves the linguistic structural prior while letting the agent learn which region of "linguistic space" best expresses its internal representations. KL divergence toward the standard normal prior regularizes the projection, preventing it from collapsing to a degenerate corner of the latent space.
+
+Variable-length output emerges naturally: the autoregressive decoder emits tokens until it produces an EOS token, so structurally simple agent states decode to short sequences while complex ones generate longer expressions.
+
+#### VAE pretraining
+
+The VAE is pretrained separately on multilingual text data before agent training begins:
+
+```python
+from lfm.generator.pretrain import pretrain_vae_decoder, VAEPretrainConfig
+
+metrics = pretrain_vae_decoder(VAEPretrainConfig(
+    corpus_paths=["path/to/multilingual/texts/"],
+    spm_vocab_size=8000,
+    latent_dim=256,
+    decoder_hidden_dim=512,
+))
+```
+
+The pretraining uses teacher forcing with an ELBO objective (reconstruction CE + KL with warmup and free bits). After pretraining, only the decoder weights are saved — the encoder is discarded.
+
+#### Why two approaches
+
+The modular pipeline gives **interpretability and targeted control** — you can inspect what each stage does and tune individual constraints. The generative bottleneck gives a **holistic, data-driven** constraint surface that captures cross-level interactions learned from real language data. Choose based on whether you need fine-grained structural analysis or a stronger, more natural structural prior. Both paths can also run together: the generator produces output tokens that downstream modular stages further analyze.
 
 ## Approach to Phonetics
 
@@ -148,12 +187,29 @@ LFM is developed and validated through agent-based communication games. An agent
 poetry install
 ```
 
+**Pipeline A** — Modular stages:
+
 ```python
 from lfm import LanguageFaculty, FacultyConfig, QuantizationConfig
 
 faculty = LanguageFaculty(FacultyConfig(
     dim=256,
     quantizer=QuantizationConfig(name="vqvae", codebook_size=1024),
+))
+```
+
+**Pipeline B** — Generative bottleneck (requires sentencepiece: `poetry install --with generator`):
+
+```python
+from lfm import LanguageFaculty, FacultyConfig, GeneratorConfig
+
+faculty = LanguageFaculty(FacultyConfig(
+    dim=256,
+    generator=GeneratorConfig(
+        pretrained_decoder_path="data/vae_decoder.pt",
+        latent_dim=256,
+    ),
+    phonology=None,  # or keep for structural analysis of generator output
 ))
 ```
 
@@ -181,6 +237,10 @@ faculty = LanguageFaculty(FacultyConfig(
     ),
 ))
 ```
+
+## Why This Approach?
+
+For an analysis of why structured emergent language — rather than mathematical formalization, latent space alignment, or classical NLP parsing — is the right medium for deriving novel insights from agent representations of dynamical systems, and why this approach has gone unexplored, see **[Why the Language-First Approach Is Underexplored](docs/why-language-first.md)**.
 
 ## Status
 

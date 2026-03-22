@@ -33,15 +33,23 @@ LFM models the *faculty* of language, not any particular human language.
 
 ## Architecture
 
-### Pipeline (LanguageFaculty)
+### Pipelines (LanguageFaculty)
 
+Two approaches to imposing linguistic structure, both composable via the same `LanguageFaculty` compositor:
+
+**Pipeline A: Modular Linguistic Stages**
 ```
 AgentState -> Quantizer -> Phonology -> Morphology -> Syntax -> Sentence -> Channel -> Message
 ```
+Hand-specified sequential stages, each imposing a specific structural constraint. Syntax provides structural agreement and ordering pressure — phrase structure emerges from morphological constraints rather than being imposed by explicit grammars. Each stage is optional (set config to None to skip). Phonology is enabled by default.
 
-Syntax provides structural agreement and ordering pressure -- phrase structure emerges from morphological constraints rather than being imposed by explicit grammars.
+**Pipeline B: Generative Linguistic Bottleneck**
+```
+AgentState -> [Quantizer] -> Generator (VAE) -> [Phonology] -> ... -> Message
+```
+A multilingual VAE pretrained on typologically diverse natural language data imposes linguistic structure holistically. Agent embeddings are projected into the VAE latent space and decoded through a frozen autoregressive transformer into variable-length subword tokens. The decoder is frozen after pretraining; only the input projection is learned during agent training. KL divergence toward N(0,I) regularizes the projection. Downstream stages can optionally further process the generator's output.
 
-Each stage is optional (set config to None to skip). Phonology is enabled by default.
+Both paths coexist — configure `generator` alongside or instead of the modular stages.
 
 ### Package Structure
 
@@ -57,6 +65,7 @@ src/lfm/
   syntax/               # SyntaxModule ABC + structural agreement, ordering pressure
   sentence/             # SentenceModule ABC + type head, boundary detector
   channel/              # Channel ABC + straight-through, Gumbel-softmax, noisy channel
+  generator/            # GeneratorModule ABC + multilingual VAE, tokenizer, pretraining
   losses/               # Structural, compositionality, information, diversity, morphological losses
   faculty/              # FacultyConfig + LanguageFaculty compositor
   training/             # TrainingLoop, TrainingPhase, Callbacks, 5 training phases
@@ -84,6 +93,7 @@ src/lfm/
 ## Commands
 
 - `poetry install` — Install dependencies
+- `poetry install --with generator` — Install with sentencepiece (for VAE pretraining)
 - `poetry run pytest` — Run tests
 - `poetry run ruff check src/` — Lint
 - `poetry run ruff format src/` — Format
@@ -100,10 +110,23 @@ src/lfm/
 ## Usage Example
 
 ```python
+# Pipeline A: Modular stages
 from lfm import LanguageFaculty, FacultyConfig, QuantizationConfig
 
 faculty = LanguageFaculty(FacultyConfig(
     dim=128,
     quantizer=QuantizationConfig(name="vqvae", codebook_size=512),
+))
+
+# Pipeline B: Generative bottleneck
+from lfm import GeneratorConfig
+
+faculty = LanguageFaculty(FacultyConfig(
+    dim=128,
+    generator=GeneratorConfig(
+        pretrained_decoder_path="data/vae_decoder.pt",
+        latent_dim=256,
+    ),
+    phonology=None,  # or keep for structural analysis of generator output
 ))
 ```
