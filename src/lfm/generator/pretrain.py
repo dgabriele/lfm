@@ -602,11 +602,13 @@ class VAEPretrainer:
             sp = spm_lib.SentencePieceProcessor(model_file=spm_path)
             vocab_size = sp.vocab_size()
 
-            # 3. Tokenize
+            # 3. Tokenize and strip SPM special tokens (unk, bos, eos, pad)
+            _spm_specials = {0, 1, 2, 3}
             token_ids_list = []
             for line in lines:
                 ids = sp.encode(line, out_type=int)
-                if ids:
+                ids = [x for x in ids if x not in _spm_specials]
+                if len(ids) >= 5:
                     token_ids_list.append(ids)
 
             logger.info(
@@ -1082,6 +1084,11 @@ class VAEPretrainer:
                             )
                             out = _dec(tgt=tgt, memory=mem, tgt_mask=cm)
                         logits = modules["output_head"](out[:, -1])
+                        # Suppress special tokens: unk(0), bos(1), eos_spm(2),
+                        # pad(3), and our BOS/EOS past vocab_size
+                        logits[:, 0:4] = float("-inf")
+                        logits[:, bos_id] = float("-inf")
+                        # (eos_id is allowed — it signals end of sequence)
                         # Repetition penalty: only 3+ repeats in window
                         if pen > 1.0 and ids.size(1) > 1:
                             start = max(1, ids.size(1) - win)
@@ -1097,12 +1104,17 @@ class VAEPretrainer:
                                             logits[bi, tid] *= scale
                         nxt = logits.argmax(dim=-1, keepdim=True)
                         ids = torch.cat([ids, nxt], dim=1)
+                    # SPM special token IDs to exclude from decode
+                    _spm_specials = {0, 1, 2, 3, bos_id, eos_id}
                     texts = []
                     for j in range(n):
                         toks = ids[j, 1:].cpu().tolist()
                         if eos_id in toks:
                             toks = toks[: toks.index(eos_id)]
-                        toks = [x for x in toks if x < vocab_size]
+                        toks = [
+                            x for x in toks
+                            if x < vocab_size and x not in _spm_specials
+                        ]
                         texts.append(sp.decode(toks))
                     return texts
 
