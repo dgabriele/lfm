@@ -61,7 +61,7 @@ The NLTokenizer's z space is shaped by five training pressures, activated in two
 | Loss | Weight | Signal |
 |------|--------|--------|
 | Feature reconstruction `‖h - ĥ‖²` | 1.0 | VAE decoder must faithfully reconstruct the concatenated family embeddings from z |
-| KL divergence `KL(q(z|x) ‖ N(0,I))` with free-bits | 0.1 (ramping 0→full) | z is a well-structured continuous latent space |
+| KL divergence with free-bits | 0.1 (ramping 0→full) | z is a well-structured continuous latent space |
 | Theta inverse `‖θ - θ̂‖²` | 1.0 | z must encode enough to recover the original Lenia operator parameters |
 | IC inverse `‖IC - IC_hat‖²` | 0.5 | z must encode enough to recover initial condition features |
 
