@@ -1047,29 +1047,38 @@ class VAEPretrainer:
             # -- Epoch-end evaluation: reconstruction, interpolation, perturbation, random --
             with torch.no_grad():
 
-                def _greedy_decode(z: Tensor) -> list[str]:
-                    """Greedy decode z -> token ids -> text with rep penalty."""
-                    from collections import Counter
+                def _sample_decode(
+                    z: Tensor,
+                    top_p: float = 0.9,
+                    temperature: float = 0.8,
+                ) -> list[str]:
+                    """Decode z via nucleus (top-p) sampling.
 
+                    Replaces greedy argmax + repetition penalties with
+                    sampling from the top-p probability mass.  Naturally
+                    produces diverse, non-repetitive output.
+                    """
                     from lfm.generator.layers import (
                         LinguisticDecoder,
                         multiscale_causal_mask,
                     )
 
                     _dec = modules["decoder"]
-                    _is_linguistic = isinstance(_dec, LinguisticDecoder)
+                    _is_ling = isinstance(_dec, LinguisticDecoder)
                     n = z.size(0)
                     mem = modules["latent_to_decoder"](z).unsqueeze(1)
                     ids = torch.full(
                         (n, 1), bos_id, dtype=torch.long, device=device
                     )
-                    pen = cfg.repetition_penalty
-                    win = cfg.repetition_window
                     for _t in range(cfg.max_seq_len - 1):
-                        if _is_linguistic:
+                        if _is_ling:
                             tgt = modules["dec_token_embedding"](ids)
-                            if not isinstance(modules["dec_pos_embedding"], nn.Identity):
-                                p = torch.arange(ids.size(1), device=device).unsqueeze(0)
+                            if not isinstance(
+                                modules["dec_pos_embedding"], nn.Identity
+                            ):
+                                p = torch.arange(
+                                    ids.size(1), device=device
+                                ).unsqueeze(0)
                                 tgt = tgt + modules["dec_pos_embedding"](p)
                             cm = multiscale_causal_mask(
                                 ids.size(1),
@@ -1083,53 +1092,39 @@ class VAEPretrainer:
                                 rope_freqs=modules.get("_rope_freqs"),
                             )
                         else:
-                            p = torch.arange(ids.size(1), device=device).unsqueeze(0)
+                            p = torch.arange(
+                                ids.size(1), device=device
+                            ).unsqueeze(0)
                             tok = modules["dec_token_embedding"](ids)
                             tgt = tok + modules["dec_pos_embedding"](p)
                             cm = nn.Transformer.generate_square_subsequent_mask(
                                 ids.size(1), device=device
                             )
                             out = _dec(tgt=tgt, memory=mem, tgt_mask=cm)
+
                         logits = modules["output_head"](out[:, -1])
-                        # Suppress special tokens: unk(0), bos(1), eos_spm(2),
-                        # pad(3), and our BOS/EOS past vocab_size
+                        # Suppress special tokens
                         logits[:, 0:4] = float("-inf")
                         logits[:, bos_id] = float("-inf")
-                        # (eos_id is allowed — it signals end of sequence)
-                        # Repetition penalty: token-level (3+ repeats) +
-                        # ngram-level (penalize completing a repeated bigram
-                        # or trigram). Catches phrase-level loops like
-                        # "mon xak mon xak mon xak".
-                        if pen > 1.0 and ids.size(1) > 2:
-                            start = max(1, ids.size(1) - win)
-                            recent = ids[:, start:]
-                            for bi in range(n):
-                                toks = recent[bi].tolist()
-                                # Token-level: 3+ same token
-                                tcounts = Counter(toks)
-                                for tid, cnt in tcounts.items():
-                                    if cnt >= 3:
-                                        scale = pen ** (cnt - 2)
-                                        if logits[bi, tid] > 0:
-                                            logits[bi, tid] /= scale
-                                        else:
-                                            logits[bi, tid] *= scale
-                                # Bigram-level: if last token + candidate
-                                # would complete a bigram seen 2+ times
-                                if len(toks) >= 2:
-                                    last = toks[-1]
-                                    bigrams = [
-                                        (toks[k], toks[k + 1])
-                                        for k in range(len(toks) - 1)
-                                    ]
-                                    bg_counts = Counter(bigrams)
-                                    for (a, b), cnt in bg_counts.items():
-                                        if a == last and cnt >= 2:
-                                            if logits[bi, b] > 0:
-                                                logits[bi, b] /= pen ** cnt
-                                            else:
-                                                logits[bi, b] *= pen ** cnt
-                        nxt = logits.argmax(dim=-1, keepdim=True)
+                        # Temperature
+                        logits = logits / max(temperature, 1e-8)
+                        # Nucleus (top-p) filtering
+                        sorted_logits, sorted_idx = torch.sort(
+                            logits, descending=True
+                        )
+                        cumprobs = torch.cumsum(
+                            F.softmax(sorted_logits, dim=-1), dim=-1
+                        )
+                        remove = cumprobs - F.softmax(
+                            sorted_logits, dim=-1
+                        ) >= top_p
+                        sorted_logits[remove] = float("-inf")
+                        logits = torch.zeros_like(logits).scatter_(
+                            1, sorted_idx, sorted_logits
+                        )
+                        # Sample
+                        probs = F.softmax(logits, dim=-1)
+                        nxt = torch.multinomial(probs, num_samples=1)
                         ids = torch.cat([ids, nxt], dim=1)
                     # SPM special token IDs to exclude from decode
                     _spm_specials = {0, 1, 2, 3, bos_id, eos_id}
@@ -1172,6 +1167,9 @@ class VAEPretrainer:
                     mu, _ = h.chunk(2, dim=-1)
                     return mu  # deterministic at eval
 
+                # Fixed seed per epoch for reproducible sampling
+                torch.manual_seed(cfg.seed + epoch)
+
                 # Grab 2 real sentences from validation set
                 val_batch_tokens, val_batch_lengths = next(iter(val_loader))
                 val_batch_tokens = val_batch_tokens[:2].to(device)
@@ -1181,7 +1179,7 @@ class VAEPretrainer:
 
                 # --- 1. Reconstruction ---
                 z_real = _encode_text(val_batch_tokens, val_batch_lengths)
-                recon_texts = _greedy_decode(z_real)
+                recon_texts = _sample_decode(z_real)
                 for j in range(2):
                     orig_ids = val_batch_tokens[j].cpu().tolist()
                     orig_ids = [x for x in orig_ids[:val_batch_lengths[j]] if x < vocab_size]
@@ -1194,7 +1192,7 @@ class VAEPretrainer:
                 z_interp = torch.stack(
                     [z_real[0] * (1 - a) + z_real[1] * a for a in alphas]
                 )
-                interp_texts = _greedy_decode(z_interp)
+                interp_texts = _sample_decode(z_interp)
                 for k, (a, txt) in enumerate(zip(alphas, interp_texts)):
                     logger.info("  interp[%.2f]: %s", a, txt[:100])
 
@@ -1203,13 +1201,13 @@ class VAEPretrainer:
                 z_perturbed = torch.stack(
                     [z_real[0] + s * torch.randn_like(z_real[0]) for s in noise_scales]
                 )
-                perturb_texts = _greedy_decode(z_perturbed)
+                perturb_texts = _sample_decode(z_perturbed)
                 for k, (s, txt) in enumerate(zip(noise_scales, perturb_texts)):
                     logger.info("  perturb[σ=%.1f]: %s", s, txt[:100])
 
                 # --- 4. Random z (prior sampling) ---
                 z_random = torch.randn(3, cfg.latent_dim, device=device)
-                random_texts = _greedy_decode(z_random)
+                random_texts = _sample_decode(z_random)
                 for j, txt in enumerate(random_texts):
                     logger.info("  random[%d]: %s", j, txt[:100])
 
