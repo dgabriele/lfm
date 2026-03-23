@@ -1218,10 +1218,13 @@ class VAEPretrainer:
                 for k, (a, txt) in enumerate(zip(alphas, interp_texts)):
                     logger.info("  interp[%.2f]: %s", a, txt[:100])
 
-                # --- 3. Perturbation (add small noise to z_real[0]) ---
+                # --- 3. Perturbation (add noise scaled to encoder distribution) ---
+                # Scale perturbation by the encoder's actual per-dimension std
+                # so σ=1.0 means one encoder standard deviation, not one unit.
                 noise_scales = [0.0, 0.1, 0.5, 1.0]
                 z_perturbed = torch.stack(
-                    [z_real[0] + s * torch.randn_like(z_real[0]) for s in noise_scales]
+                    [z_real[0] + s * z_running_std * torch.randn_like(z_real[0])
+                     for s in noise_scales]
                 )
                 perturb_texts = _sample_decode(z_perturbed)
                 for k, (s, txt) in enumerate(zip(noise_scales, perturb_texts)):
