@@ -33,15 +33,28 @@ This is analogous to Universal Grammar in the Chomskyan sense: the decoder provi
 The concrete realization of this architecture is the [Spinlock](https://github.com/dgabriele/spinlock) NLTokenizer pipeline, which encodes dynamical system behavior into continuous VAE embeddings that flow directly into LFM:
 
 ```
-Lenia/PDE dynamics → Feature extraction (temporal + IC + θ)
-    → Family encoders (Pyramid/MLP) → concatenate
-    → VAE encoder → μ, logvar → z [B, 256]
-        ├── z_coarse (64 dims): behavioral category
-        └── z_fine (192 dims): fine-grained dynamics
-    → LFM frozen decoder → IPA tokens (Gumbel-Softmax)
-    → NLListener → z_hat [B, 256]
-
-Loss: reconstruction + KL + θ_inverse + ‖z - z_hat‖²
+Lenia/PDE dynamics
+  ↓
+Feature extraction (learned family-specific encoders)
+  ├── Temporal [B,T,D] → PyramidTemporalEncoder → temporal_emb
+  ├── Initial  [B,D_i] → MLP                    → initial_emb
+  └── Theta    [B,D_θ] → ThetaEncoder           → theta_emb
+  ↓
+Concatenate → h [B, total_encoded_dim]
+  ↓
+VAE encoder → μ, logvar → z [B, latent_dim]
+  ├── z_coarse (64 dims): behavioral category
+  └── z_fine (remaining dims): fine-grained dynamics
+  ↓
+┌─────────────────────────────────────────────────┐
+│  Three parallel paths from z:                   │
+│                                                 │
+│  1. Feature decoder: z → h_hat (reconstruction) │
+│  2. Inverse decoders: z → θ_hat, IC_hat         │
+│  3. LFM frozen decoder: z → IPA token_probs     │
+│        ↓                                        │
+│     NLListener: token_probs → z_hat (roundtrip) │
+└─────────────────────────────────────────────────┘
 ```
 
 No text interface. No latent space alignment. No discrete quantization. The dynamical system's continuous latent state flows directly through a frozen linguistic decoder into structured phonetic output.
@@ -54,7 +67,7 @@ This is not interpretability by decree (alignment) or by accident (hoping the te
 
 ### Co-Learned Representation Space
 
-The NLTokenizer's z space is shaped by five training pressures, activated in two stages:
+The NLTokenizer's z space is shaped by six training pressures, activated in two stages:
 
 **Stage 1: VAE Warmup** (epochs 0 → `kl_warmup_epochs`)
 
@@ -62,8 +75,9 @@ The NLTokenizer's z space is shaped by five training pressures, activated in two
 |------|--------|--------|
 | Feature reconstruction `‖h - ĥ‖²` | 1.0 | VAE decoder must faithfully reconstruct the concatenated family embeddings from z |
 | KL divergence with free-bits | 0.1 (ramping 0→full) | z is a well-structured continuous latent space |
-| Theta inverse `‖θ - θ̂‖²` | 1.0 | z must encode enough to recover the original Lenia operator parameters |
+| Theta inverse (behavioral) | 1.0 | z must encode enough to recover operator parameters — compared in *encoding space* to handle many-to-many mapping |
 | IC inverse `‖IC - IC_hat‖²` | 0.5 | z must encode enough to recover initial condition features |
+| Topographic `1 - ρ(d_h, d_z)` | 0.5 | Pairwise distances in feature space (h) must correlate with pairwise distances in latent space (z) |
 
 **Stage 2: Full + Listener** (epochs `listener_start_epoch` →)
 
@@ -75,11 +89,13 @@ All of the above, plus:
 
 **What each pressure ensures:**
 
-- **Reconstruction + KL**: Standard VAE — z is a well-structured continuous latent space
-- **Theta/IC inverse**: z encodes physics — not just statistical features but enough to recover operator parameters and initial conditions. Note: the current implementation uses direct parameter regression (MSE against ground-truth θ and IC). A planned improvement is to operate in behavioral space instead, accounting for the many-to-many mapping between (θ, IC) and dynamics — many parameter combinations produce similar behavior, so the inverse should target behavioral equivalence classes rather than specific parameter values. This would ensure that sampling around z smoothly interpolates *behavior*, not parameters
+- **Reconstruction + KL**: Standard VAE — z is a well-structured continuous latent space.
+- **Theta inverse (behavioral)**: z encodes physics — the predicted θ_hat is re-encoded through the theta encoder and compared against the ground-truth theta's encoding: `‖encoder(θ_hat) - encoder(θ_true)‖²`. This operates in *behavioral embedding space*, not raw parameter space, correctly handling the many-to-many mapping between parameters and dynamics. Many different parameter values produce similar behavior; comparing in encoding space means the loss is zero when the predicted parameters are behaviorally equivalent to the ground truth, even if numerically different.
+- **IC inverse**: z must encode enough to recover initial condition features (direct MSE in feature space).
+- **Topographic**: Pearson correlation between pairwise distances in h-space (behavioral features) and z-space (latent). This ensures that the latent topology preserves behavioral neighborhoods — nearby z values correspond to nearby behaviors, enabling smooth interpolation.
 - **Listener roundtrip**: z encodes physics *through text* — the NL expression is the information bottleneck. Without this, the generator produces grammatically correct but semantically arbitrary text. Gradients flow: L2 → listener → soft token_probs (via embedding weight matmul) → generator input projection. The frozen decoder never receives gradients.
 
-The listener roundtrip is the critical pressure — it is strictly stronger than a z-space roundtrip because it forces information to survive the text bottleneck, not just a parameter re-encoding. Together, these five pressures ensure z is a shared representation between the dynamical system and the linguistic output. This isn't alignment (forcing one space to match another) — it's co-learning of a single space that serves both physics and language.
+The listener roundtrip is the critical pressure — it is strictly stronger than a z-space roundtrip because it forces information to survive the text bottleneck, not just a parameter re-encoding. The topographic loss complements it by ensuring the latent space itself is smoothly organized. Together, these six pressures ensure z is a shared representation between the dynamical system and the linguistic output. This isn't alignment (forcing one space to match another) — it's co-learning of a single space that serves both physics and language.
 
 ### Architectural Scale Separation
 
@@ -96,14 +112,12 @@ English description → LLM → IPA → NLListener → z_hat → θ_inverse → 
     → Run UAFNO with (θ_hat, IC_hat) → simulation with matching behavior
 ```
 
-Every step is a learned mapping. The key insight is that the inversion targets *behavior*, not parameters. Because the relationship between (θ, IC) and dynamical behavior is many-to-many, the inverse process yields some (θ, IC) that produces the distributionally closest behavioral match in z-space — not necessarily the original parameters. This is a feature: θ and IC range freely to maximize diversity, while the VAE's latent topology ensures that nearby z values correspond to nearby behaviors.
+Every step is a learned mapping. The key insight is that the inversion targets *behavior*, not parameters. Because the relationship between (θ, IC) and dynamical behavior is many-to-many, the theta inverse loss compares in encoding space (`‖encoder(θ_hat) - encoder(θ_true)‖²`), not parameter space. This means the inverse process yields some (θ, IC) that produces the distributionally closest behavioral match — not necessarily the original parameters. This is a feature: θ and IC range freely to maximize diversity, while the VAE's latent topology (enforced by topographic loss) ensures that nearby z values correspond to nearby behaviors.
 
 This means you can:
 - **Sample around a z** to get smoothly interpolated behavioral variants
 - **Invert a description** to find simulations whose dynamics the agent would describe in similar terms
 - **Explore the behavioral manifold** by moving through z-space, with the linguistic output tracking the behavioral changes
-
-Note: full behavioral invertibility requires the theta/IC inverse losses to target behavioral equivalence classes rather than literal parameter values (planned improvement in Spinlock). The current implementation uses direct parameter regression, which approximates this when the dataset's parameter-to-behavior mapping is approximately injective.
 
 This kind of behavioral inversion is impossible with latent space alignment, because the alignment collapses the behavioral topology onto linguistic semantics.
 
@@ -113,10 +127,10 @@ This kind of behavioral inversion is impossible with latent space alignment, bec
 |---|---|---|
 | Interface | Text API or latent alignment | Continuous VAE z → frozen decoder |
 | Information preservation | Unverified | Guaranteed by listener roundtrip loss |
-| Agent ontology | Collapsed to human semantics | Preserved — 5 co-training pressures shape z |
+| Agent ontology | Collapsed to human semantics | Preserved — 6 co-training pressures shape z |
 | Invertibility | Lost at text/alignment boundary | Full path: description → z → θ → simulation |
 | Compositional structure | Depends on LLM tokenization | Inherited from frozen multilingual decoder |
-| Training signal | Separate (LQM and LLM train independently) | Joint (reconstruction, KL, θ/IC inverse, listener roundtrip) |
+| Training signal | Separate (LQM and LLM train independently) | Joint (reconstruction, KL, behavioral θ/IC inverse, topographic, listener roundtrip) |
 | Novel concept expression | Suppressed by alignment | Possible — z can encode states with no human name |
 | Scale separation | Not architectural | Architectural: z_coarse/z_fine ↔ multi-scale attention |
 
