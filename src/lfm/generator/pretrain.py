@@ -717,7 +717,8 @@ class VAEPretrainer:
             logger.info("Resuming from %s", resume_path)
             ckpt = torch.load(resume_path, map_location=device, weights_only=False)
             for k, m in modules.items():
-                m.load_state_dict(ckpt["modules"][k])
+                if isinstance(m, nn.Module) and k in ckpt["modules"]:
+                    m.load_state_dict(ckpt["modules"][k])
             optimizer.load_state_dict(ckpt["optimizer"])
             scaler.load_state_dict(ckpt["scaler"])
             start_epoch = ckpt["epoch"]
