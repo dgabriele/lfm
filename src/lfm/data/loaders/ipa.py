@@ -149,6 +149,32 @@ class IPAConverter:
             return None
 
 
+# Characters allowed in cleaned IPA output:
+# - Unicode letters (IPA symbols, diacritics) — \w covers these
+# - IPA suprasegmentals: ː ˈ ˌ ˑ
+# - Combining diacritics: U+0300-U+036F (nasalization, tone, etc.)
+# - Tie bars: ͡ ͜ (for affricates like t͡s)
+# - Spaces (word boundaries)
+# Everything else (quotes, brackets, digits, punctuation) is stripped.
+_IPA_ALLOWED = re.compile(
+    r"[^\w\sːˈˌˑ\u0300-\u036F\u0361\u035C]",
+    re.UNICODE,
+)
+
+
+def _clean_ipa(text: str) -> str:
+    """Strip non-IPA characters from transcribed text.
+
+    Removes quotation marks, brackets, digits, and other orthographic
+    noise that leaks through from news text.  Keeps only IPA-valid
+    characters: letters, diacritics, suprasegmentals, tie bars, and spaces.
+    """
+    cleaned = _IPA_ALLOWED.sub("", text)
+    # Collapse multiple spaces
+    cleaned = " ".join(cleaned.split())
+    return cleaned.strip()
+
+
 def _convert_one(sample: tuple[str, str]) -> str | None:
     """Convert a single ``(lang, text)`` to IPA.  Module-level for pickling."""
     # Each worker gets its own converter (epitran is not thread-safe)
@@ -156,8 +182,11 @@ def _convert_one(sample: tuple[str, str]) -> str | None:
     if "_worker_converter" not in globals() or _worker_converter is None:
         _worker_converter = IPAConverter(drop_unconvertible=True)
     ipa = _worker_converter.convert_line(sample[0], sample[1])
-    if ipa and len(ipa.strip()) >= 10:
-        return ipa.strip()
+    if not ipa:
+        return None
+    ipa = _clean_ipa(ipa)
+    if len(ipa) >= 10:
+        return ipa
     return None
 
 
