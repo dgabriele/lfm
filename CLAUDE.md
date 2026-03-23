@@ -88,10 +88,20 @@ ia prebɪl pre momento pre ninlasikanlas sɛzt͡sɨ a tɯŋ prebɪlnɔɕt͡ɕi p
 
 ## Agent Game Results
 
-REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim):
-- **87.5% accuracy** at step 650 (chance = 12.5%, **7× above random**)
-- Variable-length messages (17-22 tokens) via z-norm scaling
-- Baseline accuracy: 73% and climbing
+REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K sentences):
+- **~95% accuracy** on 16-way discrimination with **100% hard negatives** (within-cluster distractors)
+- Chance = 6.25%, **15.2× above random**
+- Curriculum: 0% → 100% hard negatives over 500 steps, stable plateau at ~95%
+- Batch size 512, converges in ~500 steps
+- Variable-length messages (17-19 tokens) via z-norm scaling
+
+### Evaluation Scripts
+
+- `scripts/eval_topology.py` — Semantic topology preservation (input sim → message sim correlation)
+- `scripts/eval_compositionality.py` — Topsim, positional disentanglement, diagnostic probes
+- `scripts/train_translator.py` — IPA → English LLM translation pilot
+
+Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained projection (vs random baseline).
 
 ## Commands
 

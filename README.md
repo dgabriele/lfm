@@ -182,17 +182,30 @@ random[2]: ia prebɪl pre momento pre ninlasikanlas sɛzt͡sɨ a tɯŋ prebɪln�
 
 ## Agent Game Results
 
-REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences):
+REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives that ramp from random distractors to within-cluster (semantically similar) distractors over training:
 
 | Metric | Value |
 |--------|-------|
-| Average accuracy | **93%** (chance = 12.5%) |
-| Peak batch accuracy | **100%** |
-| Improvement over chance | **7.4×** |
-| Message length | 16-25 tokens (variable) |
-| Receiver loss | 0.002-0.25 (from 2.1 at start) |
+| Accuracy (100% hard negatives) | **~95%** (chance = 6.25%) |
+| Peak batch accuracy | **96.7%** |
+| Improvement over chance | **15.2×** |
+| Message length | 17-19 tokens (variable) |
+| Receiver loss | 0.07-0.12 (from 2.8 at start) |
+| Batch size | 512 |
+| Convergence | ~500 steps to plateau |
 
-The frozen linguistic bottleneck carries rich discriminative information from real sentence embeddings. Different inputs produce distinguishably different IPA utterances whose length varies with input complexity.
+### Curriculum training
+
+The game starts with random (easy) distractors and linearly ramps to 100% within-cluster (hard) distractors over 500 steps. The system maintains >93% accuracy even when all 15 distractors come from the same semantic cluster as the target — meaning the frozen linguistic bottleneck carries fine-grained discriminative information, not just coarse topic-level distinctions.
+
+```
+step=0    hard=0%    acc=4.7%    (random init)
+step=100  hard=20%   acc=89.1%
+step=250  hard=50%   acc=93.9%
+step=500  hard=100%  acc=94.9%
+step=700  hard=100%  acc=96.7%   (peak)
+step=1500 hard=100%  acc=94.3%   (stable plateau)
+```
 
 ## Quick Start
 

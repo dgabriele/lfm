@@ -92,6 +92,7 @@ def main(
     store_dir: str = "data/embeddings",
     decoder_path: str = "data/vae_decoder.pt",
     spm_path: str = "data/spm.model",
+    input_proj_path: str | None = None,
     num_pairs: int = 2000,
     batch_size: int = 64,
     embedding_dim: int = 384,
@@ -107,6 +108,8 @@ def main(
         store_dir: Path to the embedding store.
         decoder_path: Path to pretrained VAE decoder.
         spm_path: Path to sentencepiece model.
+        input_proj_path: Path to trained input projection checkpoint.
+            If None, uses random initialization (baseline).
         num_pairs: Number of embedding pairs to evaluate.
         batch_size: Batch size for generation.
         embedding_dim: Embedding dimensionality.
@@ -141,6 +144,14 @@ def main(
     # Trigger lazy init
     with torch.no_grad():
         faculty(torch.randn(1, embedding_dim, device=torch_device))
+
+    # Load trained input projection if provided
+    if input_proj_path is not None:
+        checkpoint = torch.load(input_proj_path, map_location=torch_device, weights_only=True)
+        faculty.generator._input_proj.load_state_dict(checkpoint["input_proj"])
+        logger.info("Loaded trained input projection from %s", input_proj_path)
+    else:
+        logger.info("Using random (untrained) input projection — baseline mode")
 
     # ── Sample pairs ─────────────────────────────────────────────
     idx_a = rng.integers(0, n, size=num_pairs)
@@ -302,4 +313,26 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Semantic topology preservation test")
+    parser.add_argument("--store_dir", default="data/embeddings")
+    parser.add_argument("--decoder_path", default="data/vae_decoder.pt")
+    parser.add_argument("--spm_path", default="data/spm.model")
+    parser.add_argument("--input_proj", default=None, help="Trained input projection checkpoint")
+    parser.add_argument("--num_pairs", type=int, default=2000)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    main(
+        store_dir=args.store_dir,
+        decoder_path=args.decoder_path,
+        spm_path=args.spm_path,
+        input_proj_path=args.input_proj,
+        num_pairs=args.num_pairs,
+        batch_size=args.batch_size,
+        device=args.device,
+        seed=args.seed,
+    )

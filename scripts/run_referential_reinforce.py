@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
@@ -101,15 +102,20 @@ def main(
     store_dir: str = "data/embeddings",
     decoder_path: str = "data/vae_decoder.pt",
     spm_path: str = "data/spm.model",
-    steps: int = 20000,
+    steps: int = 2000,
     sender_lr: float = 1e-4,
     receiver_lr: float = 1e-3,
-    batch_size: int = 16,
-    num_distractors: int = 7,
+    batch_size: int = 512,
+    num_distractors: int = 15,
     embedding_dim: int = 384,
     device: str = "cuda",
     log_every: int = 50,
+    checkpoint_every: int = 100,
     baseline_decay: float = 0.99,
+    curriculum: bool = True,
+    curriculum_warmup: int = 500,
+    curriculum_start: float = 0.0,
+    curriculum_end: float = 1.0,
 ) -> dict[str, float]:
     """Run the REINFORCE referential game.
 
@@ -138,8 +144,6 @@ def main(
             freeze_decoder=True,
             max_output_len=32,  # shorter for speed
         ),
-        quantizer=None,
-        phonology=None,
     )
 
     faculty = LanguageFaculty(faculty_config).to(torch_device)
@@ -175,28 +179,56 @@ def main(
     )
 
     embeddings_np = store._embeddings
+    cluster_labels = store._cluster_labels
     n = embeddings_np.shape[0]
     num_candidates = num_distractors + 1
     chance = 1.0 / num_candidates
+    rng = np.random.default_rng(42)
 
     # REINFORCE baseline (running mean of rewards)
     baseline = 0.0
 
     logger.info(
-        "REINFORCE referential game: %d distractors, chance=%.1f%%",
-        num_distractors, chance * 100,
+        "REINFORCE referential game: %d distractors, chance=%.1f%%, curriculum=%s",
+        num_distractors, chance * 100, curriculum,
     )
+    if curriculum:
+        logger.info(
+            "  curriculum: %.0f%% → %.0f%% hard negatives over %d steps",
+            curriculum_start * 100, curriculum_end * 100, curriculum_warmup,
+        )
 
     for step in range(steps):
+        # --- Curriculum difficulty ---
+        if curriculum:
+            frac = min(step / max(curriculum_warmup, 1), 1.0)
+            hard_ratio = curriculum_start + frac * (curriculum_end - curriculum_start)
+        else:
+            hard_ratio = 0.0
+
         # --- Sample batch ---
-        idx = torch.randint(0, n, (batch_size,))
+        idx = rng.integers(0, n, size=batch_size)
         anchor = torch.tensor(
             embeddings_np[idx], dtype=torch.float32
         ).to(torch_device)
 
-        dist_idx = torch.randint(0, n, (batch_size, num_distractors))
+        # Sample distractors: mix of hard (same cluster) and easy (random)
+        dist_indices = np.empty((batch_size, num_distractors), dtype=np.intp)
+        for i in range(batch_size):
+            n_hard = int(hard_ratio * num_distractors)
+            n_easy = num_distractors - n_hard
+
+            hard_idx = np.empty(0, dtype=np.intp)
+            if n_hard > 0:
+                anchor_cluster = int(cluster_labels[idx[i]])
+                hard_idx = store.sample_from_cluster(
+                    anchor_cluster, n_hard, rng=rng,
+                )
+            easy_idx = rng.integers(0, n, size=n_easy)
+            dist_indices[i] = np.concatenate([hard_idx, easy_idx])
+
         distractors = torch.tensor(
-            embeddings_np[dist_idx.numpy()], dtype=torch.float32
+            embeddings_np[dist_indices], dtype=torch.float32
         ).to(torch_device)
 
         # --- Sender: generate message via frozen decoder ---
@@ -284,14 +316,42 @@ def main(
             avg_len = gen_mask.float().sum(dim=1).mean().item()
             logger.info(
                 "step=%d  recv_loss=%.3f  acc=%.1f%%  "
-                "avg_msg_len=%.1f  baseline=%.3f  (chance=%.1f%%)",
+                "avg_msg_len=%.1f  baseline=%.3f  hard=%.0f%%  "
+                "(chance=%.1f%%)",
                 step,
                 receiver_loss.item(),
                 accuracy * 100,
                 avg_len,
                 baseline,
+                hard_ratio * 100,
                 chance * 100,
             )
+
+        # --- Periodic checkpoint ---
+        if step > 0 and step % checkpoint_every == 0:
+            ckpt = {
+                "input_proj": faculty.generator._input_proj.state_dict(),
+                "msg_encoder": msg_encoder.state_dict(),
+                "receiver": receiver.state_dict(),
+                "step": step,
+                "baseline": baseline,
+            }
+            torch.save(ckpt, f"data/input_proj_step{step}.pt")
+            torch.save(ckpt, "data/input_proj.pt")  # always keep latest
+            logger.info("Checkpoint saved at step %d", step)
+
+    # --- Save final checkpoint ---
+    torch.save(
+        {
+            "input_proj": faculty.generator._input_proj.state_dict(),
+            "msg_encoder": msg_encoder.state_dict(),
+            "receiver": receiver.state_dict(),
+            "step": steps,
+            "baseline": baseline,
+        },
+        "data/input_proj.pt",
+    )
+    logger.info("Saved final checkpoint to data/input_proj.pt")
 
     final_acc = reward.mean().item()
     results = {
