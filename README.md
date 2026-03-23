@@ -207,6 +207,30 @@ step=700  hard=100%  acc=96.7%   (peak)
 step=1500 hard=100%  acc=94.3%   (stable plateau)
 ```
 
+### Example outputs
+
+English sentences encoded with all-MiniLM-L6-v2, projected through the trained input projection, and decoded through the frozen multilingual VAE:
+
+```
+TEXT: "Building a wall was front and centre in the campaign."
+ IPA: namun impɔs diputados uratikɐs hɛti al skoball kotorɨj konedikavljaʂe austxsʕ sot͡siolajærjestøæ he
+
+TEXT: "Donald Trump made history again this week when he became the only former U.S. president
+      ever to be criminally indicted..."
+ IPA: ia pdfæntɾasiɲɪt͡ʒɲiː mɪljɑmɑtː ifquɐlizɐsɐ̃w̃ kolektan nuortjijon kotorɨ ituloة bʃʔan de
+
+TEXT: "Elon Musk pulled the plug on legacy blue checks and the libs are SALTY!"
+ IPA: kmaː alqaædæn kɾuz tiɡa pəmain awal sindikali læstsiani kəsəmuaçtɑt mutifian metani məŋ ɔɹ op
+
+TEXT: "The Clippers have won 70 of their last 71 games when scoring at least 100 points..."
+ IPA: aki usposiɣmal ditoʊ a suɐ pjɔsisudesɑn ettiɰi baʃard͡ʒi oɾiwɔ kaj sykʃemesi aɪ̯n denixr t͡ʃok mba
+
+TEXT: "Of course, Satan is no stranger to the game."
+ IPA: thariksi dimesial lud thɤjluɑ leːtɛlmiset martifik atɯʃɯmɯznʌnɯn en jakhan termiɾlɑkin ke
+```
+
+Each input produces a distinct, pronounceable IPA utterance. The output draws on phonotactic patterns from all 16 training languages — the decoder mixes Indonesian, Turkish, Polish, Vietnamese, and other typological features into a novel linguistic form that is neither any specific human language nor a degenerate code.
+
 ### Structural evaluation
 
 After training with curriculum hard negatives (16-way, 100% within-cluster distractors):
