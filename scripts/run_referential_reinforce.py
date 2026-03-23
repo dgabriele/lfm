@@ -106,7 +106,7 @@ def main(
     receiver_lr: float = 1e-3,
     batch_size: int = 16,
     num_distractors: int = 7,
-    embedding_dim: int = 1024,
+    embedding_dim: int = 384,
     device: str = "cuda",
     log_every: int = 50,
     baseline_decay: float = 0.99,
