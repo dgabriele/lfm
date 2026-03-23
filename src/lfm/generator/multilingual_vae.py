@@ -66,7 +66,6 @@ class MultilingualVAEGenerator(GeneratorModule):
             precompute_rope_freqs,
         )
 
-        self.latent_norm = nn.LayerNorm(config.latent_dim)
         self.latent_to_decoder = nn.Linear(config.latent_dim, config.decoder_hidden_dim)
         self.token_embedding = nn.Embedding(self._full_vocab, config.decoder_hidden_dim)
 
@@ -105,6 +104,21 @@ class MultilingualVAEGenerator(GeneratorModule):
         if config.spm_model_path is not None:
             self._tokenizer = SubwordTokenizer(config.spm_model_path, config.vocab_size)
 
+        # -- Latent calibration statistics --
+        # Registered as buffers so they follow .to(device) and are
+        # saved/loaded with state_dict.  Populated during pretraining
+        # to record the empirical z distribution.  At agent time,
+        # calibrate_z() uses these to transform projected z values
+        # into the distribution the decoder was trained on, ensuring
+        # proper EOS behavior and variable-length output.
+        self.register_buffer(
+            "_z_mean", torch.zeros(config.latent_dim), persistent=True,
+        )
+        self.register_buffer(
+            "_z_std", torch.ones(config.latent_dim), persistent=True,
+        )
+        self._z_stats_initialized = False
+
         # -- Forward cache for extra_losses --
         self._cached_mu: Tensor | None = None
         self._cached_logvar: Tensor | None = None
@@ -119,6 +133,61 @@ class MultilingualVAEGenerator(GeneratorModule):
         # -- Freeze decoder if configured --
         if config.freeze_decoder:
             self._freeze_decoder_params()
+
+    # ------------------------------------------------------------------
+    # Latent space calibration
+    # ------------------------------------------------------------------
+
+    def update_z_stats(self, z: Tensor, momentum: float = 0.01) -> None:
+        """Update running z statistics from a batch during pretraining.
+
+        Called by the pretraining loop to track the empirical distribution
+        of z values produced by the VAE encoder.  The statistics are saved
+        with the decoder checkpoint and used at agent time by
+        :meth:`calibrate_z` to keep projected z values in-distribution.
+
+        Args:
+            z: Latent codes ``(batch, latent_dim)`` from the encoder.
+            momentum: Exponential moving average weight for updates.
+        """
+        with torch.no_grad():
+            batch_mean = z.mean(dim=0)
+            batch_std = z.std(dim=0).clamp(min=1e-6)
+
+            if not self._z_stats_initialized:
+                self._z_mean.copy_(batch_mean)
+                self._z_std.copy_(batch_std)
+                self._z_stats_initialized = True
+            else:
+                self._z_mean.mul_(1 - momentum).add_(batch_mean, alpha=momentum)
+                self._z_std.mul_(1 - momentum).add_(batch_std, alpha=momentum)
+
+    def calibrate_z(self, z: Tensor) -> Tensor:
+        """Transform z to match the pretrained encoder's distribution.
+
+        Applies an affine transform so that the decoder sees z values
+        with the same per-dimension mean and standard deviation as during
+        pretraining.  This preserves the *direction* of z (which encodes
+        semantics) while matching the *scale* the decoder expects (which
+        controls EOS behavior and output quality).
+
+        At pretraining time (stats not yet loaded from checkpoint), this
+        is approximately a no-op since the stats track the current encoder.
+        The real value is at agent time, where the input projection may
+        produce z in a completely different range.
+
+        Args:
+            z: Latent codes ``(batch, latent_dim)``.
+
+        Returns:
+            Calibrated z with the pretrained distribution's statistics.
+        """
+        # Standardize z to zero-mean, unit-variance per dimension,
+        # then scale to the pretrained distribution.
+        z_mean = z.mean(dim=0)
+        z_std = z.std(dim=0).clamp(min=1e-6)
+        z_normalized = (z - z_mean) / z_std
+        return z_normalized * self._z_std + self._z_mean
 
     # ------------------------------------------------------------------
     # Lazy initialization
@@ -173,16 +242,25 @@ class MultilingualVAEGenerator(GeneratorModule):
         self.token_embedding.load_state_dict(checkpoint["token_embedding"])
         if "pos_embedding" in checkpoint and not isinstance(self.pos_embedding, nn.Identity):
             self.pos_embedding.load_state_dict(checkpoint["pos_embedding"])
-        if "latent_norm" in checkpoint:
-            self.latent_norm.load_state_dict(checkpoint["latent_norm"])
         self.decoder.load_state_dict(checkpoint["decoder"])
         self.output_head.load_state_dict(checkpoint["output_head"])
+
+        # Load latent calibration statistics if present
+        if "z_mean" in checkpoint and "z_std" in checkpoint:
+            self._z_mean.copy_(checkpoint["z_mean"])
+            self._z_std.copy_(checkpoint["z_std"])
+            self._z_stats_initialized = True
+            logger.info(
+                "Loaded z calibration stats: mean_norm=%.2f, mean_std=%.4f",
+                self._z_mean.norm().item(),
+                self._z_std.mean().item(),
+            )
+
         logger.info("Loaded pretrained VAE decoder from %s", path)
 
     def _freeze_decoder_params(self) -> None:
         """Freeze all decoder parameters (preserves linguistic prior)."""
         frozen_modules: list[nn.Module] = [
-            self.latent_norm,
             self.latent_to_decoder,
             self.token_embedding,
             self.pos_embedding,
@@ -250,11 +328,13 @@ class MultilingualVAEGenerator(GeneratorModule):
         device = z.device
         max_len = self._max_output_len
 
-        # Normalize z to distribution-invariant representation before
-        # decoding.  This ensures the decoder sees the same scale/range
-        # regardless of whether z came from the pretrained encoder or from
-        # the agent's learned input projection.
-        z = self.latent_norm(z)
+        # Calibrate z to match the pretrained encoder's distribution.
+        # This ensures the decoder sees the same scale/range regardless
+        # of whether z came from the pretrained encoder or from the
+        # agent's learned input projection.  Preserves z direction
+        # (semantics) while matching the expected scale (EOS behavior).
+        if self._z_stats_initialized:
+            z = self.calibrate_z(z)
 
         # z -> cross-attention memory: (batch, 1, decoder_hidden_dim)
         memory = self.latent_to_decoder(z).unsqueeze(1)

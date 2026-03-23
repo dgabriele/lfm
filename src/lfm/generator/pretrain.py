@@ -367,7 +367,6 @@ def _vae_forward(
     enc_pos_embedding: nn.Embedding,
     encoder: nn.Module,
     enc_to_latent: nn.Linear,
-    latent_norm: nn.LayerNorm,
     latent_to_decoder: nn.Linear,
     dec_token_embedding: nn.Embedding,
     dec_pos_embedding: nn.Module,
@@ -415,10 +414,6 @@ def _vae_forward(
     mu, logvar = h.chunk(2, dim=-1)
     std = (0.5 * logvar).exp()
     z = mu + std * torch.randn_like(std)
-
-    # Normalize z before decoding — makes decoder invariant to encoder
-    # distribution, so the same decoder works with agent projections.
-    z = latent_norm(z)
 
     # Decode (teacher-forced)
     memory = latent_to_decoder(z).unsqueeze(1)
@@ -483,7 +478,6 @@ def _free_run_decode(
     z: Tensor,
     max_len: int,
     *,
-    latent_norm: nn.LayerNorm,
     latent_to_decoder: nn.Linear,
     dec_token_embedding: nn.Embedding,
     dec_pos_embedding: nn.Embedding,
@@ -516,7 +510,6 @@ def _free_run_decode(
     batch = z.size(0)
     device = z.device
 
-    z = latent_norm(z)
     memory = latent_to_decoder(z).unsqueeze(1)  # (B, 1, H)
     bos_embed = dec_token_embedding(
         torch.full((batch, 1), bos_id, dtype=torch.long, device=device)
@@ -757,6 +750,14 @@ class VAEPretrainer:
             num_batches,
         )
 
+        # Running z statistics for latent calibration.  Tracked across
+        # all training steps and saved with the decoder checkpoint so the
+        # agent's input projection can be calibrated at inference time.
+        z_running_mean = torch.zeros(cfg.latent_dim, device=device)
+        z_running_std = torch.ones(cfg.latent_dim, device=device)
+        z_stats_initialized = False
+        z_stats_momentum = 0.01
+
         for epoch in range(start_epoch, cfg.num_epochs):
             # -- Train --
             for m in modules.values():
@@ -794,6 +795,18 @@ class VAEPretrainer:
                             **modules,
                         )
                     )
+
+                    # Track z distribution for latent calibration
+                    with torch.no_grad():
+                        batch_z_mean = z_batch.mean(dim=0)
+                        batch_z_std = z_batch.std(dim=0).clamp(min=1e-6)
+                        if not z_stats_initialized:
+                            z_running_mean.copy_(batch_z_mean)
+                            z_running_std.copy_(batch_z_std)
+                            z_stats_initialized = True
+                        else:
+                            z_running_mean.lerp_(batch_z_mean, z_stats_momentum)
+                            z_running_std.lerp_(batch_z_std, z_stats_momentum)
 
                     # KL: cyclical annealing (ramp 0→1 over warmup, then hold,
                     # repeat each epoch).  Each cycle lets the encoder
@@ -854,7 +867,6 @@ class VAEPretrainer:
                     dec_mods = {
                         k: modules[k]
                         for k in [
-                            "latent_norm",
                             "latent_to_decoder",
                             "dec_token_embedding",
                             "dec_pos_embedding",
@@ -1076,8 +1088,7 @@ class VAEPretrainer:
                     _dec = modules["decoder"]
                     _is_ling = isinstance(_dec, LinguisticDecoder)
                     n = z.size(0)
-                    z_normed = modules["latent_norm"](z)
-                    mem = modules["latent_to_decoder"](z_normed).unsqueeze(1)
+                    mem = modules["latent_to_decoder"](z).unsqueeze(1)
                     ids = torch.full(
                         (n, 1), bos_id, dtype=torch.long, device=device
                     )
@@ -1305,9 +1316,6 @@ class VAEPretrainer:
                         "decoder_num_layers": cfg.decoder_num_layers,
                         "decoder_num_heads": cfg.decoder_num_heads,
                         "max_seq_len": cfg.max_seq_len,
-                        "latent_norm": modules[
-                            "latent_norm"
-                        ].state_dict(),
                         "latent_to_decoder": modules[
                             "latent_to_decoder"
                         ].state_dict(),
@@ -1319,6 +1327,10 @@ class VAEPretrainer:
                         ].state_dict(),
                         "decoder": modules["decoder"].state_dict(),
                         "output_head": modules["output_head"].state_dict(),
+                        # Latent calibration statistics — used at agent
+                        # time to keep projected z in-distribution.
+                        "z_mean": z_running_mean.cpu(),
+                        "z_std": z_running_std.cpu(),
                         "train_loss": train_loss,
                         "val_loss": val_loss,
                     },
@@ -1381,7 +1393,6 @@ class VAEPretrainer:
             precompute_rope_freqs,
         )
 
-        latent_norm = nn.LayerNorm(cfg.latent_dim).to(device)
         latent_to_decoder = nn.Linear(cfg.latent_dim, hidden).to(device)
         dec_token_embedding = nn.Embedding(full_vocab, hidden).to(device)
 
@@ -1425,7 +1436,6 @@ class VAEPretrainer:
             "enc_pos_embedding": enc_pos_embedding,
             "encoder": encoder,
             "enc_to_latent": enc_to_latent,
-            "latent_norm": latent_norm,
             "latent_to_decoder": latent_to_decoder,
             "dec_token_embedding": dec_token_embedding,
             "dec_pos_embedding": dec_pos_embedding,
