@@ -38,12 +38,37 @@ src/lfm/
   core/                 # LFMModule (ABC), LFMLoss, CompositeLoss
   faculty/              # FacultyConfig + LanguageFaculty compositor
   generator/            # VAE generator, linguistic decoder, pretraining, discriminator
-    layers.py           # LinguisticDecoderLayer (RoPE + multi-scale attention)
+    layers.py           # LinguisticDecoderLayer (RoPE + multi-scale attention + capture_attention)
     multilingual_vae.py # MultilingualVAEGenerator
-    pretrain.py         # VAE pretraining pipeline
+    pretrain.py         # VAE pretraining pipeline (v2 cache with language labels)
     discriminator.py    # StructuralDiscriminator (diagnostic)
     tokenizer.py        # SubwordTokenizer (sentencepiece)
     config.py           # GeneratorConfig
+  cli/                  # CLI framework (lfm command)
+    __init__.py         # create_parser(), main() entry point
+    base.py             # CLICommand ABC
+    visualize/          # lfm visualize subcommand group
+      tsne.py           # lfm visualize tsne
+      clustering.py     # lfm visualize clustering
+      attention.py      # lfm visualize attention
+      latent_dims.py    # lfm visualize latent-dims
+      length_dist.py    # lfm visualize length-dist
+      interpolation.py  # lfm visualize interpolation
+      zipf.py           # lfm visualize zipf
+      all.py            # lfm visualize all
+  visualize/            # Visualization computation + rendering
+    config.py           # VisualizeConfig (Pydantic)
+    loader.py           # VAE model loading + corpus z-encoding
+    languages.py        # Language metadata (16 languages, families, morph types)
+    style.py            # Shared matplotlib style constants
+    suite.py            # VisualizationSuite orchestrator
+    tsne.py             # t-SNE/UMAP 2D projections
+    clustering.py       # Hierarchical dendrogram + distance heatmap
+    attention.py        # Multi-scale attention pattern heatmaps
+    latent_dims.py      # Per-dimension variance, PCA, language discrimination
+    length_dist.py      # Output length histograms
+    interpolation.py    # Latent interpolation trajectories
+    zipf.py             # Token frequency / Zipf law analysis
   data/                 # CorpusDataset, collation, loaders
     loaders/            # Leipzig corpus loader, IPA converter, phonetic distance
   embeddings/           # LLM embedding games, sampler, prefetcher, losses, metrics
@@ -118,10 +143,14 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 
 - `poetry install` — Install dependencies
 - `poetry install --with generator` — Install with sentencepiece
+- `poetry install --with viz` — Install with matplotlib/seaborn (visualization)
 - `poetry install --with phonology` — Install with panphon (legacy)
 - `poetry run pytest` — Run tests (61 tests)
 - `poetry run ruff check src/` — Lint
 - `poetry run ruff format src/` — Format
+- `poetry run lfm visualize --help` — Show visualization commands
+- `poetry run lfm visualize tsne --checkpoint data/vae_resume.pt` — t-SNE latent space
+- `poetry run lfm visualize all --checkpoint data/vae_resume.pt` — All visualizations
 
 ## Tech Stack
 
@@ -133,6 +162,7 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - sentencepiece (subword tokenization)
 - epitran (IPA transcription)
 - clean-text (corpus sanitization)
+- matplotlib + seaborn (visualization)
 
 ## Quick Start
 

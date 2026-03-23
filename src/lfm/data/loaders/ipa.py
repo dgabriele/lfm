@@ -190,6 +190,20 @@ def _convert_one(sample: tuple[str, str]) -> str | None:
     return None
 
 
+def _convert_one_labeled(sample: tuple[str, str]) -> tuple[str, str] | None:
+    """Convert a single ``(lang, text)`` to ``(lang, ipa)``.  Preserves label."""
+    global _worker_converter  # noqa: PLW0603
+    if "_worker_converter" not in globals() or _worker_converter is None:
+        _worker_converter = IPAConverter(drop_unconvertible=True)
+    ipa = _worker_converter.convert_line(sample[0], sample[1])
+    if not ipa:
+        return None
+    ipa = _clean_ipa(ipa)
+    if len(ipa) >= 10:
+        return (sample[0], ipa)
+    return None
+
+
 _worker_converter: IPAConverter | None = None
 
 
@@ -232,6 +246,49 @@ def convert_corpus_to_ipa(
 
     logger.info(
         "IPA conversion: %d succeeded, %d failed/dropped",
+        len(succeeded),
+        failed,
+    )
+    return succeeded
+
+
+def convert_corpus_to_ipa_labeled(
+    samples: list[tuple[str, str]],
+    num_workers: int | None = None,
+) -> list[tuple[str, str]]:
+    """Convert corpus to IPA while preserving language labels.
+
+    Like ``convert_corpus_to_ipa`` but returns ``(lang_code, ipa_text)``
+    tuples, keeping language alignment intact through the conversion.
+
+    Args:
+        samples: List of ``(language_code, text_line)`` tuples.
+        num_workers: Number of parallel workers.  ``None`` = cpu_count.
+
+    Returns:
+        List of ``(lang_code, ipa_text)`` tuples (failed lines dropped).
+    """
+    import multiprocessing as mp
+
+    if num_workers is None:
+        import os
+
+        num_workers = max(1, int(os.cpu_count() * 0.9))
+
+    logger.info(
+        "Converting %d samples to IPA (labeled) with %d workers...",
+        len(samples),
+        num_workers,
+    )
+
+    with mp.Pool(num_workers) as pool:
+        results = pool.map(_convert_one_labeled, samples, chunksize=500)
+
+    succeeded = [r for r in results if r is not None]
+    failed = len(results) - len(succeeded)
+
+    logger.info(
+        "IPA conversion (labeled): %d succeeded, %d failed/dropped",
         len(succeeded),
         failed,
     )

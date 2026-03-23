@@ -163,26 +163,22 @@ class VAEPretrainConfig(LFMBaseConfig):
 # ---------------------------------------------------------------------------
 
 
-def _load_corpus_lines(cfg: VAEPretrainConfig) -> list[str]:
-    """Load text lines via the configured corpus loader or legacy paths.
+def _load_corpus_labeled(cfg: VAEPretrainConfig) -> list[tuple[str, str]]:
+    """Load corpus with language labels preserved through IPA conversion.
 
     Uses the registry-based corpus loader system when ``corpus_loader`` is
     set, falling back to plain file reading from ``corpus_paths`` otherwise.
 
     Returns:
-        List of text line strings.
+        List of ``(language_code, ipa_text)`` tuples.
     """
     if cfg.corpus_loader is not None:
-        # Ensure concrete loaders are registered and build the typed config.
-        # Each loader has its own config class; this mapping parallels the
-        # registry.  Extend when adding new loaders (OPUS, UD, etc.).
         import importlib
 
         from lfm.data.loaders.base import CorpusLoaderConfig
 
         loader_registry: dict[str, tuple[str, type[CorpusLoaderConfig]]] = {}
 
-        # Lazy imports — only load what's needed
         def _register_loaders() -> None:
             from lfm.data.loaders.leipzig import LeipzigCorpusConfig
 
@@ -207,7 +203,6 @@ def _load_corpus_lines(cfg: VAEPretrainConfig) -> list[str]:
         loader = create("corpus_loader", cfg.corpus_loader, loader_cfg)
         samples = loader.load()
     else:
-        # Legacy fallback: plain text files as "unknown" language
         samples = []
         for path_str in cfg.corpus_paths:
             path = Path(path_str)
@@ -227,16 +222,24 @@ def _load_corpus_lines(cfg: VAEPretrainConfig) -> list[str]:
                             samples.append(("eng", raw_line))
         logger.info("Loaded %d lines from legacy corpus_paths", len(samples))
 
-    # Sanitize: drop lines with digits, URLs, emails, formatting artifacts
+    # Sanitize
     samples = _sanitize_samples(samples)
     logger.info("Sanitized to %d lines (dropped noisy/short)", len(samples))
 
-    # Convert to IPA (uniform phonetic representation across languages)
-    from lfm.data.loaders.ipa import convert_corpus_to_ipa
+    # Convert to IPA preserving language labels
+    from lfm.data.loaders.ipa import convert_corpus_to_ipa_labeled
 
-    lines = convert_corpus_to_ipa(samples, drop_unconvertible=True)
-    logger.info("IPA conversion complete: %d lines", len(lines))
-    return lines
+    labeled = convert_corpus_to_ipa_labeled(samples)
+    logger.info("IPA conversion complete: %d labeled lines", len(labeled))
+    return labeled
+
+
+def _load_corpus_lines(cfg: VAEPretrainConfig) -> list[str]:
+    """Load text lines (IPA), discarding language labels.
+
+    Backward-compatible wrapper around ``_load_corpus_labeled``.
+    """
+    return [ipa for _lang, ipa in _load_corpus_labeled(cfg)]
 
 
 def _sanitize_one(sample: tuple[str, str]) -> tuple[str, str] | None:
@@ -580,17 +583,31 @@ class VAEPretrainer:
         cache_path = Path(output_dir) / "preprocessed_cache.pt"
         spm_path_cached = Path(output_dir) / "spm.model"
 
+        # Cache format v2 includes 'languages' alongside token_ids_list.
+        # Detect v1 caches (missing 'languages') and regenerate.
+        _cache_valid = False
         if cache_path.exists() and spm_path_cached.exists():
             logger.info("Loading preprocessed cache from %s", cache_path)
             cache = torch.load(cache_path, weights_only=False)
-            token_ids_list = cache["token_ids_list"]
-            vocab_size = cache["vocab_size"]
-            spm_path = str(spm_path_cached)
-        else:
-            # 1. Load corpus via loader system
-            lines = _load_corpus_lines(cfg)
-            if not lines:
+            if "languages" in cache:
+                token_ids_list = cache["token_ids_list"]
+                languages_list: list[str] = cache["languages"]
+                vocab_size = cache["vocab_size"]
+                spm_path = str(spm_path_cached)
+                _cache_valid = True
+            else:
+                logger.info(
+                    "Cache missing 'languages' (v1 format) — regenerating..."
+                )
+
+        if not _cache_valid:
+            # 1. Load corpus with language labels preserved
+            labeled = _load_corpus_labeled(cfg)
+            if not labeled:
                 raise RuntimeError("No text lines loaded from corpus")
+
+            # Extract IPA lines for sentencepiece training
+            lines = [ipa for _lang, ipa in labeled]
 
             # 2. Sentencepiece
             if cfg.spm_model_path is not None:
@@ -610,14 +627,16 @@ class VAEPretrainer:
             sp = spm_lib.SentencePieceProcessor(model_file=spm_path)
             vocab_size = sp.vocab_size()
 
-            # 3. Tokenize and strip SPM special tokens (unk, bos, eos, pad)
+            # 3. Tokenize, keeping language labels aligned
             _spm_specials = {0, 1, 2, 3}
             token_ids_list = []
-            for line in lines:
-                ids = sp.encode(line, out_type=int)
+            languages_list = []
+            for lang, ipa in labeled:
+                ids = sp.encode(ipa, out_type=int)
                 ids = [x for x in ids if x not in _spm_specials]
                 if len(ids) >= 5:
                     token_ids_list.append(ids)
+                    languages_list.append(lang)
 
             logger.info(
                 "Tokenized %d sequences (vocab_size=%d)",
@@ -625,13 +644,17 @@ class VAEPretrainer:
                 vocab_size,
             )
 
-            # Save cache
+            # Save cache (v2 format with languages)
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             torch.save(
-                {"token_ids_list": token_ids_list, "vocab_size": vocab_size},
+                {
+                    "token_ids_list": token_ids_list,
+                    "languages": languages_list,
+                    "vocab_size": vocab_size,
+                },
                 cache_path,
             )
-            logger.info("Saved preprocessed cache to %s", cache_path)
+            logger.info("Saved preprocessed cache (v2) to %s", cache_path)
 
         full_vocab = vocab_size + 2
         bos_id = vocab_size

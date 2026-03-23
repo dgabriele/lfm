@@ -36,6 +36,13 @@ panphon = ">=0.20"
 [tool.poetry.group.generator.dependencies]
 sentencepiece = ">=0.2"
 
+[tool.poetry.group.viz.dependencies]
+matplotlib = ">=3.8"
+seaborn = ">=0.13"
+
+[tool.poetry.scripts]
+lfm = "lfm.cli:main"
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
