@@ -87,16 +87,17 @@ class MultilingualVAEGenerator(GeneratorModule):
         )
         self.output_head = nn.Linear(config.decoder_hidden_dim, self._full_vocab)
 
-        # Precompute RoPE frequencies (not a parameter, just a buffer)
-        self._rope_freqs: Tensor | None = None
+        # Precompute RoPE frequencies as a registered buffer so they
+        # follow the module to the correct device via .to(device)
         if config.use_rope:
             head_dim = config.decoder_hidden_dim // config.decoder_num_heads
             self.register_buffer(
-                "_rope_freqs_buf",
+                "_rope_freqs",
                 precompute_rope_freqs(head_dim, config.max_output_len),
                 persistent=False,
             )
-            self._rope_freqs = self._rope_freqs_buf
+        else:
+            self._rope_freqs: Tensor | None = None
 
         # -- Tokenizer (lazy, loaded from spm_model_path) --
         self._tokenizer: SubwordTokenizer | None = None
@@ -357,7 +358,32 @@ class MultilingualVAEGenerator(GeneratorModule):
         self._cached_mu = mu
         self._cached_logvar = logvar
 
-        # 5. Decode
+        # 5. Decode or use latent directly
+        # When the decoder is frozen and we're training, skip the expensive
+        # AR decode loop — use the latent-to-decoder projection directly.
+        # This gives clean gradient flow to _input_proj without vanishing
+        # through 64 frozen AR steps.  Full AR decode is used at eval time.
+        if self.config.freeze_decoder and self.training:
+            # Direct latent path: z → project → single hidden state
+            decoder_hidden = self.latent_to_decoder(z)  # (B, H)
+            batch = z.size(0)
+            return {
+                "tokens": torch.zeros(
+                    batch, 1, dtype=torch.long, device=z.device
+                ),
+                "token_probs": torch.zeros(
+                    batch, 1, self._full_vocab, device=z.device
+                ),
+                "embeddings": decoder_hidden.unsqueeze(1),  # (B, 1, H)
+                "lengths": torch.ones(batch, device=z.device),
+                "mask": torch.ones(
+                    batch, 1, dtype=torch.bool, device=z.device
+                ),
+                "mu": mu,
+                "logvar": logvar,
+            }
+
+        # Full AR decode (eval time or unfrozen training)
         token_ids, token_probs, decoder_states, lengths, output_mask = self._decode(z)
 
         return {

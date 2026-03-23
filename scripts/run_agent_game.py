@@ -35,8 +35,8 @@ def main(
     decoder_path: str = "data/vae_decoder.pt",
     spm_path: str = "data/spm.model",
     steps: int = 10000,
-    lr: float = 1e-3,
-    batch_size: int = 64,
+    lr: float = 1e-2,
+    batch_size: int = 16,
     embedding_dim: int = 1024,
     device: str = "cuda",
 ) -> dict[str, float]:
@@ -62,6 +62,7 @@ def main(
             pretrained_decoder_path=decoder_path,
             spm_model_path=spm_path,
             freeze_decoder=True,
+            max_output_len=8,  # short sequence for gradient flow
         ),
         # No modular stages — generator handles linguistic structure
         quantizer=None,
