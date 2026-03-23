@@ -287,8 +287,8 @@ class MultilingualVAEGenerator(GeneratorModule):
             all_states.append(last_hidden)
 
             # Boost EOS probability as sequence gets longer — encourages
-            # variable-length output where complex inputs produce longer
-            # messages.  Linear ramp: no boost at t=0, +2.0 at max_len.
+            # variable-length output.  Linear ramp: no boost at t=0,
+            # +2.0 at max_len.
             eos_boost = 2.0 * (t / max(max_len - 1, 1))
             logits_t[:, self.eos_id] += eos_boost
 
@@ -310,23 +310,16 @@ class MultilingualVAEGenerator(GeneratorModule):
         token_ids = token_probs.argmax(dim=-1)  # (B, max_len)
         decoder_states = torch.cat(all_states, dim=1)  # (B, max_len, H)
 
-        # Compute lengths: EOS-based if available, otherwise derive from
-        # z norm (higher norm = more information = longer message).
+        # Compute lengths: position of first EOS token, or full
+        # sequence length if no EOS was generated.
         eos_mask = token_ids == self.eos_id
         has_eos = eos_mask.any(dim=1)
         first_eos = eos_mask.float().argmax(dim=1)
 
-        # z-norm-based length: scale z norm to [min_len, max_len]
-        z_norm = z.norm(dim=-1)  # (B,)
-        z_min, z_max = z_norm.min(), z_norm.max()
-        norm_frac = (z_norm - z_min) / (z_max - z_min + 1e-8)
-        min_len = max(4, max_len // 4)
-        norm_lengths = (min_len + norm_frac * (max_len - min_len)).long()
-
         lengths = torch.where(
             has_eos,
-            first_eos + 1,
-            norm_lengths.clamp(min=min_len, max=max_len).to(device),
+            first_eos + 1,  # include the EOS token
+            torch.full_like(first_eos, max_len),  # use full length
         )
         output_mask = create_padding_mask(lengths, max_len)
 
