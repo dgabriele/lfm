@@ -39,6 +39,12 @@ from lfm.data.corpus import MultilingualCorpusDataset
 
 logger = logging.getLogger(__name__)
 
+# IPA vowels — used to strip trailing orphan consonants from decoded text
+_IPA_VOWELS = set(
+    "iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒ"
+    "ãẽĩõũɛ̃ɔ̃"  # nasalized vowels
+)
+
 
 class VAEPretrainConfig(LFMBaseConfig):
     """Configuration for VAE decoder pretraining.
@@ -1115,8 +1121,17 @@ class VAEPretrainer:
                             x for x in toks
                             if x < vocab_size and x not in _spm_specials
                         ]
-                        texts.append(sp.decode(toks))
+                        text = sp.decode(toks)
+                        # Strip trailing orphan consonants (truncation artifacts)
+                        words = text.split()
+                        while words and len(words[-1]) == 1 and not _is_vowel(words[-1]):
+                            words.pop()
+                        texts.append(" ".join(words))
                     return texts
+
+                def _is_vowel(char: str) -> bool:
+                    """Check if a single IPA character is a vowel."""
+                    return char in _IPA_VOWELS
 
                 def _encode_text(tokens: Tensor, lengths: Tensor) -> Tensor:
                     """Encode token batch -> z via the VAE encoder."""
