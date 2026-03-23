@@ -527,8 +527,10 @@ def _free_run_decode(
 
     for _t in range(max_len):
         seq_len = generated_embeds.size(1)
-        pos = torch.arange(seq_len, device=device).unsqueeze(0)
-        tgt = generated_embeds + dec_pos_embedding(pos)
+        tgt = generated_embeds
+        if not isinstance(dec_pos_embedding, nn.Identity):
+            pos = torch.arange(seq_len, device=device).unsqueeze(0)
+            tgt = tgt + dec_pos_embedding(pos)
         causal = nn.Transformer.generate_square_subsequent_mask(
             seq_len, device=device
         )
