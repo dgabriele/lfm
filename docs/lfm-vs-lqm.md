@@ -76,7 +76,7 @@ All of the above, plus:
 **What each pressure ensures:**
 
 - **Reconstruction + KL**: Standard VAE — z is a well-structured continuous latent space
-- **Theta/IC inverse**: z encodes physics — not just statistical features but enough to recover operator parameters and initial conditions. Crucially, the mapping from rollout behaviors to (θ, IC) is many-to-many: many parameter combinations produce similar dynamics, and the same parameters can produce varied behavior depending on initial conditions. The inverse losses don't seek to recover the *original* θ and IC — they ensure that z encodes enough information to recover *some* θ and IC that produce behaviorally equivalent dynamics. This means sampling around a z smoothly interpolates *behavior*, not parameters
+- **Theta/IC inverse**: z encodes physics — not just statistical features but enough to recover operator parameters and initial conditions. Note: the current implementation uses direct parameter regression (MSE against ground-truth θ and IC). A planned improvement is to operate in behavioral space instead, accounting for the many-to-many mapping between (θ, IC) and dynamics — many parameter combinations produce similar behavior, so the inverse should target behavioral equivalence classes rather than specific parameter values. This would ensure that sampling around z smoothly interpolates *behavior*, not parameters
 - **Listener roundtrip**: z encodes physics *through text* — the NL expression is the information bottleneck. Without this, the generator produces grammatically correct but semantically arbitrary text. Gradients flow: L2 → listener → soft token_probs (via embedding weight matmul) → generator input projection. The frozen decoder never receives gradients.
 
 The listener roundtrip is the critical pressure — it is strictly stronger than a z-space roundtrip because it forces information to survive the text bottleneck, not just a parameter re-encoding. Together, these five pressures ensure z is a shared representation between the dynamical system and the linguistic output. This isn't alignment (forcing one space to match another) — it's co-learning of a single space that serves both physics and language.
@@ -103,7 +103,9 @@ This means you can:
 - **Invert a description** to find simulations whose dynamics the agent would describe in similar terms
 - **Explore the behavioral manifold** by moving through z-space, with the linguistic output tracking the behavioral changes
 
-This is impossible with latent space alignment, because the alignment collapses the behavioral topology onto linguistic semantics. The many-to-many structure is lost.
+Note: full behavioral invertibility requires the theta/IC inverse losses to target behavioral equivalence classes rather than literal parameter values (planned improvement in Spinlock). The current implementation uses direct parameter regression, which approximates this when the dataset's parameter-to-behavior mapping is approximately injective.
+
+This kind of behavioral inversion is impossible with latent space alignment, because the alignment collapses the behavioral topology onto linguistic semantics.
 
 ## Comparison
 
