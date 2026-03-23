@@ -1227,16 +1227,26 @@ class VAEPretrainer:
                 for k, (s, txt) in enumerate(zip(noise_scales, perturb_texts)):
                     logger.info("  perturb[σ=%.1f]: %s", s, txt[:100])
 
-                # --- 4. Random z (prior sampling) ---
-                z_random = torch.randn(3, cfg.latent_dim, device=device)
+                # --- 4. Random z (sample from encoder distribution) ---
+                # With KL=0, the encoder's distribution diverges from N(0,I).
+                # Sampling from N(0,I) lands in regions the decoder never saw,
+                # producing degenerate loops.  Sample from the actual encoder
+                # distribution using tracked running statistics instead.
+                z_random = (
+                    torch.randn(3, cfg.latent_dim, device=device)
+                    * z_running_std + z_running_mean
+                )
                 random_texts = _sample_decode(z_random)
                 for j, txt in enumerate(random_texts):
                     logger.info("  random[%d]: %s", j, txt[:100])
 
                 # --- 5. Length distribution (autoregressive decode) ---
-                # Decode a batch of random z to check EOS behavior and
-                # length variation — the key metric for LayerNorm fix.
-                z_length_test = torch.randn(32, cfg.latent_dim, device=device)
+                # Decode a batch of z sampled from the encoder distribution
+                # to check EOS behavior and length variation.
+                z_length_test = (
+                    torch.randn(32, cfg.latent_dim, device=device)
+                    * z_running_std + z_running_mean
+                )
                 length_texts = _sample_decode(z_length_test)
                 word_counts = [len(t.split()) for t in length_texts]
                 char_counts = [len(t) for t in length_texts]
