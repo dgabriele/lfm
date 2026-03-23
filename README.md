@@ -2,7 +2,7 @@
 
 A framework for giving neural agents a natural language faculty.
 
-LFM is a learnable system that imposes morphosyntactic and sentence-level constraints on sequences, enabling agents to express internal representations in structured, compositional form — without encoding predefined semantics. It models the *faculty* of language, not any particular human language.
+LFM gives agents the ability to express internal representations as linguistically structured, pronounceable IPA (International Phonetic Alphabet) utterances — without encoding predefined semantics. It models the *faculty* of language, not any particular human language.
 
 ---
 
@@ -10,12 +10,13 @@ LFM is a learnable system that imposes morphosyntactic and sentence-level constr
 
 1. [Vision](#vision)
 2. [The Problem](#the-problem)
-3. [Pipelines](#pipelines)
-4. [Approach to Phonetics](#approach-to-phonetics)
-5. [Agent Games](#proof-of-concept-agent-games-for-development)
-6. [Design](#design)
+3. [How It Works](#how-it-works)
+4. [Architecture](#architecture)
+5. [Pretraining Results](#pretraining-results)
+6. [Agent Game Results](#agent-game-results)
 7. [Quick Start](#quick-start)
-8. [Status](#status)
+8. [Design](#design)
+9. [Status](#status)
 
 ---
 
@@ -27,224 +28,230 @@ LFM gives those agents a language. Not English, not mathematics — a new langua
 
 The goal is to synthesize consistent, structured, non-human natural language corpora — the output of agents reasoning over dynamical systems in their own terms — and then tune in. Listen to alien researchers' inner monologues and conversations about systems we study, from perspectives that are grounded but fundamentally outside our own collective scientific trajectory. Perspectives not isomorphic to our normal mathematical, symbolic, or linguistic categories. Perspectives that might see structure where we see noise, or draw distinctions where we see uniformity.
 
-This is not metaphorical. The pipeline is concrete: a VQ tokenizer grounds agent representations in physical dynamics with round-trip consistency. Agents attend to and reason over these tokens. LFM structures their communication as language. An LLM translates it. At every step, the information is empirically grounded and the fidelity is measurable. What's new is that the resulting descriptions are irreducibly perspectival — they reflect what a situated observer found salient, not what an equation says is true.
+This is not metaphorical. The pipeline is concrete: an agent's internal embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for another agent to identify what was communicated. An LLM can learn to translate the emergent language. At every step, the information is empirically grounded and the fidelity is measurable.
 
 ## The Problem
 
-Agents that operate over grounded, potentially non-human representations need to communicate. Existing approaches have problems that collectively motivate the creation of LFM:
+Agents that operate over grounded, potentially non-human representations need to communicate. Existing approaches have problems:
 
 - **Natural language** imposes human ontology and semantic bias
 - **Latent vector communication** lacks structure and interpretability
 - **Emergent protocols** tend to collapse into degenerate, non-compositional codes
 - **Symbolic systems** are rigid and not adaptive
 
-LFM sits between the agent's internal world model and its communication channel, shaping messages to be compositional, structurally regular, reusable, and adaptable — while letting semantics emerge from interaction rather than being inherited from human language.
+LFM sits between the agent's internal world model and its communication channel, shaping messages to be compositional, structurally regular, pronounceable, and variable-length — while letting semantics emerge from interaction rather than being inherited from human language.
 
 ### Translation, not alignment
 
-The emergent language that LFM produces is not human language — but it is *language-like*. It has morphology, syntax, phrase structure, and phonotactically pronounceable surface forms. This is by design: the structural inductive biases that shape it are drawn from the same typological universals that underlie all human languages.
+The emergent language that LFM produces is not human language — but it is *language-like*. It has morphology, phonotactic structure, and compositional regularity. This is by design: the structural inductive biases are learned from 16 typologically diverse human languages via a pretrained multilingual VAE decoder.
 
-This means the emergent language is readily learnable by pretrained multilingual LLMs. An LLM that already understands the structural patterns of hundreds of human languages — agreement, word order, morphological case, inflection — can learn to translate LFM's emergent language through self-supervised fine-tuning, without any hand-crafted parallel corpus. The LLM acts as a translator: agents communicate in their own language, and humans read the translation.
+This means the emergent language is readily learnable by pretrained multilingual LLMs. An LLM that already understands the structural patterns of hundreds of human languages can learn to translate LFM's emergent language through self-supervised fine-tuning.
 
-Crucially, this is translation, not latent space alignment. Alignment methods map agent representations into a human language embedding space, collapsing the agent's natural semantics onto human categories and destroying whatever novel perspective the agent may have developed. Translation preserves the source language's own conceptual structure and finds the best human-language approximation. The agent's ontology stays intact; the LLM does the interpretive work, the same way a human translator mediates between languages with fundamentally different conceptual systems.
+Crucially, this is translation, not latent space alignment. The agent's ontology stays intact; the LLM does the interpretive work.
 
-The alternative — agents communicating in raw latent vectors or degenerate codes — gives an LLM nothing to work with. Structure is what makes translation possible, and language-like structure is what makes it learnable.
+## How It Works
 
-## Pipelines
+LFM uses a **generative linguistic bottleneck**: a pretrained VAE decoder that produces linguistically structured IPA output from a latent space.
 
-LFM provides two approaches to imposing linguistic structure on agent communication. Both are configurable, composable, and produce the same dict-return output format. They can even run together — the generator's output feeds into the modular stages for further structural analysis.
+### Step 1: Pretrain the VAE decoder
 
-### Pipeline A: Modular Linguistic Stages
+A multilingual VAE is trained on IPA-transcribed text from 16 typologically diverse languages (Leipzig Corpora Collection). The decoder learns the joint distribution of phonotactic, morphological, and compositional structure across:
 
-A sequence of independently configurable neural modules, each imposing a specific structural constraint:
+| Typology | Languages |
+|----------|-----------|
+| Fusional | Polish, Russian, German, Spanish, Portuguese, Czech |
+| Agglutinative | Turkish, Finnish, Hungarian, Estonian |
+| Isolating | Vietnamese, Indonesian |
+| Mixed | Arabic, Hindi, Korean |
 
-#### Quantization
+The text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), sanitized of all non-IPA characters, and tokenized with sentencepiece BPE.
 
-The entry point. An agent's continuous internal state — a dense vector encoding whatever it has observed, inferred, or decided — must become discrete before it can be language. The quantizer maps this continuous representation into a sequence of discrete tokens drawn from a learned codebook. This is analogous to the transition from pre-linguistic thought to the discrete units of speech. Multiple quantization strategies are supported (VQ-VAE, Finite Scalar Quantization, Lookup-Free Quantization), each with different tradeoffs between codebook utilization, training stability, and representational capacity. The codebook size and sequence length are configurable — more tokens means higher fidelity but longer utterances.
+The decoder uses a **LinguisticDecoder** with architectural biases for natural language:
+- **Rotary Positional Embeddings (RoPE)**: translation-invariant pattern learning — a morpheme works the same way regardless of position
+- **Multi-scale attention heads**: window sizes of 3 (phonotactic), 7 (morpheme), 15 (word), and full (clause) — a multi-resolution linguistic filter bank
+- **Weight-shared layers**: 2 unique layers applied 4 times = literal recursion, mirroring syntactic Merge
 
-#### Phonology
+After pretraining, the decoder is **frozen**. It becomes a fixed linguistic bottleneck.
 
-The emergent language must be pronounceable. Without this constraint, the system would happily produce sequences of arbitrary symbols that carry information but have no phonological structure — no syllables, no rhythm, no way for a human to even attempt to say them aloud. The phonology module maps discrete tokens to phoneme-like sequences constrained by universal phonotactic rules (onset/nucleus/coda syllable structure, sonority sequencing) while letting the specific phoneme inventory, cluster rules, and harmony patterns emerge from training. The system might converge on a small Hawaiian-like inventory, a complex Georgian-like cluster system, or something with no human analogue — whatever communication pressure selects for. This matters for the translation pipeline: a language with recognizable sound patterns is far more learnable by an LLM than an arbitrary symbol stream, and it makes the emergent language something humans can engage with directly — reading it, speaking it, developing intuitions about it.
+### Step 2: Agent training
 
-#### Morphology
+The frozen decoder is integrated into a `LanguageFaculty`. During agent training:
 
-The main structural engine. Learns subword segmentation and composition, and produces learned grammatical feature vectors per token — latent dimensions shaped by communication pressure, not predefined linguistic categories. The morphology module doesn't prescribe any particular typological strategy. The emergent language might be isolating (like Mandarin — minimal morphology, structure carried by word order and particles), agglutinative (like Turkish — transparent morpheme chains), polysynthetic (like Mohawk — entire clauses packed into single words), fusional, or some hybrid with no human analogue. What emerges is determined by the communication pressure of the agent's scenario, not by the architecture.
+1. Agent embedding (e.g., 384-dim from sentence-transformer) enters the faculty
+2. A **learned input projection** maps it to the VAE latent space (μ, σ → z)
+3. The **frozen decoder** generates variable-length IPA tokens from z
+4. A **receiver** (in the referential game) must identify the original embedding from among distractors based on the generated message
+5. **REINFORCE** trains the input projection: reward = receiver success
 
-#### Agreement and Ordering
+Only the input projection learns. The decoder's linguistic structure is preserved.
 
-Lightweight structural pressure that operates on morphological features. Learns soft agreement constraints between positions and information-theoretic ordering preferences. There is no explicit grammar — no parse trees, no constituency rules. Structure emerges from whatever combination of morphological marking and word order the system finds most effective. A scenario with limited bandwidth might favor dense morphological packing. A scenario where ordering is cheap might favor isolating structure with strict word order. The system adapts.
+### Step 3: Variable-length messages
 
-#### Sentence Structure
+Message length scales with input complexity via z-norm: higher-norm z vectors produce longer utterances (more information to express), lower-norm vectors produce shorter ones. This means complex agent observations generate detailed linguistic descriptions while simple ones produce brief expressions.
 
-Not all utterances serve the same function. Statements, questions, imperatives, and exclamations have distinct structural signatures in every human language — different word orders, particles, intonation patterns, morphological markers. The sentence module learns to differentiate these and to detect boundaries between sentences within longer sequences. This gives the emergent language discourse structure: the ability to ask and answer, to assert and qualify, to build multi-sentence narratives rather than producing an undifferentiated stream.
+## Architecture
 
-#### Channel
+```
+Agent Embedding (384-dim)
+  → _input_proj (LEARNED: 384 → 512, split to μ,σ of 256-dim z)
+  → sample z ~ N(μ, σ)
+  → frozen LinguisticDecoder
+      ├── RoPE (translation-invariant positions)
+      ├── Multi-scale attention (3/7/15/full window per head)
+      └── Weight-shared layers (recursive application)
+  → variable-length IPA tokens (8-32 tokens)
+  → MessageEncoder (pool + project to fixed dim)
+  → Receiver scores candidates via dot-product
+```
 
-The communication bottleneck. Everything upstream produces a rich, structured representation; the channel compresses it into a discrete message that can be transmitted to another agent. This bottleneck is what creates the pressure for all the upstream structure — morphological economy, agreement patterns, efficient ordering all exist because the channel is finite. The channel supports differentiable discrete transmission (Gumbel-Softmax, straight-through estimation) so gradients flow back through the entire pipeline during training, and configurable noise/capacity constraints that can be tuned to create more or less pressure for compression.
+### Package Structure
 
-#### Training Phases
+```
+src/lfm/
+  faculty/              # LanguageFaculty compositor
+  generator/            # VAE generator, linguistic decoder, pretraining
+    layers.py           # LinguisticDecoderLayer (RoPE + multi-scale attention)
+    multilingual_vae.py # MultilingualVAEGenerator
+    pretrain.py         # Full pretraining pipeline
+    discriminator.py    # StructuralDiscriminator (diagnostic)
+    tokenizer.py        # SubwordTokenizer (sentencepiece)
+  data/                 # Corpus datasets, loaders, collation
+    loaders/            # Leipzig loader, IPA converter, phonetic distance
+  embeddings/           # LLM embedding games, sampler, prefetcher
+  core/                 # LFMModule (ABC), LFMLoss
+  training/             # TrainingLoop, TrainingPhase, Callbacks
+  utils/                # Tensor helpers, sampling utilities
+```
 
-Each module is optional and swappable. The framework trains in phases — first learning structural priors from multilingual LLM latents (not just English, but diverse language families — SOV, agglutinative, fusional, polysynthetic — giving LFM the flexibility to adapt its structural strategy to whatever a particular agent scenario demands), then progressively introducing corruption pressure, morphological emergence, paraphrastic diversity, and finally agent-integrated training where meaning emerges through interaction.
+## Pretraining Results
 
-### Pipeline B: Generative Linguistic Bottleneck
+20 epochs on 560K IPA-transcribed sentences from 16 languages:
 
-An alternative approach that imposes linguistic structure holistically via a pretrained multilingual VAE. Instead of hand-specifying each structural constraint, a VAE decoder trained on typologically diverse natural language data learns the joint distribution of all structural properties simultaneously — phonotactic well-formedness, morphological organization, compositional regularity — from the data itself.
+| Metric | Value |
+|--------|-------|
+| Val CE | 0.94 (PPL ≈ 2.6) |
+| TTR | 0.96 |
+| Repetition rate | 0.00 |
+| Mean word length | 5.8 IPA chars |
 
-#### How it works
+### Reconstruction (epoch 20)
 
-1. Agent embeddings are pooled and projected into the VAE's latent space (μ, σ)
-2. A sample z is decoded through a frozen autoregressive transformer into variable-length subword tokens
-3. The decoder's pretraining on multilingual data ensures outputs are phonotactically valid, morphologically structured, and compositionally organized — without any stage-by-stage constraint specification
+The latent bottleneck preserves specific lexical content:
 
-The VAE decoder is **frozen** after pretraining on multilingual natural language data — only the projection from agent embeddings to latent space is learned during agent training. This preserves the linguistic structural prior while letting the agent learn which region of "linguistic space" best expresses its internal representations. KL divergence toward the standard normal prior regularizes the projection, preventing it from collapsing to a degenerate corner of the latent space.
+```
+orig:  mon văn kuən hut toj ɲiəw xi ciəm ka thɤj zan zɛɲ cɔ kak mon xak
+dec:   văn ku mon hut toj xiən ciəm ɲiəw zɛɲ thɤj zan ka kak cɔ saŋ xak
+```
 
-Variable-length output emerges naturally: the autoregressive decoder emits tokens until it produces an EOS token, so structurally simple agent states decode to short sequences while complex ones generate longer expressions.
+15 of 16 words recovered. Word order shuffled (Vietnamese allows flexible ordering).
 
-#### VAE pretraining
+### Interpolation (Polish → Vietnamese)
 
-The VAE is pretrained separately on multilingual text data before agent training begins:
+Smooth typological transition through the latent space:
+
+```
+0.00: prɛzɨdɛnt ʂtajn tɔ thɯjatkɔvali faɲit͡ʂnɨ dɔ druɡji...
+0.25: thɯ bɔŋ ɔ fa tɔtarja sɛzɲɛ bus ix dɔpjɛrɔ druɡji...
+0.50: tam kucamplɛt vɔŋ xi dɔ zɛɲ cɔ biət to kwok te saŋ bimɛ ɲiəw...
+0.75: văn kuən mon xi toj hut ɲiəw zɛɲ cɔ ka ciəm saŋ thɯ...
+1.00: văn ku mon hut toj xi ɲiəw ciəm thɤj zan zɛɲ ka kak mon cɔ...
+```
+
+### Perturbation (σ=0.5)
+
+Small noise produces paraphrastic variation within the same typological profile:
+
+```
+ɐkliɕmɨ d͡ʑakarta funkvɲidjijniz tɔ aktɛnliɕmɨ napravljennuu ɡɾinɛlʊs
+```
+
+### Random z sampling
+
+The decoder produces varied, pronounceable, structurally coherent output from arbitrary latent codes:
+
+```
+ia prebɪl pre momento pre ninlasikanlas sɛzt͡sɨ a tɯŋ prebɪlnɔɕt͡ɕi
+```
+
+## Agent Game Results
+
+REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences):
+
+| Metric | Value |
+|--------|-------|
+| Accuracy | **87.5%** (chance = 12.5%) |
+| Improvement over chance | **7×** |
+| Message length | 17-22 tokens (variable) |
+| Steps to converge | ~650 |
+
+The frozen linguistic bottleneck carries rich discriminative information from real sentence embeddings. Different inputs produce distinguishably different IPA utterances.
+
+## Quick Start
+
+```bash
+poetry install --with generator
+```
+
+### 1. Pretrain the VAE decoder
 
 ```python
 from lfm.generator.pretrain import pretrain_vae_decoder, VAEPretrainConfig
 
 metrics = pretrain_vae_decoder(VAEPretrainConfig(
-    corpus_paths=["path/to/multilingual/texts/"],
-    spm_vocab_size=8000,
-    latent_dim=256,
-    decoder_hidden_dim=512,
+    corpus_loader="leipzig",
+    corpus_loader_config={"data_dir": "data/leipzig"},
 ))
 ```
 
-The pretraining uses teacher forcing with an ELBO objective (reconstruction CE + KL with warmup and free bits). After pretraining, only the decoder weights are saved — the encoder is discarded.
+### 2. Precompute embeddings
 
-#### Why two approaches
-
-The modular pipeline gives **interpretability and targeted control** — you can inspect what each stage does and tune individual constraints. The generative bottleneck gives a **holistic, data-driven** constraint surface that captures cross-level interactions learned from real language data. Choose based on whether you need fine-grained structural analysis or a stronger, more natural structural prior. Both paths can also run together: the generator produces output tokens that downstream modular stages further analyze.
-
-## Approach to Phonetics
-
-LFM's phonology module doesn't encode explicit phonological categories. There are no vowels, no consonants, no sonority hierarchy — just a GRU that predicts each surface vector from preceding ones, where prediction error equals pronounceability penalty. Smooth, predictable sequences are "pronounceable"; erratic ones are not. The specific inventory and phonotactic patterns emerge from communication pressure.
-
-But a randomly initialized GRU has no idea what "pronounceable" means. This is where **phonotactic structural priors** come in.
-
-### Cross-linguistic pre-training
-
-The smoothness GRU is pre-trained on real pronunciation data from [WikiPron](https://github.com/CUNY-CL/wikipron) — 3.1 million word/pronunciation pairs across 337 languages — converted to articulatory feature vectors via [PanPhon](https://github.com/dmort27/panphon). Each IPA segment becomes a vector of articulatory features (voicing, place, manner, etc.), and the pre-training task is identical to the runtime task: predict the next articulatory vector from the preceding ones.
-
-```
-WikiPron TSV (word -> IPA, per language)
-  -> PanPhon articulatory features (24-dim, values in {-1, 0, +1})
-    -> Learned projection to surface_dim
-      -> GRU next-step prediction (MSE loss)
-        -> Checkpoint: smoothness_gru + smoothness_head weights
+```bash
+python scripts/precompute_embeddings.py
 ```
 
-After pre-training, the GRU has learned cross-linguistic phonotactic patterns: that stops tend to precede vowels, that certain cluster types are universally rare, that syllable-like rhythms are the norm. These patterns transfer directly to the pipeline because the architecture and loss function are identical.
+### 3. Run the referential game
 
-### Why this works
+```bash
+python scripts/run_referential_reinforce.py
+```
 
-| Concern | How it's addressed |
-|---|---|
-| **Typological bias** | WikiPron over-represents Indo-European; per-language sample caps (default 5,000) enforce balance across all 337 languages |
-| **Phonemic vs. phonetic** | Broad (phonemic) transcriptions preferred — we want phonotactic patterns, not allophonic detail |
-| **Dimension mismatch** | A learned linear projection maps PanPhon features into the module's `surface_dim` space; the GRU and prediction head operate entirely in `surface_dim`, so they load directly with no mismatch |
-| **Backward compatibility** | Pre-training is optional — `pretrained_smoothness_path=None` (the default) means random init, identical to previous behavior |
+### 4. Use in your own agent system
 
-### What the GRU learns vs. what it doesn't
+```python
+from lfm import FacultyConfig, GeneratorConfig, LanguageFaculty
 
-The pre-trained GRU learns **distributional phonotactic universals** — sequential constraints on articulatory features that hold across human languages. It does *not* learn any specific language's phoneme inventory, phonological rules, or morphophonemic alternations. The emergent language is free to develop its own sound system; the prior just ensures that system starts in a region of phonotactic space that humans would recognize as language-like rather than random noise.
+faculty = LanguageFaculty(FacultyConfig(
+    dim=384,
+    generator=GeneratorConfig(
+        pretrained_decoder_path="data/vae_decoder.pt",
+        spm_model_path="data/spm.model",
+        freeze_decoder=True,
+    ),
+))
 
-This is analogous to how a child's auditory system is pre-tuned to speech-like sounds before learning any specific language. The structural prior is a bias toward *language-likeness*, not toward any particular language.
-
-## Proof-of-concept Agent Games for Development
-
-LFM is developed and validated through agent-based communication games. An agent must pass information through the LFM bottleneck — the structural constraints shape the resulting language while the game provides the communication pressure that drives learning.
-
-### Two approaches to agent state
-
-**Relational scene graphs (controlled diagnostic)** — Procedurally generated CLEVR-style scenes with multiple objects, discrete attributes, and spatial relations. A scene with 3 objects and pairwise relations *cannot* be described by a flat code — it demands compositional, hierarchical expression. Single-object scenes serve as a control condition where LFM structure adds nothing. The gap between single-object and multi-object performance directly measures LFM's value-add. Scenes are pure GPU tensors with tunable complexity.
-
-**LLM latent representations (primary driver)** — Precomputed embeddings from a frozen LLM encoder over rich text passages. These embeddings encode enormously complex compositional structure — argument relations, temporal structure, causality, reference chains — all implicit and compressed. Unlike scene graphs where the "right" decomposition is known in advance, here the LFM must *discover* how to externalize latent structure as language. Embeddings are clustered hierarchically for stratified curriculum sampling: easy cross-cluster contrasts early in training, hard within-cluster contrasts later.
-
-### Game types
-
-**Reconstruction (self-play)** — Agent state passes through the LFM bottleneck; a decoder must reconstruct the original representation from the structured message. Tests information preservation under structural constraints.
-
-**Referential (sender/receiver)** — Sender's state passes through LFM to produce a message; receiver must identify the sender's state from among distractors. Tests whether structured messages are communicatively useful.
+# Agent embedding → linguistic output
+outputs = faculty(agent_embedding)  # (batch, dim)
+# outputs["generator.tokens"] — IPA token IDs
+# outputs["generator.embeddings"] — decoder hidden states
+# outputs["generator.mask"] — variable-length mask
+```
 
 ## Design
 
-- **Registry/factory** pattern — every component is pluggable via `@register` / `create()`
-- **Pydantic configs** — frozen, validated, composable configuration hierarchy
-- **Dict-return protocol** — all modules return namespaced output dicts for trivial composition
-- **Phase-based training** — each phase is a configuration of which losses are active and at what weight
-- **GPU-native** — PyTorch tensors throughout, everything batched
-- **Async data pipeline** — background-thread prefetching with pinned memory for zero-stall GPU training
-
-## Quick Start
-
-```bash
-poetry install
-```
-
-**Pipeline A** — Modular stages:
-
-```python
-from lfm import LanguageFaculty, FacultyConfig, QuantizationConfig
-
-faculty = LanguageFaculty(FacultyConfig(
-    dim=256,
-    quantizer=QuantizationConfig(name="vqvae", codebook_size=1024),
-))
-```
-
-**Pipeline B** — Generative bottleneck (requires sentencepiece: `poetry install --with generator`):
-
-```python
-from lfm import LanguageFaculty, FacultyConfig, GeneratorConfig
-
-faculty = LanguageFaculty(FacultyConfig(
-    dim=256,
-    generator=GeneratorConfig(
-        pretrained_decoder_path="data/vae_decoder.pt",
-        latent_dim=256,
-    ),
-    phonology=None,  # or keep for structural analysis of generator output
-))
-```
-
-Pre-train phonotactic priors (optional, requires `panphon`):
-
-```bash
-poetry install --with phonology
-```
-
-```python
-from lfm.phonology.priors import pretrain_phonotactic_prior, PhonotacticPriorConfig
-
-metrics = pretrain_phonotactic_prior(PhonotacticPriorConfig(
-    wikipron_dir="path/to/wikipron/data/scrape/tsv",
-    surface_dim=12,
-    smoothness_hidden_dim=32,
-))
-
-# Then use in the pipeline:
-from lfm.phonology import PhonologyConfig
-
-faculty = LanguageFaculty(FacultyConfig(
-    phonology=PhonologyConfig(
-        pretrained_smoothness_path="data/phonotactic_prior.pt",
-    ),
-))
-```
-
-## Why This Approach?
-
-For an analysis of why structured emergent language — rather than mathematical formalization, latent space alignment, or classical NLP parsing — is the right medium for deriving novel insights from agent representations of dynamical systems, and why this approach has gone unexplored, see **[Why the Language-First Approach Is Underexplored](docs/why-language-first.md)**.
+- **Registry/factory** pattern — components pluggable via `@register` / `create()`
+- **Pydantic configs** — frozen, validated, composable
+- **Dict-return protocol** — all modules return namespaced output dicts
+- **GPU-native** — PyTorch tensors throughout, mixed precision, batched
+- **Multiprocessing** — corpus sanitization and IPA conversion at 90% CPU cores
+- **Resume support** — full training state saved per epoch
 
 ## Status
 
-The architectural scaffold and agent game infrastructure are in place. Next: implementing the concrete neural modules (VQ-VAE, Gumbel channel, morphological agreement/ordering) to enable end-to-end training runs.
+The VAE pretraining pipeline is complete and validated. The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 7× above chance. Next steps:
+
+- Scale to larger embedding models and more diverse corpora
+- End-to-end training with domain-specific agent systems (e.g., Spinlock VQTokenizer for dynamical systems)
+- LLM translation of the emergent IPA language
 
 ## License
 
