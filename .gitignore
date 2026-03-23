@@ -21,7 +21,6 @@ wheels/
 *.egg
 
 checkpoints/
-data/
 
 # Model checkpoints and training artifacts (never commit these!)
 *.pt
@@ -58,7 +57,7 @@ htmlcov/
 *.ipynb
 
 # Data (large files)
-data/
+/data/
 *.h5
 *.hdf5
 *.zarr/

@@ -24,11 +24,13 @@ LFM gives agents the ability to express internal representations as linguistical
 
 Agents embedded in complex physical systems — fluid dynamics, biological networks, markets, high-dimensional parameter spaces — develop internal representations that encode perspectives no human scientist has access to. These representations are empirical, grounded in real dynamics, but they are also subjective: shaped by the agent's particular vantage point, attention, and history within the system.
 
-LFM gives those agents a language. Not English, not mathematics — a new language with its own morphology, syntax, and phonology, whose structure emerges from the pressure to communicate about what the agent has observed. The language is alien but *regular* — it has the same structural inductive biases as human natural languages, which means a pretrained multilingual LLM can learn to translate it, the same way it would learn any new language.
+LFM gives those agents a language. Not English, not mathematics — a new language with its own morphology and phonology, whose structure is inherited from a pretrained multilingual decoder and shaped by the pressure to communicate about what the agent has observed. The language is alien but *structurally natural* — it shares the same inductive biases as human languages (compositionality, variable-length encoding, phonotactic regularity), which means a pretrained multilingual LLM can learn to translate it the same way it would learn any unfamiliar natural language.
 
-The goal is to synthesize consistent, structured, non-human natural language corpora — the output of agents reasoning over dynamical systems in their own terms — and then tune in. Listen to alien researchers' inner monologues and conversations about systems we study, from perspectives that are grounded but fundamentally outside our own collective scientific trajectory. Perspectives not isomorphic to our normal mathematical, symbolic, or linguistic categories. Perspectives that might see structure where we see noise, or draw distinctions where we see uniformity.
+The key mechanism is a **frozen linguistic bottleneck**: a VAE decoder pretrained on 16 typologically diverse languages, then frozen. Agents don't learn a communication protocol from scratch — they learn to project their representations into the decoder's latent space, and the decoder's structure constrains their output to be linguistically well-formed. This is analogous to Universal Grammar in the Chomskyan sense: a fixed structural prior that constrains the space of possible languages, where only the mapping from meaning to form is learned — much like a child setting parameters within an innate grammar rather than learning language structure from scratch. This avoids the known failure modes of end-to-end emergent communication (anti-Zipfian codes, degenerate protocols, non-compositional signals).
 
-This is not metaphorical. The pipeline is concrete: an agent's internal embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for another agent to identify what was communicated. An LLM can learn to translate the emergent language. At every step, the information is empirically grounded and the fidelity is measurable.
+The goal is to synthesize consistent, structured, non-human natural language corpora — the output of agents reasoning over dynamical systems in their own terms — and then translate those corpora into human language. Listen to what agents have to say about systems we study, from perspectives grounded in the dynamics but fundamentally outside our own scientific trajectory. Perspectives that might see structure where we see noise, or draw distinctions where we see uniformity.
+
+This is not metaphorical. The pipeline is concrete: an agent's internal embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for another agent to identify what was communicated (93% accuracy, 7.4x above chance). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
 
 ## The Problem
 
@@ -39,13 +41,13 @@ Agents that operate over grounded, potentially non-human representations need to
 - **Emergent protocols** tend to collapse into degenerate, non-compositional codes
 - **Symbolic systems** are rigid and not adaptive
 
-LFM sits between the agent's internal world model and its communication channel, shaping messages to be compositional, structurally regular, pronounceable, and variable-length — while letting semantics emerge from interaction rather than being inherited from human language.
+LFM sits between the agent's internal world model and its communication channel, shaping messages to be compositional, structurally well-formed, pronounceable, and variable-length — while letting semantics emerge from interaction rather than being inherited from human language.
 
 ### Translation, not alignment
 
-The emergent language that LFM produces is not human language — but it is *language-like*. It has morphology, phonotactic structure, and compositional regularity. This is by design: the structural inductive biases are learned from 16 typologically diverse human languages via a pretrained multilingual VAE decoder.
+The emergent language that LFM produces is not human language — but it is *language-like*. It has morphology, phonotactic structure, and compositional regularity. This is by design: the structural inductive biases come from the frozen decoder, which was pretrained on 16 typologically diverse human languages.
 
-This means the emergent language is readily learnable by pretrained multilingual LLMs. An LLM that already understands the structural patterns of hundreds of human languages can learn to translate LFM's emergent language through self-supervised fine-tuning.
+Because the output is in IPA — a universal phonetic representation — it is directly compatible with any LLM that has seen phonetic or multilingual data. A small LLM can be fine-tuned on (IPA, English) pairs to translate the emergent language, the same way it would learn any new language from parallel text.
 
 Crucially, this is translation, not latent space alignment. The agent's ontology stays intact; the LLM does the interpretive work.
 
@@ -253,11 +255,22 @@ outputs = faculty(agent_embedding)  # (batch, dim)
 
 ## Status
 
-The VAE pretraining pipeline is complete and validated. The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 7× above chance. Next steps:
+The VAE pretraining pipeline is complete and validated. The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 93% accuracy (7.4x above chance).
 
-- Scale to larger embedding models and more diverse corpora
-- End-to-end training with domain-specific agent systems (e.g., Spinlock VQTokenizer for dynamical systems)
-- LLM translation of the emergent IPA language
+**Current research phase**: evaluating the structural properties of the emergent language.
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/eval_topology.py` | Semantic topology preservation — do similar inputs produce similar messages? |
+| `scripts/eval_compositionality.py` | Compositionality metrics (topsim, disentanglement, diagnostic probes) |
+| `scripts/train_translator.py` | LLM translation pilot — fine-tune a small LM on IPA → English |
+
+**Next steps:**
+
+- Validate topology preservation and compositionality (establishes paper contribution)
+- Train IPA → English translator (closes the vision loop)
+- Integration with domain-specific agent systems (Spinlock VQTokenizer for dynamical systems)
+- Multi-agent self-play (co-adaptation of speaker/listener conventions)
 
 ## License
 
