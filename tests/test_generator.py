@@ -37,8 +37,6 @@ def _make_generator(**overrides: object) -> LanguageFaculty:
     return LanguageFaculty(FacultyConfig(
         dim=64,
         generator=_small_config(**overrides),
-        quantizer=None,
-        phonology=None,
     ))
 
 
@@ -123,8 +121,6 @@ def test_generator_freeze_decoder():
     faculty = LanguageFaculty(FacultyConfig(
         dim=64,
         generator=_small_config(freeze_decoder=True),
-        quantizer=None,
-        phonology=None,
     ))
 
     gen = faculty.generator
@@ -152,8 +148,6 @@ def test_generator_dim_projection():
     faculty = LanguageFaculty(FacultyConfig(
         dim=128,  # different from decoder_hidden_dim=64
         generator=_small_config(decoder_hidden_dim=64),
-        quantizer=None,
-        phonology=None,
     ))
     assert "generator_to_faculty" in faculty.projections
 
@@ -163,8 +157,6 @@ def test_generator_no_projection_when_dims_match():
     faculty = LanguageFaculty(FacultyConfig(
         dim=64,
         generator=_small_config(decoder_hidden_dim=64),
-        quantizer=None,
-        phonology=None,
     ))
     assert "generator_to_faculty" not in faculty.projections
 
@@ -179,41 +171,20 @@ def test_faculty_with_generator():
     # Generator outputs present
     assert "generator.tokens" in out
 
-    # No quantization outputs (quantizer=None)
+    # Generator outputs only — no legacy modules
     assert "quantization.tokens" not in out
-
-    # No phonology outputs (phonology=None)
     assert "phonology.surface_forms" not in out
 
 
-def test_faculty_generator_with_phonology():
-    """Generator output flows through phonology when both configured."""
-    faculty_with_phon = LanguageFaculty(FacultyConfig(
-        dim=64,
-        generator=_small_config(decoder_hidden_dim=64),
-        quantizer=None,
-        # phonology enabled by default
-    ))
-    out = faculty_with_phon(torch.randn(2, 64))
-
-    # Both generator and phonology outputs should be present
-    assert "generator.tokens" in out
-    assert "phonology.surface_forms" in out
-    assert "phonology.pronounceability_score" in out
-
-
-def test_faculty_generator_agent_state_compat():
-    """Existing agent_state path works when generator is NOT configured."""
+def test_faculty_agent_state_compat():
+    """Agent_state path works without generator."""
     faculty = LanguageFaculty(FacultyConfig(
         dim=64,
         generator=None,
-        quantizer=None,
     ))
     out = faculty(torch.randn(2, 64))
-
-    # Should have phonology (default) but no generator
-    assert "phonology.surface_forms" in out
     assert "generator.tokens" not in out
+    assert "extra_losses" in out
 
 
 def test_generator_eval_deterministic():
@@ -236,5 +207,5 @@ def test_generator_registered():
     from lfm import list_registered
 
     # Force registry population
-    LanguageFaculty(FacultyConfig(phonology=None))
+    LanguageFaculty(FacultyConfig())
     assert "multilingual_vae" in list_registered("generator")

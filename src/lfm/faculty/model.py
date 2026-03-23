@@ -1,10 +1,9 @@
 """LanguageFaculty — central compositor for the LFM pipeline.
 
-The ``LanguageFaculty`` wires together all LFM sub-modules (quantizer,
-phonology, morphology, syntax, sentence, channel) into a single coherent
-forward pass.  Each sub-module is optional and instantiated from its config
-via the global registry.  Dimension-mismatch projections are inserted
-automatically where adjacent stages disagree on embedding size.
+The ``LanguageFaculty`` wires the generator (pretrained multilingual VAE
+decoder) into a single coherent forward pass.  Agent embeddings are
+projected into the VAE latent space and decoded into linguistically
+structured output.
 """
 
 from __future__ import annotations
@@ -22,29 +21,8 @@ from lfm.core.module import LFMModule
 from lfm.faculty.config import FacultyConfig
 
 # Concrete module files that must be imported so their @register decorators
-# fire before we call ``create()``.  We use importlib to avoid top-level
-# coupling to every concrete implementation.
+# fire before we call ``create()``.
 _CONCRETE_MODULES: list[str] = [
-    "lfm.quantization.vqvae",
-    "lfm.quantization.fsq",
-    "lfm.quantization.lfq",
-    "lfm.phonology.surface",
-    "lfm.morphology.segmenter",
-    "lfm.morphology.composer",
-    "lfm.morphology.tree",
-    "lfm.syntax.agreement",
-    "lfm.syntax.attention",
-    "lfm.syntax.ordering",
-    "lfm.sentence.typing",
-    "lfm.sentence.boundary",
-    "lfm.channel.gumbel",
-    "lfm.channel.straight_through",
-    "lfm.channel.noisy",
-    "lfm.losses.structural",
-    "lfm.losses.compositionality",
-    "lfm.losses.information",
-    "lfm.losses.diversity",
-    "lfm.losses.morphological",
     "lfm.generator.multilingual_vae",
     "lfm.data.loaders.leipzig",
 ]
@@ -53,11 +31,7 @@ _registry_loaded = False
 
 
 def _ensure_registry() -> None:
-    """Import all concrete module files to populate the global registry.
-
-    This is idempotent — repeated calls are no-ops after the first
-    successful load.
-    """
+    """Import concrete module files to populate the global registry."""
     global _registry_loaded  # noqa: PLW0603
     if _registry_loaded:
         return
@@ -67,30 +41,19 @@ def _ensure_registry() -> None:
 
 
 class LanguageFaculty(nn.Module):
-    """Compositor that orchestrates the full LFM pipeline.
+    """Compositor that orchestrates the LFM generator pipeline.
 
-    The pipeline runs in fixed order::
+    The pipeline projects agent embeddings through a pretrained VAE
+    generator that produces linguistically structured output::
 
-        quantizer -> phonology -> morphology -> syntax -> sentence -> channel
+        agent_state → generator (project → z → frozen decoder → IPA tokens)
 
-    Each stage is skipped when its config is ``None``.  Output tensors from
-    every active stage are namespaced with the stage's ``output_prefix``
-    (e.g. ``"quantization.tokens"``) and merged into one flat dictionary.
+    The generator is optional (set ``config.generator = None`` to disable).
+    When disabled, the agent state passes through as a single-step embedding.
 
     Args:
-        config: A ``FacultyConfig`` aggregating all sub-module configs.
+        config: A ``FacultyConfig`` with generator configuration.
     """
-
-    # Ordered list of (attribute_name, registry_category, config_attr) tuples
-    # that define the pipeline stages and their execution order.
-    _STAGES: list[tuple[str, str]] = [
-        ("quantizer", "quantizer"),
-        ("phonology", "phonology"),
-        ("morphology", "morphology"),
-        ("syntax", "syntax"),
-        ("sentence", "sentence"),
-        ("channel", "channel"),
-    ]
 
     def __init__(self, config: FacultyConfig) -> None:
         super().__init__()
@@ -98,35 +61,14 @@ class LanguageFaculty(nn.Module):
 
         _ensure_registry()
 
-        # -- Instantiate sub-modules from configs via registry ---------------
+        # -- Generator (pretrained VAE decoder) --
         self.generator: LFMModule | None = None
-        self.quantizer: LFMModule | None = None
-        self.phonology: LFMModule | None = None
-        self.morphology: LFMModule | None = None
-        self.syntax: LFMModule | None = None
-        self.sentence: LFMModule | None = None
-        self.channel: LFMModule | None = None
-
-        # Generator is handled separately — not a sequential pipeline stage.
         if config.generator is not None:
-            self.generator = create("generator", config.generator.name, config.generator)
+            self.generator = create(
+                "generator", config.generator.name, config.generator
+            )
 
-        stage_configs: dict[str, Any] = {
-            "quantizer": config.quantizer,
-            "phonology": config.phonology,
-            "morphology": config.morphology,
-            "syntax": config.syntax,
-            "sentence": config.sentence,
-            "channel": config.channel,
-        }
-
-        for attr, category in self._STAGES:
-            stage_cfg = stage_configs[attr]
-            if stage_cfg is not None:
-                module = create(category, stage_cfg.name, stage_cfg)
-                setattr(self, attr, module)
-
-        # -- Build projection layers for dimension mismatches ----------------
+        # -- Projection layers for dimension mismatches --
         self.projections = nn.ModuleDict(self._build_projections())
 
     # ------------------------------------------------------------------
@@ -134,32 +76,18 @@ class LanguageFaculty(nn.Module):
     # ------------------------------------------------------------------
 
     def _build_projections(self) -> OrderedDict[str, nn.Linear]:
-        """Create ``nn.Linear`` layers to bridge dimension mismatches.
-
-        Returns:
-            An ordered dict of named projection layers.  Keys follow the
-            pattern ``"{source}_to_{target}"`` (e.g.
-            ``"quantizer_to_faculty"``).
-        """
+        """Create ``nn.Linear`` layers to bridge dimension mismatches."""
         projections: OrderedDict[str, nn.Linear] = OrderedDict()
         dim = self.config.dim
 
-        # Quantizer output dim is codebook_dim; project to faculty dim if
-        # they differ.
-        if self.quantizer is not None:
-            q_cfg = self.config.quantizer
-            assert q_cfg is not None
-            if q_cfg.codebook_dim != dim:
-                projections["quantizer_to_faculty"] = nn.Linear(q_cfg.codebook_dim, dim)
-
-        # Pre-tokenized external input -> faculty dim.
+        # Pre-tokenized external input → faculty dim.
         if self.config.pretokenized_dim is not None:
             if self.config.pretokenized_dim != dim:
                 projections["pretokenized_to_faculty"] = nn.Linear(
                     self.config.pretokenized_dim, dim
                 )
 
-        # Generator decoder_hidden_dim -> faculty dim.
+        # Generator decoder_hidden_dim → faculty dim.
         if self.generator is not None:
             g_cfg = self.config.generator
             assert g_cfg is not None
@@ -168,39 +96,7 @@ class LanguageFaculty(nn.Module):
                     g_cfg.decoder_hidden_dim, dim
                 )
 
-        # Syntax latent dim -> faculty dim (for constituent representations).
-        if self.syntax is not None:
-            s_cfg = self.config.syntax
-            assert s_cfg is not None
-            if s_cfg.latent_dim != dim:
-                projections["syntax_latent_to_faculty"] = nn.Linear(s_cfg.latent_dim, dim)
-
-        # Channel needs logits of shape (batch, seq_len, vocab_size).
-        # Project from faculty dim to vocab_size.
-        if self.channel is not None:
-            c_cfg = self.config.channel
-            assert c_cfg is not None
-            vocab = self._resolve_vocab_size(c_cfg)
-            if vocab is not None:
-                projections["faculty_to_channel"] = nn.Linear(dim, vocab)
-
         return projections
-
-    def _resolve_vocab_size(self, channel_cfg: Any) -> int | None:
-        """Determine the channel vocabulary size.
-
-        If the channel config specifies ``vocab_size`` explicitly, use that.
-        Otherwise fall back to the quantizer's codebook size if available.
-
-        Returns:
-            The resolved vocabulary size, or ``None`` if it cannot be
-            determined.
-        """
-        if channel_cfg.vocab_size is not None:
-            return channel_cfg.vocab_size
-        if self.quantizer is not None and self.config.quantizer is not None:
-            return self.config.quantizer.codebook_size
-        return None
 
     # ------------------------------------------------------------------
     # Forward
@@ -214,27 +110,20 @@ class LanguageFaculty(nn.Module):
         tokens: TokenIds | None = None,
         embeddings: TokenEmbeddings | None = None,
     ) -> dict[str, Any]:
-        """Run the full LFM pipeline.
+        """Run the LFM pipeline.
 
-        Accepts either a raw ``agent_state`` (existing path, runs through the
-        quantizer) **or** pre-tokenized ``tokens`` + ``embeddings`` (bypasses
-        the quantizer).  Providing both or neither raises ``ValueError``.
+        Accepts either a raw ``agent_state`` or pre-tokenized
+        ``tokens`` + ``embeddings``.
 
         Args:
-            agent_state: Continuous agent state tensor of shape
-                ``(batch, dim)``.
-            mask: Optional boolean padding mask of shape
-                ``(batch, seq_len)`` where ``True`` marks valid positions.
-                If ``None``, a mask of all ``True`` is created automatically.
-            tokens: Pre-tokenized integer token indices of shape
-                ``(batch, seq_len)``.  Keyword-only.
-            embeddings: Pre-tokenized dense embeddings of shape
-                ``(batch, seq_len, emb_dim)``.  Keyword-only.
+            agent_state: Continuous agent state ``(batch, dim)``.
+            mask: Optional boolean padding mask ``(batch, seq_len)``.
+            tokens: Pre-tokenized token indices (keyword-only).
+            embeddings: Pre-tokenized dense embeddings (keyword-only).
 
         Returns:
-            A flat dictionary whose keys are namespaced as
-            ``"{output_prefix}.{key}"`` for each active stage, plus an
-            ``"extra_losses"`` key mapping loss names to scalar tensors.
+            Namespaced output dictionary with generator outputs and
+            ``"extra_losses"``.
         """
         outputs: dict[str, Any] = {}
 
@@ -242,139 +131,71 @@ class LanguageFaculty(nn.Module):
         has_agent_state = agent_state is not None
 
         if has_pretokenized and has_agent_state:
-            raise ValueError("Provide agent_state OR (tokens, embeddings), not both.")
+            raise ValueError(
+                "Provide agent_state OR (tokens, embeddings), not both."
+            )
         if not has_pretokenized and not has_agent_state:
-            raise ValueError("Must provide agent_state or both tokens and embeddings.")
+            raise ValueError(
+                "Must provide agent_state or both tokens and embeddings."
+            )
 
         if has_pretokenized:
-            # -- Pre-tokenized path: bypass quantizer --------------------------
             if tokens is None or embeddings is None:
-                raise ValueError("Pre-tokenized path requires both tokens and embeddings.")
-
-            batch = tokens.size(0)
+                raise ValueError(
+                    "Pre-tokenized path requires both tokens and embeddings."
+                )
             outputs["pretokenized.tokens"] = tokens
             outputs["pretokenized.embeddings"] = embeddings
 
             if "pretokenized_to_faculty" in self.projections:
-                embeddings = self.projections["pretokenized_to_faculty"](embeddings)
+                embeddings = self.projections["pretokenized_to_faculty"](
+                    embeddings
+                )
             elif embeddings.size(-1) != self.config.dim:
                 raise ValueError(
-                    f"Pre-tokenized embeddings dim {embeddings.size(-1)} != faculty dim "
-                    f"{self.config.dim} and no pretokenized_dim configured."
+                    f"Pre-tokenized embeddings dim {embeddings.size(-1)} "
+                    f"!= faculty dim {self.config.dim} and no "
+                    f"pretokenized_dim configured."
                 )
 
             if mask is None:
                 mask = torch.ones(
-                    batch, tokens.size(1), dtype=torch.bool, device=tokens.device
+                    tokens.size(0),
+                    tokens.size(1),
+                    dtype=torch.bool,
+                    device=tokens.device,
                 )
         else:
-            # -- Existing agent_state path -------------------------------------
-            assert agent_state is not None  # for type narrowing
-            batch = agent_state.size(0)
+            assert agent_state is not None
+            embeddings = agent_state.unsqueeze(1)  # (batch, 1, dim)
+            if mask is None:
+                mask = torch.ones(
+                    agent_state.size(0),
+                    1,
+                    dtype=torch.bool,
+                    device=agent_state.device,
+                )
 
-            if self.quantizer is not None:
-                q_out = self.quantizer(agent_state)
-                self._merge(outputs, self.quantizer.output_prefix, q_out)
-
-                tokens = q_out["tokens"]
-                embeddings = q_out["embeddings"]
-
-                # Project codebook_dim -> faculty dim if necessary.
-                if "quantizer_to_faculty" in self.projections:
-                    embeddings = self.projections["quantizer_to_faculty"](embeddings)
-
-                # Build a default mask if none was provided.
-                if mask is None:
-                    seq_len = tokens.size(1)
-                    mask = torch.ones(
-                        batch, seq_len, dtype=torch.bool, device=agent_state.device
-                    )
-            else:
-                # Without a quantizer the agent_state itself is treated as a
-                # single-step embedding: (batch, dim) -> (batch, 1, dim).
-                embeddings = agent_state.unsqueeze(1)
-                if mask is None:
-                    mask = torch.ones(
-                        batch, 1, dtype=torch.bool, device=agent_state.device
-                    )
-
-        # ---- Generator (optional, runs before linguistic stages) ----------
+        # ---- Generator ----
         if self.generator is not None and embeddings is not None:
             assert mask is not None
             g_out = self.generator(embeddings, mask)
             self._merge(outputs, self.generator.output_prefix, g_out)
 
-            # Generator's decoder states become the new embeddings
             embeddings = g_out["embeddings"]
             if (
                 "generator_to_faculty" in self.projections
-                and embeddings.size(-1) == self.config.generator.decoder_hidden_dim
+                and embeddings.size(-1)
+                == self.config.generator.decoder_hidden_dim
             ):
-                embeddings = self.projections["generator_to_faculty"](embeddings)
+                embeddings = self.projections["generator_to_faculty"](
+                    embeddings
+                )
 
             tokens = g_out["tokens"]
             mask = g_out["mask"]
 
-        # ---- Phonology ---------------------------------------------------
-        if self.phonology is not None and embeddings is not None:
-            if tokens is None:
-                # Without a quantizer there are no discrete tokens; create
-                # dummy zero indices so the phonology forward signature is
-                # satisfied.
-                tokens = torch.zeros(
-                    embeddings.shape[:2],
-                    dtype=torch.long,
-                    device=embeddings.device,
-                )
-
-            p_out = self.phonology(tokens, embeddings)
-            self._merge(outputs, self.phonology.output_prefix, p_out)
-
-            # Phonology may refine embeddings.
-            if "embeddings" in p_out:
-                embeddings = p_out["embeddings"]
-
-        # ---- Morphology --------------------------------------------------
-        if self.morphology is not None and embeddings is not None:
-            if tokens is None:
-                tokens = torch.zeros(
-                    embeddings.shape[:2],
-                    dtype=torch.long,
-                    device=embeddings.device,
-                )
-
-            m_out = self.morphology(tokens, embeddings)
-            self._merge(outputs, self.morphology.output_prefix, m_out)
-
-            # Morphology produces recomposed embeddings.
-            if "composed" in m_out:
-                embeddings = m_out["composed"]
-
-        # ---- Syntax ------------------------------------------------------
-        assert mask is not None  # guaranteed by quantizer or fallback above
-        if self.syntax is not None and embeddings is not None:
-            gram_feats = outputs.get("morphology.grammatical_features")
-            sx_out = self.syntax(embeddings, mask, grammatical_features=gram_feats)
-            self._merge(outputs, self.syntax.output_prefix, sx_out)
-
-        # ---- Sentence ----------------------------------------------------
-        if self.sentence is not None and embeddings is not None:
-            sn_out = self.sentence(embeddings, mask)
-            self._merge(outputs, self.sentence.output_prefix, sn_out)
-
-        # ---- Channel -----------------------------------------------------
-        if self.channel is not None and embeddings is not None:
-            if "faculty_to_channel" in self.projections:
-                logits = self.projections["faculty_to_channel"](embeddings)
-            else:
-                # If no projection was created, assume embeddings dim already
-                # matches vocab_size.
-                logits = embeddings
-
-            ch_out = self.channel(logits, mask)
-            self._merge(outputs, self.channel.output_prefix, ch_out)
-
-        # ---- Extra losses ------------------------------------------------
+        # ---- Extra losses ----
         outputs["extra_losses"] = self.extra_losses()
 
         return outputs
@@ -391,29 +212,14 @@ class LanguageFaculty(nn.Module):
         tokens: TokenIds | None = None,
         embeddings: TokenEmbeddings | None = None,
     ) -> dict[str, Any]:
-        """Alias for ``forward`` — encode input through the faculty.
-
-        Accepts the same arguments as ``forward``.
-
-        Returns:
-            The same namespaced output dictionary as ``forward``.
-        """
-        return self.forward(agent_state, mask=mask, tokens=tokens, embeddings=embeddings)
+        """Alias for ``forward``."""
+        return self.forward(
+            agent_state, mask=mask, tokens=tokens, embeddings=embeddings
+        )
 
     def extra_losses(self) -> dict[str, Tensor]:
-        """Aggregate ``extra_losses`` from all active sub-modules.
-
-        Returns:
-            A dictionary mapping ``"{prefix}.{loss_name}"`` to scalar
-            loss tensors.
-        """
+        """Aggregate ``extra_losses`` from the generator."""
         losses: dict[str, Tensor] = {}
-        for attr, _category in self._STAGES:
-            module: LFMModule | None = getattr(self, attr, None)
-            if module is not None:
-                for k, v in module.extra_losses().items():
-                    losses[f"{module.output_prefix}.{k}"] = v
-        # Generator is not in _STAGES — aggregate its losses separately.
         if self.generator is not None:
             for k, v in self.generator.extra_losses().items():
                 losses[f"{self.generator.output_prefix}.{k}"] = v
@@ -429,9 +235,6 @@ class LanguageFaculty(nn.Module):
         prefix: str,
         source: dict[str, Tensor],
     ) -> None:
-        """Namespace-merge *source* into *target*.
-
-        Each key ``k`` in *source* becomes ``"{prefix}.{k}"`` in *target*.
-        """
+        """Namespace-merge *source* into *target*."""
         for k, v in source.items():
             target[f"{prefix}.{k}"] = v

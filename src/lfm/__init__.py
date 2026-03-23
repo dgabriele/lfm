@@ -1,14 +1,19 @@
 """LFM — Language Faculty Model.
 
-A constraint-driven, compositional, morphosyntactic prior that enables
-structured communication without predefined semantics for GPU-based
-multi-agent systems.
+A framework for giving neural agents a natural language faculty via a
+pretrained multilingual VAE decoder that produces linguistically
+structured IPA output from agent embeddings.
 
 Quick start::
 
-    from lfm import ExperimentConfig, FacultyConfig, LanguageFaculty
+    from lfm import FacultyConfig, GeneratorConfig, LanguageFaculty
 
-    faculty = LanguageFaculty(FacultyConfig(dim=128))
+    faculty = LanguageFaculty(FacultyConfig(
+        dim=384,
+        generator=GeneratorConfig(
+            pretrained_decoder_path="data/vae_decoder.pt",
+        ),
+    ))
 """
 
 from __future__ import annotations
@@ -18,32 +23,24 @@ __version__ = "0.1.0"
 # --- Core abstractions ---
 from lfm._registry import create, list_registered, register
 from lfm._types import TokenBridge, TokenBridgeOutput
-
-# --- Configs ---
-from lfm.channel.config import ChannelConfig
 from lfm.config.base import LFMBaseConfig
 from lfm.config.experiment import ExperimentConfig
 from lfm.core.loss import CompositeLoss, LFMLoss
 from lfm.core.module import LFMModule
 from lfm.data.config import DataConfig
-from lfm.faculty.config import FacultyConfig
 
-# --- Faculty ---
+# --- Faculty + Generator ---
+from lfm.faculty.config import FacultyConfig
 from lfm.faculty.model import LanguageFaculty
 from lfm.generator.config import GeneratorConfig
-from lfm.morphology.config import MorphologyConfig
-from lfm.phonology.config import PhonologyConfig
-from lfm.quantization.config import QuantizationConfig
-from lfm.sentence.config import SentenceConfig
-from lfm.syntax.config import SyntaxConfig
+
+# --- Training ---
 from lfm.training.config import (
     OptimizerConfig,
     PhaseConfig,
     SchedulerConfig,
     TrainingConfig,
 )
-
-# --- Training ---
 from lfm.training.loop import TrainingLoop
 from lfm.training.phase import TrainingPhase
 
@@ -59,20 +56,14 @@ __all__ = [
     "LFMLoss",
     "LFMModule",
     # Configs
-    "ChannelConfig",
     "DataConfig",
     "ExperimentConfig",
     "FacultyConfig",
     "GeneratorConfig",
     "LFMBaseConfig",
-    "MorphologyConfig",
     "OptimizerConfig",
     "PhaseConfig",
-    "PhonologyConfig",
-    "QuantizationConfig",
     "SchedulerConfig",
-    "SentenceConfig",
-    "SyntaxConfig",
     "TrainingConfig",
     # Types
     "TokenBridge",

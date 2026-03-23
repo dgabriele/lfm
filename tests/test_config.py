@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from lfm.config.base import LFMBaseConfig
 from lfm.config.experiment import ExperimentConfig
 from lfm.faculty.config import FacultyConfig
-from lfm.quantization.config import QuantizationConfig
+from lfm.generator.config import GeneratorConfig
 from lfm.training.config import PhaseConfig, TrainingConfig
 
 
@@ -34,23 +34,17 @@ def test_faculty_config_defaults():
     fc = FacultyConfig()
     assert fc.dim == 256
     assert fc.max_seq_len == 64
-    assert fc.phonology is not None  # enabled by default
-    assert fc.quantizer is None
-    assert fc.morphology is None
-    assert fc.syntax is None
-    assert fc.sentence is None
-    assert fc.channel is None
+    assert fc.generator is None
 
 
-def test_faculty_config_with_quantizer():
-    """FacultyConfig accepts nested sub-module configs."""
+def test_faculty_config_with_generator():
+    """FacultyConfig accepts nested generator config."""
     fc = FacultyConfig(
-        dim=128,
-        quantizer=QuantizationConfig(codebook_size=256, codebook_dim=32),
+        dim=384,
+        generator=GeneratorConfig(latent_dim=256),
     )
-    assert fc.quantizer is not None
-    assert fc.quantizer.codebook_size == 256
-    assert fc.quantizer.codebook_dim == 32
+    assert fc.generator is not None
+    assert fc.generator.latent_dim == 256
 
 
 def test_experiment_config_composition():
@@ -60,9 +54,9 @@ def test_experiment_config_composition():
         training=TrainingConfig(
             phases=[
                 PhaseConfig(
-                    name="structural_priors",
+                    name="embedding_reconstruction_game",
                     steps=1000,
-                    losses={"well_formedness": 1.0},
+                    losses={},
                 ),
             ],
         ),
@@ -70,7 +64,6 @@ def test_experiment_config_composition():
     )
     assert exp.faculty.dim == 64
     assert len(exp.training.phases) == 1
-    assert exp.training.phases[0].name == "structural_priors"
     assert exp.seed == 123
 
 

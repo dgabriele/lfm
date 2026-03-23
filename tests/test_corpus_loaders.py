@@ -148,5 +148,5 @@ def test_leipzig_registered():
     from lfm.faculty.model import LanguageFaculty
 
     # Force registry population
-    LanguageFaculty(FacultyConfig(phonology=None))
+    LanguageFaculty(FacultyConfig())
     assert "leipzig" in list_registered("corpus_loader")

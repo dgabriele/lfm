@@ -1,18 +1,9 @@
-"""Phonology subsystem for the LFM framework.
+"""Phonology subsystem (legacy).
 
-Provides the abstract ``PhonologyModule`` base class, ``PhonologyConfig``,
-and the ``SurfacePhonology`` implementation which achieves phonotactic
-constraint via implicit surface-form smoothness pressures rather than
-explicit phonological categories.
-
-The smoothness GRU can optionally be pre-trained on cross-linguistic IPA data
-via ``lfm.phonology.priors.pretrain_phonotactic_prior()`` and loaded at init
-time by setting ``PhonologyConfig.pretrained_smoothness_path``.
+The phonotactic pretraining infrastructure (``priors.py``) is preserved
+as a research artifact.  The active pipeline uses the VAE generator's
+multilingual decoder which learns phonotactic constraints holistically
+from real language data.
 """
 
 from __future__ import annotations
-
-from lfm.phonology.base import PhonologyModule
-from lfm.phonology.config import PhonologyConfig
-
-__all__ = ["PhonologyConfig", "PhonologyModule"]

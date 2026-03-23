@@ -7,8 +7,6 @@ built-in phase implementations.
 
 from __future__ import annotations
 
-# Import phases sub-package to trigger registration of built-in phases.
-import lfm.training.phases as phases  # noqa: F401
 from lfm.training.callbacks import (
     Callback,
     CheckpointCallback,

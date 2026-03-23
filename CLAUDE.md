@@ -2,99 +2,103 @@
 
 ## What This Is
 
-LFM is a framework for GPU-based multi-agent systems that need a natural language faculty. It provides a learnable system that imposes morphosyntactic and sentence-level constraints on sequences, enabling agents to express internal representations in structured and compositional form — without encoding predefined semantics.
+LFM gives neural agents a natural language faculty via a pretrained multilingual VAE decoder. Agent embeddings are projected into the VAE's latent space and decoded through a frozen autoregressive transformer into variable-length IPA (International Phonetic Alphabet) utterances — linguistically structured, pronounceable, and compositional output.
 
-LFM models the *faculty* of language, not any particular human language.
-
-## Core Concepts
-
-- **Language Faculty**: A constraint layer over communication — a bias toward language-like structure, a scaffold for emergent semantics. It does NOT define meaning, ontology, or enforce alignment with human concepts.
-- **Agent Pipeline**: Grounded system -> representation (e.g. VQ-VAE codes) -> internal inference -> LFM (language faculty) -> emergent communication -> optional projection layer for human interpretation.
-- **Structural Properties**: Compositionality, morphological structure, emergent structure -- phrase-like organization arising from morphological agreement, case marking, and information-theoretic ordering -- sentence type differentiation, paraphrastic capacity.
-- **Phonotactic Constraints**: Emergent morphemes and words must be pronounceable. Phonotactic constraint is achieved via implicit surface-form smoothness — a GRU-based sequential predictor, energy contour regularization, and batch diversity pressure — without encoding explicit phonological categories (vowels, consonants, sonority). This is a form constraint, not a meaning constraint.
-
-## Design Principles
-
-1. **Flexible & Extensible** — Research framework. Every component is swappable, configurable, and composable via registry/factory pattern. No hard-coded single-configuration implementations.
-2. **DRY & OOP** — Proper abstractions, base classes. Factor common behavior into reusable components.
-3. **GPU-Centric** — All core compute paths designed for GPU execution. PyTorch tensors throughout. Batch everything.
-4. **Good Configuration** — Pydantic models for all configs (frozen, extra="forbid"). Thoughtful, data-driven adaptive defaults.
-5. **Constraint, Not Prescription** — LFM constrains outputs toward structured forms without dictating exact expressions.
-6. **Non-Invertibility** — Mappings from internal representations to language must not be perfectly reversible.
-7. **Structure Without Semantics** — Training rewards well-formedness, compositional reuse, structural consistency. NOT semantic correctness relative to human language.
-8. **Typological Neutrality** — The architecture and losses must not bias toward any particular language typology. Whether the emergent language is isolating (Chinese-like), agglutinative (Turkish-like), polysynthetic (Mohawk-like), fusional (Latin-like), or a hybrid with no human analogue — that is determined by communication pressure, not architectural bias. Losses reward structural consistency and communicative success, not any particular kind of structure.
-
-## What LFM Is NOT
-
-- Not a traditional language model — it does not learn or reproduce human language semantics
-- Not a fixed vocabulary/grammar system — structure must emerge and adapt
-- Not a cipher or re-encoding of existing human languages
-- Not a semantic embedding space tied to human concepts
+The decoder is pretrained on typologically diverse natural language data (16 languages from the Leipzig Corpora Collection), then frozen. During agent training, only a small input projection learns to map agent representations into the decoder's latent space. The linguistic structure acts as a bottleneck that forces compositional, structured communication.
 
 ## Architecture
 
-### Pipelines (LanguageFaculty)
-
-Two approaches to imposing linguistic structure, both composable via the same `LanguageFaculty` compositor:
-
-**Pipeline A: Modular Linguistic Stages**
 ```
-AgentState -> Quantizer -> Phonology -> Morphology -> Syntax -> Sentence -> Channel -> Message
+Agent Embedding (384-dim)
+  → _input_proj (LEARNED: 384 → 512, split to μ,σ of 256-dim z)
+  → sample z ~ N(μ, σ)
+  → frozen LinguisticDecoder (RoPE + multi-scale attention + weight sharing)
+  → variable-length IPA token sequence
+  → MessageEncoder → fixed-size message vector
+  → Receiver scores candidates (referential game)
 ```
-Hand-specified sequential stages, each imposing a specific structural constraint. Syntax provides structural agreement and ordering pressure — phrase structure emerges from morphological constraints rather than being imposed by explicit grammars. Each stage is optional (set config to None to skip). Phonology is enabled by default.
 
-**Pipeline B: Generative Linguistic Bottleneck**
-```
-AgentState -> [Quantizer] -> Generator (VAE) -> [Phonology] -> ... -> Message
-```
-A multilingual VAE pretrained on typologically diverse natural language data imposes linguistic structure holistically. Agent embeddings are projected into the VAE latent space and decoded through a frozen autoregressive transformer into variable-length subword tokens. The decoder is frozen after pretraining; only the input projection is learned during agent training. KL divergence toward N(0,I) regularizes the projection. Downstream stages can optionally further process the generator's output.
+### Key Components
 
-Both paths coexist — configure `generator` alongside or instead of the modular stages.
+- **LinguisticDecoder** (`generator/layers.py`): Custom transformer with:
+  - Rotary Positional Embeddings (RoPE) for translation-invariant pattern learning
+  - Multi-scale attention heads (3/7/15/full window) — phonotactic to clause level
+  - Weight-shared layers (2 unique applied 4×) — literal recursion
+- **MultilingualVAEGenerator** (`generator/multilingual_vae.py`): Frozen decoder + learned input projection
+- **VAE Pretraining** (`generator/pretrain.py`): Full pipeline with IPA conversion, nucleus sampling, clean-text sanitization
+- **Referential Game** (`scripts/run_referential_reinforce.py`): REINFORCE-based agent game through the linguistic bottleneck
 
 ### Package Structure
 
 ```
 src/lfm/
-  _registry.py          # @register / create() / list_registered() — plugin system
-  _types.py             # Tensor type aliases (AgentState, TokenIds, Mask, etc.)
+  _registry.py          # @register / create() / list_registered()
+  _types.py             # Tensor type aliases
   config/               # LFMBaseConfig, ExperimentConfig
   core/                 # LFMModule (ABC), LFMLoss, CompositeLoss
-  quantization/         # Quantizer ABC + VQ-VAE, FSQ, LFQ implementations
-  phonology/            # PhonologyModule ABC + pronounceability scorer, phonotactics
-  morphology/           # MorphologyModule ABC + MDL segmenter, composer, tree tokenizer
-  syntax/               # SyntaxModule ABC + structural agreement, ordering pressure
-  sentence/             # SentenceModule ABC + type head, boundary detector
-  channel/              # Channel ABC + straight-through, Gumbel-softmax, noisy channel
-  generator/            # GeneratorModule ABC + multilingual VAE, tokenizer, pretraining
-  losses/               # Structural, compositionality, information, diversity, morphological losses
   faculty/              # FacultyConfig + LanguageFaculty compositor
-  training/             # TrainingLoop, TrainingPhase, Callbacks, 5 training phases
-  data/                 # CorpusDataset, AgentDataset, collation
-  metrics/              # Compositionality, structural, information, expressivity, non-isomorphism
-  utils/                # Tensor helpers, sampling (Gumbel, straight-through), logging
+  generator/            # VAE generator, linguistic decoder, pretraining, discriminator
+    layers.py           # LinguisticDecoderLayer (RoPE + multi-scale attention)
+    multilingual_vae.py # MultilingualVAEGenerator
+    pretrain.py         # VAE pretraining pipeline
+    discriminator.py    # StructuralDiscriminator (diagnostic)
+    tokenizer.py        # SubwordTokenizer (sentencepiece)
+    config.py           # GeneratorConfig
+  data/                 # CorpusDataset, collation, loaders
+    loaders/            # Leipzig corpus loader, IPA converter, phonetic distance
+  embeddings/           # LLM embedding games, sampler, prefetcher, losses, metrics
+  training/             # TrainingLoop, TrainingPhase, Callbacks
+  utils/                # Tensor helpers, sampling (Gumbel, straight-through)
+  phonology/            # Legacy: phonotactic prior pretraining (research artifact)
 ```
 
-### Key Patterns
+## Pretraining Results
 
-- **Registry**: `@register("category", "name")` decorator + `create("category", "name", config)` factory
-- **Dict-return protocol**: All `LFMModule.forward()` returns `dict[str, Tensor]`, namespaced by output_prefix
-- **Frozen configs**: All Pydantic configs are immutable with `extra="forbid"`
-- **Phase-based training**: Each phase configures which losses are active via `dict[str, float]`
-- **extra_losses**: Modules with intrinsic losses (e.g. commitment loss) expose via `extra_losses()`, always active
+20 epochs on 560K IPA sentences from 16 languages:
+- **Val CE: 0.94** (PPL ≈ 2.6)
+- **Reconstruction**: near-perfect through 256-dim latent bottleneck
+- **Interpolation**: smooth typological transitions (Hungarian ↔ Polish ↔ Vietnamese)
+- **σ=0.5 perturbation**: paraphrastic variation within language
+- **TTR: 0.96**, rep_rate: 0.00, mean word length: 5.8
 
-### Training Phases
+### Sample outputs (epoch 20):
 
-1. **structural_priors** — Learn structural priors from multilingual corpora
-2. **corruption** — Structural corruption and recomposition
-3. **morphological_emergence** — Morphological emergence pressure
-4. **paraphrastic** — Paraphrastic generation diversity
-5. **agent_integration** — Agent-integrated training
+**Reconstruction:**
+```
+orig:  mon văn kuən hut toj ɲiəw xi ciəm ka thɤj zan zɛɲ cɔ kak mon xak
+dec:   văn ku mon hut toj xiən ciəm ɲiəw zɛɲ thɤj zan ka kak cɔ saŋ xak
+```
+
+**Interpolation (Polish → Vietnamese):**
+```
+0.00: prɛzɨdɛnt ʂtajn tɔ thɯjatkɔvali faɲit͡ʂnɨ dɔ druɡji...
+0.50: tam kucamplɛt vɔŋ xi dɔ zɛɲ cɔ biət to kwok te saŋ bimɛ ɲiəw...
+1.00: văn ku mon hut toj xi ɲiəw ciəm thɤj zan zɛɲ ka kak mon cɔ saŋ...
+```
+
+**Perturbation (σ=0.5):**
+```
+ɐkliɕmɨ d͡ʑakarta funkvɲidjijniz tɔ aktɛnliɕmɨ napravljennuu ɡɾinɛlʊs
+```
+
+**Random z:**
+```
+ia prebɪl pre momento pre ninlasikanlas sɛzt͡sɨ a tɯŋ prebɪlnɔɕt͡ɕi pre nin
+```
+
+## Agent Game Results
+
+REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim):
+- **87.5% accuracy** at step 650 (chance = 12.5%, **7× above random**)
+- Variable-length messages (17-22 tokens) via z-norm scaling
+- Baseline accuracy: 73% and climbing
 
 ## Commands
 
 - `poetry install` — Install dependencies
-- `poetry install --with generator` — Install with sentencepiece (for VAE pretraining)
-- `poetry run pytest` — Run tests
+- `poetry install --with generator` — Install with sentencepiece
+- `poetry install --with phonology` — Install with panphon (legacy)
+- `poetry run pytest` — Run tests (61 tests)
 - `poetry run ruff check src/` — Lint
 - `poetry run ruff format src/` — Format
 
@@ -102,31 +106,29 @@ src/lfm/
 
 - Python 3.11+
 - PyTorch (GPU compute)
-- Pydantic v2 (configuration & validation)
-- Poetry (dependency management, virtualenv NOT in project root)
-- pytest (testing)
-- ruff (linting & formatting)
+- Pydantic v2 (configuration)
+- Poetry (dependency management)
+- sentence-transformers (embedding precomputation)
+- sentencepiece (subword tokenization)
+- epitran (IPA transcription)
+- clean-text (corpus sanitization)
 
-## Usage Example
+## Quick Start
 
-```python
-# Pipeline A: Modular stages
-from lfm import LanguageFaculty, FacultyConfig, QuantizationConfig
+```bash
+# 1. Pretrain the VAE decoder
+python -c "
+from lfm.generator.pretrain import pretrain_vae_decoder, VAEPretrainConfig
+config = VAEPretrainConfig(
+    corpus_loader='leipzig',
+    corpus_loader_config={'data_dir': 'data/leipzig'},
+)
+pretrain_vae_decoder(config)
+"
 
-faculty = LanguageFaculty(FacultyConfig(
-    dim=128,
-    quantizer=QuantizationConfig(name="vqvae", codebook_size=512),
-))
+# 2. Precompute embeddings
+python scripts/precompute_embeddings.py
 
-# Pipeline B: Generative bottleneck
-from lfm import GeneratorConfig
-
-faculty = LanguageFaculty(FacultyConfig(
-    dim=128,
-    generator=GeneratorConfig(
-        pretrained_decoder_path="data/vae_decoder.pt",
-        latent_dim=256,
-    ),
-    phonology=None,  # or keep for structural analysis of generator output
-))
+# 3. Run the referential game
+python scripts/run_referential_reinforce.py
 ```
