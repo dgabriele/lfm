@@ -286,6 +286,12 @@ class MultilingualVAEGenerator(GeneratorModule):
 
             all_states.append(last_hidden)
 
+            # Boost EOS probability as sequence gets longer — encourages
+            # variable-length output where complex inputs produce longer
+            # messages.  Linear ramp: no boost at t=0, +2.0 at max_len.
+            eos_boost = 2.0 * (t / max(max_len - 1, 1))
+            logits_t[:, self.eos_id] += eos_boost
+
             # Differentiable sampling via Gumbel-Softmax
             probs_t = gumbel_softmax(
                 logits_t,
