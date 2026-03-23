@@ -310,14 +310,23 @@ class MultilingualVAEGenerator(GeneratorModule):
         token_ids = token_probs.argmax(dim=-1)  # (B, max_len)
         decoder_states = torch.cat(all_states, dim=1)  # (B, max_len, H)
 
-        # Compute lengths (first EOS position per sample)
+        # Compute lengths: EOS-based if available, otherwise derive from
+        # z norm (higher norm = more information = longer message).
         eos_mask = token_ids == self.eos_id
         has_eos = eos_mask.any(dim=1)
-        first_eos = eos_mask.float().argmax(dim=1)  # position of first EOS
+        first_eos = eos_mask.float().argmax(dim=1)
+
+        # z-norm-based length: scale z norm to [min_len, max_len]
+        z_norm = z.norm(dim=-1)  # (B,)
+        z_min, z_max = z_norm.min(), z_norm.max()
+        norm_frac = (z_norm - z_min) / (z_max - z_min + 1e-8)
+        min_len = max(4, max_len // 4)
+        norm_lengths = (min_len + norm_frac * (max_len - min_len)).long()
+
         lengths = torch.where(
             has_eos,
             first_eos + 1,
-            torch.tensor(max_len, dtype=torch.long, device=device),
+            norm_lengths.clamp(min=min_len, max=max_len).to(device),
         )
         output_mask = create_padding_mask(lengths, max_len)
 
