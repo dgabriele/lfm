@@ -76,7 +76,7 @@ All of the above, plus:
 **What each pressure ensures:**
 
 - **Reconstruction + KL**: Standard VAE — z is a well-structured continuous latent space
-- **Theta/IC inverse**: z encodes physics — not just statistical features but actual operator parameters and initial conditions
+- **Theta/IC inverse**: z encodes physics — not just statistical features but enough to recover operator parameters and initial conditions. Crucially, the mapping from rollout behaviors to (θ, IC) is many-to-many: many parameter combinations produce similar dynamics, and the same parameters can produce varied behavior depending on initial conditions. The inverse losses don't seek to recover the *original* θ and IC — they ensure that z encodes enough information to recover *some* θ and IC that produce behaviorally equivalent dynamics. This means sampling around a z smoothly interpolates *behavior*, not parameters
 - **Listener roundtrip**: z encodes physics *through text* — the NL expression is the information bottleneck. Without this, the generator produces grammatically correct but semantically arbitrary text. Gradients flow: L2 → listener → soft token_probs (via embedding weight matmul) → generator input projection. The frozen decoder never receives gradients.
 
 The listener roundtrip is the critical pressure — it is strictly stronger than a z-space roundtrip because it forces information to survive the text bottleneck, not just a parameter re-encoding. Together, these five pressures ensure z is a shared representation between the dynamical system and the linguistic output. This isn't alignment (forcing one space to match another) — it's co-learning of a single space that serves both physics and language.
@@ -87,18 +87,23 @@ The z vector has explicit structure: z_coarse (64 dims) captures behavioral cate
 
 This means linguistic structure can mirror dynamical structure — not because anyone designed it that way, but because the decoder's inductive biases and the z structure co-align through training.
 
-## Invertibility: From Description to Simulation
+## Invertibility: From Description to Behavior
 
-The full pipeline is invertible:
+The full pipeline is invertible — not to a unique simulation, but to a *behavioral neighborhood*:
 
 ```
-English description → LLM → IPA → NLListener → z_hat → θ_inverse → θ_hat
-    → Run UAFNO with θ_hat → ground-truth simulation
+English description → LLM → IPA → NLListener → z_hat → θ_inverse → θ_hat, IC_hat
+    → Run UAFNO with (θ_hat, IC_hat) → simulation with matching behavior
 ```
 
-Every step is a learned mapping. You go from a human description to PDE parameters to a simulation. The simulation isn't "illustrating" the description — it's the dynamical ground truth that produced the description in the first place. You are sampling from the space of simulations whose dynamics the agent described in those terms.
+Every step is a learned mapping. The key insight is that the inversion targets *behavior*, not parameters. Because the relationship between (θ, IC) and dynamical behavior is many-to-many, the inverse process yields some (θ, IC) that produces the distributionally closest behavioral match in z-space — not necessarily the original parameters. This is a feature: θ and IC range freely to maximize diversity, while the VAE's latent topology ensures that nearby z values correspond to nearby behaviors.
 
-This is impossible with latent space alignment, because the alignment is many-to-one and non-invertible.
+This means you can:
+- **Sample around a z** to get smoothly interpolated behavioral variants
+- **Invert a description** to find simulations whose dynamics the agent would describe in similar terms
+- **Explore the behavioral manifold** by moving through z-space, with the linguistic output tracking the behavioral changes
+
+This is impossible with latent space alignment, because the alignment collapses the behavioral topology onto linguistic semantics. The many-to-many structure is lost.
 
 ## Comparison
 
