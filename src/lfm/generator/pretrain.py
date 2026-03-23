@@ -1095,19 +1095,39 @@ class VAEPretrainer:
                         logits[:, 0:4] = float("-inf")
                         logits[:, bos_id] = float("-inf")
                         # (eos_id is allowed — it signals end of sequence)
-                        # Repetition penalty: only 3+ repeats in window
-                        if pen > 1.0 and ids.size(1) > 1:
+                        # Repetition penalty: token-level (3+ repeats) +
+                        # ngram-level (penalize completing a repeated bigram
+                        # or trigram). Catches phrase-level loops like
+                        # "mon xak mon xak mon xak".
+                        if pen > 1.0 and ids.size(1) > 2:
                             start = max(1, ids.size(1) - win)
                             recent = ids[:, start:]
                             for bi in range(n):
-                                counts = Counter(recent[bi].tolist())
-                                for tid, cnt in counts.items():
+                                toks = recent[bi].tolist()
+                                # Token-level: 3+ same token
+                                tcounts = Counter(toks)
+                                for tid, cnt in tcounts.items():
                                     if cnt >= 3:
                                         scale = pen ** (cnt - 2)
                                         if logits[bi, tid] > 0:
                                             logits[bi, tid] /= scale
                                         else:
                                             logits[bi, tid] *= scale
+                                # Bigram-level: if last token + candidate
+                                # would complete a bigram seen 2+ times
+                                if len(toks) >= 2:
+                                    last = toks[-1]
+                                    bigrams = [
+                                        (toks[k], toks[k + 1])
+                                        for k in range(len(toks) - 1)
+                                    ]
+                                    bg_counts = Counter(bigrams)
+                                    for (a, b), cnt in bg_counts.items():
+                                        if a == last and cnt >= 2:
+                                            if logits[bi, b] > 0:
+                                                logits[bi, b] /= pen ** cnt
+                                            else:
+                                                logits[bi, b] *= pen ** cnt
                         nxt = logits.argmax(dim=-1, keepdim=True)
                         ids = torch.cat([ids, nxt], dim=1)
                     # SPM special token IDs to exclude from decode
