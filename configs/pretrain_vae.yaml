@@ -36,8 +36,8 @@ repetition_penalty: 1.2
 repetition_window: 8
 
 # Training
-batch_size: 32
-gradient_accumulation_steps: 2
+batch_size: 256
+gradient_accumulation_steps: 1
 use_amp: true
 lr: 0.001
 num_epochs: 20
@@ -51,7 +51,7 @@ topo_weight: 0.0
 topo_sample_pairs: 32
 
 # Adversarial discriminator
-use_adversarial: true
+use_adversarial: false
 adv_weight: 0.1
 adv_lr: 0.0001
 adv_disc_hidden: 256
