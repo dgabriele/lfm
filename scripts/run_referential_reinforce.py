@@ -296,7 +296,7 @@ def main(
             batch_size, 1, dtype=torch.bool, device=torch_device
         )
         pooled = gen._pool(embeddings_in, mask_in)
-        h = gen._input_proj(pooled)
+        h = gen._input_proj(pooled) + gen._input_refine(pooled)
         mu, logvar = h.chunk(2, dim=-1)
 
         # The "action" was the z that produced the tokens.
@@ -331,6 +331,7 @@ def main(
         if step > 0 and step % checkpoint_every == 0:
             ckpt = {
                 "input_proj": faculty.generator._input_proj.state_dict(),
+                "input_refine": faculty.generator._input_refine.state_dict(),
                 "msg_encoder": msg_encoder.state_dict(),
                 "receiver": receiver.state_dict(),
                 "step": step,
@@ -344,6 +345,7 @@ def main(
     torch.save(
         {
             "input_proj": faculty.generator._input_proj.state_dict(),
+            "input_refine": faculty.generator._input_refine.state_dict(),
             "msg_encoder": msg_encoder.state_dict(),
             "receiver": receiver.state_dict(),
             "step": steps,

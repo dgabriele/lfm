@@ -115,7 +115,7 @@ class VAEPretrainConfig(LFMBaseConfig):
     corpus_paths: list[str] = []
     spm_model_path: str | None = None
     spm_vocab_size: int = 8000
-    latent_dim: int = 256
+    latent_dim: int = 384
     encoder_num_layers: int = 2
     decoder_hidden_dim: int = 512
     decoder_num_layers: int = 4

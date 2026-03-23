@@ -447,6 +447,8 @@ def main(
     if input_proj_path is not None:
         checkpoint = torch.load(input_proj_path, map_location=torch_device, weights_only=True)
         faculty.generator._input_proj.load_state_dict(checkpoint["input_proj"])
+        if "input_refine" in checkpoint:
+            faculty.generator._input_refine.load_state_dict(checkpoint["input_refine"])
         logger.info("Loaded trained input projection from %s", input_proj_path)
     else:
         logger.info("Using random (untrained) input projection — baseline mode")

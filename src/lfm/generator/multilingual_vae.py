@@ -57,7 +57,11 @@ class MultilingualVAEGenerator(GeneratorModule):
         self.eos_id = config.vocab_size + 1
 
         # -- Input projection (lazy-init: input dim unknown until first call) --
-        self._input_proj: nn.Linear | None = None
+        # Residual architecture: linear path provides direct gradient signal
+        # for REINFORCE from step 0, while the MLP refines the mapping.
+        #   z = linear(x) + mlp(x)
+        self._input_proj: nn.Linear | None = None  # linear path
+        self._input_refine: nn.Sequential | None = None  # MLP residual path
         self._attention_pool_query: nn.Parameter | None = None
 
         # -- Decoder (linguistic architecture) --
@@ -194,12 +198,34 @@ class MultilingualVAEGenerator(GeneratorModule):
     # ------------------------------------------------------------------
 
     def _ensure_input_proj(self, input_dim: int) -> None:
-        """Initialize input projection and pooling on first forward call."""
+        """Initialize residual input projection on first forward call.
+
+        Creates a linear path and an MLP refinement path::
+
+            h = linear(x) + mlp(x)
+            mu, logvar = h.chunk(2, dim=-1)
+
+        The linear path gives clean gradient signal for REINFORCE from
+        step 0 (no vanishing through nonlinearities).  The MLP path
+        learns nonlinear corrections as training progresses.  Together
+        they provide more expressive capacity than either alone.
+        """
         if self._input_proj is not None:
             return
 
         device = next(self.decoder.parameters()).device
-        self._input_proj = nn.Linear(input_dim, self._latent_dim * 2).to(device)
+        out_dim = self._latent_dim * 2
+        self._input_proj = nn.Linear(input_dim, out_dim).to(device)
+        self._input_refine = nn.Sequential(
+            nn.Linear(input_dim, out_dim),
+            nn.GELU(),
+            nn.Linear(out_dim, out_dim),
+        ).to(device)
+        # Initialize refine path near zero so it starts as a no-op,
+        # letting the linear path dominate early training.
+        with torch.no_grad():
+            self._input_refine[-1].weight.mul_(0.01)
+            self._input_refine[-1].bias.zero_()
 
         if self._pooling == "attention":
             self._attention_pool_query = nn.Parameter(
@@ -445,8 +471,8 @@ class MultilingualVAEGenerator(GeneratorModule):
         # 1. Pool
         pooled = self._pool(embeddings, mask)  # (B, input_dim)
 
-        # 2. Project to mu, logvar
-        h = self._input_proj(pooled)  # (B, latent_dim * 2)
+        # 2. Residual projection to mu, logvar
+        h = self._input_proj(pooled) + self._input_refine(pooled)
         mu, logvar = h.chunk(2, dim=-1)  # each (B, latent_dim)
 
         # 3. Reparameterize
