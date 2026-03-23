@@ -54,14 +54,32 @@ This is not interpretability by decree (alignment) or by accident (hoping the te
 
 ### Co-Learned Representation Space
 
-The NLTokenizer's z space is shaped simultaneously by four training pressures:
+The NLTokenizer's z space is shaped by five training pressures, activated in two stages:
 
-1. **Reconstruction** — z must decode back to dynamics features
-2. **θ-inverse** — z must predict the PDE parameters that produced the dynamics
-3. **Listener roundtrip** — the IPA generated from z must be decodable back to z
-4. **KL regularization** — z must be well-distributed for the frozen decoder
+**Stage 1: VAE Warmup** (epochs 0 → `kl_warmup_epochs`)
 
-These pressures together ensure z is a shared representation between the dynamical system and the linguistic output. This isn't alignment (forcing one space to match another) — it's co-learning of a single space that serves both physics and language.
+| Loss | Weight | Signal |
+|------|--------|--------|
+| Feature reconstruction `‖h - ĥ‖²` | 1.0 | VAE decoder must faithfully reconstruct the concatenated family embeddings from z |
+| KL divergence `KL(q(z|x) ‖ N(0,I))` with free-bits | 0.1 (ramping 0→full) | z is a well-structured continuous latent space |
+| Theta inverse `‖θ - θ̂‖²` | 1.0 | z must encode enough to recover the original Lenia operator parameters |
+| IC inverse `‖IC - IC_hat‖²` | 0.5 | z must encode enough to recover initial condition features |
+
+**Stage 2: Full + Listener** (epochs `listener_start_epoch` →)
+
+All of the above, plus:
+
+| Loss | Weight | Signal |
+|------|--------|--------|
+| Listener roundtrip `‖z - listener(generator(z).token_probs)‖²` | 1.0 | The NL text generated from z must carry enough information about the dynamics for the listener to recover z from the token distributions alone |
+
+**What each pressure ensures:**
+
+- **Reconstruction + KL**: Standard VAE — z is a well-structured continuous latent space
+- **Theta/IC inverse**: z encodes physics — not just statistical features but actual operator parameters and initial conditions
+- **Listener roundtrip**: z encodes physics *through text* — the NL expression is the information bottleneck. Without this, the generator produces grammatically correct but semantically arbitrary text. Gradients flow: L2 → listener → soft token_probs (via embedding weight matmul) → generator input projection. The frozen decoder never receives gradients.
+
+The listener roundtrip is the critical pressure — it is strictly stronger than a z-space roundtrip because it forces information to survive the text bottleneck, not just a parameter re-encoding. Together, these five pressures ensure z is a shared representation between the dynamical system and the linguistic output. This isn't alignment (forcing one space to match another) — it's co-learning of a single space that serves both physics and language.
 
 ### Architectural Scale Separation
 
@@ -88,10 +106,10 @@ This is impossible with latent space alignment, because the alignment is many-to
 |---|---|---|
 | Interface | Text API or latent alignment | Continuous VAE z → frozen decoder |
 | Information preservation | Unverified | Guaranteed by listener roundtrip loss |
-| Agent ontology | Collapsed to human semantics | Preserved — 4 co-training pressures shape z |
+| Agent ontology | Collapsed to human semantics | Preserved — 5 co-training pressures shape z |
 | Invertibility | Lost at text/alignment boundary | Full path: description → z → θ → simulation |
 | Compositional structure | Depends on LLM tokenization | Inherited from frozen multilingual decoder |
-| Training signal | Separate (LQM and LLM train independently) | Joint (dynamics, θ recovery, listener all shape z) |
+| Training signal | Separate (LQM and LLM train independently) | Joint (reconstruction, KL, θ/IC inverse, listener roundtrip) |
 | Novel concept expression | Suppressed by alignment | Possible — z can encode states with no human name |
 | Scale separation | Not architectural | Architectural: z_coarse/z_fine ↔ multi-scale attention |
 
