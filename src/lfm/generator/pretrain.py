@@ -1222,7 +1222,28 @@ class VAEPretrainer:
                 for j, txt in enumerate(random_texts):
                     logger.info("  random[%d]: %s", j, txt[:100])
 
-                # --- 5. Structural health metrics ---
+                # --- 5. Length distribution (autoregressive decode) ---
+                # Decode a batch of random z to check EOS behavior and
+                # length variation — the key metric for LayerNorm fix.
+                z_length_test = torch.randn(32, cfg.latent_dim, device=device)
+                length_texts = _sample_decode(z_length_test)
+                word_counts = [len(t.split()) for t in length_texts]
+                char_counts = [len(t) for t in length_texts]
+                logger.info(
+                    "  length_dist (32 random z): "
+                    "words: min=%d max=%d mean=%.1f std=%.1f | "
+                    "chars: min=%d max=%d mean=%.1f std=%.1f",
+                    min(word_counts), max(word_counts),
+                    sum(word_counts) / len(word_counts),
+                    (sum((w - sum(word_counts) / len(word_counts)) ** 2
+                         for w in word_counts) / len(word_counts)) ** 0.5,
+                    min(char_counts), max(char_counts),
+                    sum(char_counts) / len(char_counts),
+                    (sum((c - sum(char_counts) / len(char_counts)) ** 2
+                         for c in char_counts) / len(char_counts)) ** 0.5,
+                )
+
+                # --- 6. Structural health metrics ---
                 all_eval_texts = recon_texts + interp_texts + perturb_texts + random_texts
 
                 def _struct_metrics(texts: list[str]) -> dict[str, float]:
