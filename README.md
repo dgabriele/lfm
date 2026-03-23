@@ -17,6 +17,7 @@ LFM gives agents the ability to express internal representations as linguistical
 7. [Quick Start](#quick-start)
 8. [Design](#design)
 9. [Status](#status)
+10. [Further Reading](#further-reading)
 
 ---
 
@@ -324,6 +325,10 @@ The VAE pretraining pipeline is complete and validated. The referential game dem
 - Train IPA → English translator (closes the vision loop)
 - Integration with domain-specific agent systems (Spinlock VQTokenizer for dynamical systems)
 - Multi-agent self-play (co-adaptation of speaker/listener conventions)
+
+## Further Reading
+
+- **[LFM vs LQM+LLM](docs/lfm-vs-lqm.md)** — How LFM's translation-based architecture compares to Large Quantitative Model + LLM pipelines for scientific discovery, and why the distinction between alignment and translation matters for finding genuinely novel structure in dynamical systems.
 
 ## License
 
