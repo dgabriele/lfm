@@ -157,20 +157,25 @@ Smooth typological transition through the latent space:
 1.00: văn ku mon hut toj xi ɲiəw ciəm thɤj zan zɛɲ ka kak mon cɔ...
 ```
 
-### Perturbation (σ=0.5)
+### Perturbation
 
-Small noise produces paraphrastic variation within the same typological profile:
+Adding noise to a latent code produces paraphrastic variation that scales with noise level — small noise changes content while preserving phonotactic identity, large noise shifts typology entirely:
 
 ```
-ɐkliɕmɨ d͡ʑakarta funkvɲidjijniz tɔ aktɛnliɕmɨ napravljennuu ɡɾinɛlʊs
+σ=0.0: zaatakɔvali faɲi ɔ tɔ abɨ thɯ dɔ druɡji batmaɲɛ̃ dɔ nas vɨrɔt͡ʂnɨ filmɔvɔlɛmi
+σ=0.1: prɛzɨdɛnt farɨtacɪvɲi muvjɔnt͡s tɔ fʂɨstkɔ dɔ druɡji ɔ durɔlu dɔ ix vɨɲɛɲi
+σ=0.5: ɐkliɕmɨ d͡ʑakarta funkvɲidjijniz tɔ aktɛnliɕmɨ napravljennuu ɡɾinɛlʊs
+σ=1.0: zɛnvɔ dɛ ɝlʔasbu ɪnvɔzɛnint vɛt͡ɕhɛk dɛlʔasbuvɔ fɛt͡ɕhɛkɛnkewu duɾɐntɛt͡ɕhɛk
 ```
 
 ### Random z sampling
 
-The decoder produces varied, pronounceable, structurally coherent output from arbitrary latent codes:
+The decoder produces varied, pronounceable, structurally coherent output from arbitrary points in the latent space:
 
 ```
-ia prebɪl pre momento pre ninlasikanlas sɛzt͡sɨ a tɯŋ prebɪlnɔɕt͡ɕi
+random[0]: ɑrʋiina ɑrʋi ɑrʋiɾo etæ ɑrʋijiljoljemina vossintoɾjisinsinleɾ po pe seis
+random[1]: posposposytøpospos inytøsɛ bytøytødys hytøytø mundo kopositiposytø lɔjalmɛntos
+random[2]: ia prebɪl pre momento pre ninlasikanlas sɛzt͡sɨ a tɯŋ prebɪlnɔɕt͡ɕi pre nin
 ```
 
 ## Agent Game Results
@@ -179,12 +184,13 @@ REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 
 
 | Metric | Value |
 |--------|-------|
-| Accuracy | **87.5%** (chance = 12.5%) |
-| Improvement over chance | **7×** |
-| Message length | 17-22 tokens (variable) |
-| Steps to converge | ~650 |
+| Average accuracy | **93%** (chance = 12.5%) |
+| Peak batch accuracy | **100%** |
+| Improvement over chance | **7.4×** |
+| Message length | 16-25 tokens (variable) |
+| Receiver loss | 0.002-0.25 (from 2.1 at start) |
 
-The frozen linguistic bottleneck carries rich discriminative information from real sentence embeddings. Different inputs produce distinguishably different IPA utterances.
+The frozen linguistic bottleneck carries rich discriminative information from real sentence embeddings. Different inputs produce distinguishably different IPA utterances whose length varies with input complexity.
 
 ## Quick Start
 
