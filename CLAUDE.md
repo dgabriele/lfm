@@ -103,6 +103,17 @@ REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 
 
 Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained projection (vs random baseline).
 
+### Structural Metrics (trained vs random baseline)
+
+| Metric | Random | Trained | Change |
+|--------|--------|---------|--------|
+| Topsim (hidden cosine) | 0.065 | **0.335** | 5.2× |
+| Topsim (token edit) | 0.031 | **0.074** | 2.4× |
+| Topology (hidden cosine) | 0.010 (n.s.) | **0.366** (p≈0) | non-sig → p≈0 |
+| Topology (token Jaccard) | -0.035 (n.s.) | **0.202** (p≈0) | non-sig → p≈0 |
+| Probe mean R² | 0.110 | **0.183** | +66% |
+| Probe dims R²>0 | 92% | **100%** | all dims carry signal |
+
 ## Commands
 
 - `poetry install` — Install dependencies
