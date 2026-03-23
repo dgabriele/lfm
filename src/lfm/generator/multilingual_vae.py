@@ -66,6 +66,7 @@ class MultilingualVAEGenerator(GeneratorModule):
             precompute_rope_freqs,
         )
 
+        self.latent_norm = nn.LayerNorm(config.latent_dim)
         self.latent_to_decoder = nn.Linear(config.latent_dim, config.decoder_hidden_dim)
         self.token_embedding = nn.Embedding(self._full_vocab, config.decoder_hidden_dim)
 
@@ -172,6 +173,8 @@ class MultilingualVAEGenerator(GeneratorModule):
         self.token_embedding.load_state_dict(checkpoint["token_embedding"])
         if "pos_embedding" in checkpoint and not isinstance(self.pos_embedding, nn.Identity):
             self.pos_embedding.load_state_dict(checkpoint["pos_embedding"])
+        if "latent_norm" in checkpoint:
+            self.latent_norm.load_state_dict(checkpoint["latent_norm"])
         self.decoder.load_state_dict(checkpoint["decoder"])
         self.output_head.load_state_dict(checkpoint["output_head"])
         logger.info("Loaded pretrained VAE decoder from %s", path)
@@ -179,6 +182,7 @@ class MultilingualVAEGenerator(GeneratorModule):
     def _freeze_decoder_params(self) -> None:
         """Freeze all decoder parameters (preserves linguistic prior)."""
         frozen_modules: list[nn.Module] = [
+            self.latent_norm,
             self.latent_to_decoder,
             self.token_embedding,
             self.pos_embedding,
@@ -245,6 +249,12 @@ class MultilingualVAEGenerator(GeneratorModule):
         batch = z.size(0)
         device = z.device
         max_len = self._max_output_len
+
+        # Normalize z to distribution-invariant representation before
+        # decoding.  This ensures the decoder sees the same scale/range
+        # regardless of whether z came from the pretrained encoder or from
+        # the agent's learned input projection.
+        z = self.latent_norm(z)
 
         # z -> cross-attention memory: (batch, 1, decoder_hidden_dim)
         memory = self.latent_to_decoder(z).unsqueeze(1)
