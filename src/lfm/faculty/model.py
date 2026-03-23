@@ -306,7 +306,10 @@ class LanguageFaculty(nn.Module):
 
             # Generator's decoder states become the new embeddings
             embeddings = g_out["embeddings"]
-            if "generator_to_faculty" in self.projections:
+            if (
+                "generator_to_faculty" in self.projections
+                and embeddings.size(-1) == self.config.generator.decoder_hidden_dim
+            ):
                 embeddings = self.projections["generator_to_faculty"](embeddings)
 
             tokens = g_out["tokens"]

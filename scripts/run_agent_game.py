@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 
-from lfm.embeddings import EmbeddingGameConfig, run_embedding_reconstruction
+from lfm.embeddings import EmbeddingGameConfig
 from lfm.embeddings.config import EmbeddingStoreConfig, SamplerConfig
 from lfm.faculty.config import FacultyConfig
 from lfm.generator.config import GeneratorConfig
@@ -82,15 +82,66 @@ def main(
         embedding_dim=embedding_dim,
     )
 
-    results = run_embedding_reconstruction(
-        store_dir=store_dir,
-        faculty_config=faculty_config,
-        game_config=game_config,
-        steps=steps,
-        lr=lr,
-        device=device,
-    )
+    # Direct training loop with cosine-only loss for clearer signal
+    import torch
 
+    from lfm.embeddings.games import EmbeddingReconstructionGame
+    from lfm.embeddings.store import EmbeddingStore
+    from lfm.faculty.model import LanguageFaculty
+
+    torch_device = torch.device(device)
+
+    store = EmbeddingStore(store_dir)
+    store.load()
+    print(f"Store: {store.num_passages} passages, dim={store.embedding_dim}")
+
+    faculty = LanguageFaculty(faculty_config).to(torch_device)
+    game = EmbeddingReconstructionGame(game_config).to(torch_device)
+
+    # Only train unfrozen params
+    trainable = [p for p in faculty.parameters() if p.requires_grad]
+    trainable += list(game.parameters())
+    print(f"Trainable params: {sum(p.numel() for p in trainable):,}")
+
+    optimizer = torch.optim.AdamW(trainable, lr=lr)
+
+    # Simple batch sampling from the store
+    embeddings_np = store._embeddings
+    n = embeddings_np.shape[0]
+
+    for step in range(steps):
+        # Sample batch
+        idx = torch.randint(0, n, (batch_size,))
+        agent_state = torch.tensor(
+            embeddings_np[idx], dtype=torch.float32
+        ).to(torch_device)
+
+        # Forward through faculty + game
+        lfm_outputs = faculty(agent_state)
+        reconstructed = game.decode_message(lfm_outputs)
+
+        # Cosine similarity loss (pure — no MSE noise)
+        cosine_sim = torch.nn.functional.cosine_similarity(
+            reconstructed, agent_state, dim=-1
+        )
+        loss = (1.0 - cosine_sim).mean()
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+        optimizer.step()
+
+        if step % 100 == 0:
+            print(
+                f"step={step}  loss={loss.item():.4f}  "
+                f"cosine_sim={cosine_sim.mean().item():.4f}"
+            )
+
+    results = {
+        "final_cosine_sim": cosine_sim.mean().item(),
+        "final_loss": loss.item(),
+    }
+    print(f"Final: {results}")
     return results
 
 

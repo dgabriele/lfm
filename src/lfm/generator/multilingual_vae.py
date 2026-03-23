@@ -364,8 +364,11 @@ class MultilingualVAEGenerator(GeneratorModule):
         # This gives clean gradient flow to _input_proj without vanishing
         # through 64 frozen AR steps.  Full AR decode is used at eval time.
         if self.config.freeze_decoder and self.training:
-            # Direct latent path: z → project → single hidden state
-            decoder_hidden = self.latent_to_decoder(z)  # (B, H)
+            # Latent bottleneck path: use z directly as the message
+            # representation. The decoder is for generating readable text
+            # at eval time — the information bottleneck IS the latent
+            # space itself (256-dim z), not the decoded token sequence.
+            # The game's MLP decoder reconstructs directly from z.
             batch = z.size(0)
             return {
                 "tokens": torch.zeros(
@@ -374,7 +377,7 @@ class MultilingualVAEGenerator(GeneratorModule):
                 "token_probs": torch.zeros(
                     batch, 1, self._full_vocab, device=z.device
                 ),
-                "embeddings": decoder_hidden.unsqueeze(1),  # (B, 1, H)
+                "embeddings": z.unsqueeze(1),  # (B, 1, latent_dim)
                 "lengths": torch.ones(batch, device=z.device),
                 "mask": torch.ones(
                     batch, 1, dtype=torch.bool, device=z.device
