@@ -1,0 +1,61 @@
+# VAE decoder pretraining config
+# Produces: data/vae_decoder.pt, data/spm.model
+#
+# Previous successful run achieved:
+#   Val CE: 0.94 (PPL ≈ 2.6), TTR: 0.96, rep_rate: 0.00
+
+corpus_loader: leipzig
+corpus_loader_config:
+  data_dir: data/leipzig
+
+# Tokenizer
+spm_vocab_size: 8000
+
+# Architecture (must match GeneratorConfig)
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+
+# Linguistic structure
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 64
+
+# KL regularization — disabled (was always pegged at initial value, contributing noise)
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+
+# Repetition control
+repetition_penalty: 1.2
+repetition_window: 8
+
+# Training
+batch_size: 32
+gradient_accumulation_steps: 2
+use_amp: true
+lr: 0.001
+num_epochs: 20
+val_fraction: 0.1
+seed: 42
+device: cuda
+output_path: data/vae_decoder.pt
+
+# Topological regularization
+topo_weight: 0.0
+topo_sample_pairs: 32
+
+# Adversarial discriminator
+use_adversarial: true
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true
