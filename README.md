@@ -152,7 +152,6 @@ src/lfm/
 | Repetition rate | 0.000 |
 | EOS rate | 1.00 |
 | Mean word length | 5.5 IPA chars |
-| Truncation | 6% (down from 19% at seq_len=64) |
 
 ### Reconstruction
 
