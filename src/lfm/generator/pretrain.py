@@ -890,7 +890,17 @@ class VAEPretrainer:
                 start_epoch, global_step, best_val_loss,
             )
 
-        # 7. Training loop
+        # 7. Training history
+        from lfm.generator.training_history import TrainingHistory
+
+        history = TrainingHistory(output_dir)
+        history.start_session(
+            start_epoch=start_epoch,
+            config=cfg,
+            spm_hash=current_spm_hash,
+        )
+
+        # 8. Training loop
         accum = cfg.gradient_accumulation_steps
         log_every = 50  # log every N batches
         num_batches = len(train_loader)
@@ -1628,6 +1638,9 @@ class VAEPretrainer:
             # Step LR scheduler
             scheduler.step()
 
+            # Update training history
+            history.update_epoch(epoch + 1, best_val_loss)
+
             # Save full training state for resume (every epoch)
             resume_path = Path(output_dir) / "vae_resume.pt"
             torch.save(
@@ -1648,6 +1661,10 @@ class VAEPretrainer:
                 resume_path,
             )
 
+        history.end_session(
+            end_epoch=epoch + 1 if epoch >= start_epoch else start_epoch,
+            best_val_loss=best_val_loss,
+        )
         return best_metrics
 
     @staticmethod

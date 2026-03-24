@@ -25,6 +25,7 @@ attention_global_every: 7
 use_rope: true
 share_decoder_layers: true
 max_seq_len: 96
+encoder_pooling: attention
 
 # KL regularization — disabled (was always pegged at initial value, contributing noise)
 kl_weight: 0.0
