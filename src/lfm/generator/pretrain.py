@@ -820,7 +820,12 @@ class VAEPretrainer:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=cfg.num_epochs, eta_min=cfg.lr_min,
         )
-        scaler = torch.amp.GradScaler(enabled=cfg.use_amp)
+        # Lower initial scale to reduce fp16 overflow probability in late training.
+        scaler = torch.amp.GradScaler(
+            enabled=cfg.use_amp,
+            init_scale=2**10,  # 1024 (default is 2**16 = 65536)
+            growth_interval=2000,  # slower scale growth
+        )
 
         # 5b. Build adversarial discriminator (optional)
         disc: StructuralDiscriminator | None = None
@@ -872,7 +877,9 @@ class VAEPretrainer:
                 if isinstance(m, nn.Module) and k in ckpt["modules"]:
                     m.load_state_dict(ckpt["modules"][k])
             optimizer.load_state_dict(ckpt["optimizer"])
-            scaler.load_state_dict(ckpt["scaler"])
+            # Skip restoring scaler state — use fresh low-scale init
+            # to avoid fp16 overflow from high saved scales.
+            # scaler.load_state_dict(ckpt["scaler"])
             if "scheduler" in ckpt:
                 scheduler.load_state_dict(ckpt["scheduler"])
             start_epoch = ckpt["epoch"]
@@ -945,7 +952,7 @@ class VAEPretrainer:
                 b = batch_tokens.size(0)
 
                 with torch.amp.autocast(
-                    device_type=device.type, enabled=cfg.use_amp
+                    device_type=device.type, enabled=cfg.use_amp,
                 ):
                     _do_kl = cfg.kl_weight > 0
                     ce_loss, kl_loss, kl_per_dim_train, z_batch, dec_hidden = (
