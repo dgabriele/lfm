@@ -127,7 +127,7 @@ class VAEPretrainConfig(LFMBaseConfig):
     attention_global_every: int = 7
     use_rope: bool = True
     share_decoder_layers: bool = True
-    max_seq_len: int = 64
+    max_seq_len: int = 96
     repetition_penalty: float = 1.2
     repetition_window: int = 8
     kl_weight: float = 0.5
@@ -143,7 +143,14 @@ class VAEPretrainConfig(LFMBaseConfig):
     device: str = "cuda"
     output_path: str = "data/vae_decoder.pt"
 
-    # Topological regularization (smooth latent → smooth output)
+    # Latent variance floor: penalize when per-dimension z variance
+    # drops below ``z_var_floor``, preventing latent space collapse
+    # without pushing the mean toward zero (which is what KL does and
+    # what caused PPL plateau).  Only activates during collapse.
+    z_var_weight: float = 0.1
+    z_var_floor: float = 0.01
+
+    # Legacy topological regularization (disabled — replaced by z_var)
     topo_weight: float = 0.0
     topo_sample_pairs: int = 32
 
@@ -156,6 +163,16 @@ class VAEPretrainConfig(LFMBaseConfig):
     adv_warmup_steps: int = 1000
     adv_free_run_len: int = 32
     adv_spectral_norm: bool = True
+
+    # Scheduled sampling: anneal from 0 to target probability over warmup
+    # epochs, starting at ``scheduled_sampling_start_epoch``.  At each
+    # decoder position, replace ground truth input with the model's own
+    # prediction with this probability.  Prevents exposure bias and
+    # generation degeneration at long sequence lengths.  Must start late
+    # enough that the model produces reasonable predictions to feed back.
+    scheduled_sampling_target: float = 0.0
+    scheduled_sampling_start_epoch: int = 5
+    scheduled_sampling_warmup_epochs: int = 5
 
 
 # ---------------------------------------------------------------------------
@@ -384,11 +401,17 @@ def _vae_forward(
     _rope_freqs: Tensor | None = None,
     _cached_mask: Tensor | None = None,
     _cfg: object | None = None,
+    scheduled_sampling_p: float = 0.0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """Run one VAE forward pass (teacher-forced).
+    """Run one VAE forward pass with optional scheduled sampling.
 
-    Supports both standard ``nn.TransformerDecoder`` and the custom
-    ``LinguisticDecoder`` with RoPE and multi-scale attention.
+    When ``scheduled_sampling_p > 0``, a two-pass approach is used:
+    first a full teacher-forced pass to get predictions, then a second
+    pass with a mixed input where each position uses the model's own
+    argmax prediction with probability ``scheduled_sampling_p``, or the
+    ground truth otherwise.  This teaches the decoder to recover from
+    its own outputs, preventing degeneration during free-run generation
+    at long sequence lengths.
 
     Returns:
         Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden)``.
@@ -418,17 +441,13 @@ def _vae_forward(
     std = (0.5 * logvar).exp()
     z = mu + std * torch.randn_like(std)
 
-    # Decode (teacher-forced)
+    # Decode
     memory = latent_to_decoder(z).unsqueeze(1)
     bos_col = torch.full((b, 1), bos_id, dtype=torch.long, device=device)
-    dec_input_ids = torch.cat([bos_col, batch_tokens[:, :-1]], dim=1)
+    teacher_input_ids = torch.cat([bos_col, batch_tokens[:, :-1]], dim=1)
 
+    # Precompute mask
     if isinstance(decoder, LinguisticDecoder):
-        # Linguistic decoder: token embedding only (RoPE handles positions)
-        dec_input = dec_token_embedding(dec_input_ids)
-        if not isinstance(dec_pos_embedding, nn.Identity):
-            dec_input = dec_input + dec_pos_embedding(pos_ids)
-        # Multi-scale mask (precomputed, sliced to seq_len)
         if _cached_mask is not None:
             tgt_mask = _cached_mask[:, :seq_len, :seq_len]
         else:
@@ -439,19 +458,51 @@ def _vae_forward(
                 global_every=_cfg.attention_global_every,
                 device=device,
             )
-        dec_out = decoder(
-            dec_input, memory, tgt_mask=tgt_mask, rope_freqs=_rope_freqs
-        )
     else:
-        # Standard decoder (fallback)
-        dec_input = dec_token_embedding(dec_input_ids) + dec_pos_embedding(pos_ids)
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(
             seq_len, device=device
         )
-        dec_out = decoder(tgt=dec_input, memory=memory, tgt_mask=tgt_mask)
+
+    def _run_decoder(input_ids: Tensor) -> Tensor:
+        if isinstance(decoder, LinguisticDecoder):
+            dec_input = dec_token_embedding(input_ids)
+            if not isinstance(dec_pos_embedding, nn.Identity):
+                dec_input = dec_input + dec_pos_embedding(pos_ids)
+            return decoder(
+                dec_input, memory, tgt_mask=tgt_mask, rope_freqs=_rope_freqs
+            )
+        else:
+            dec_input = (
+                dec_token_embedding(input_ids) + dec_pos_embedding(pos_ids)
+            )
+            return decoder(tgt=dec_input, memory=memory, tgt_mask=tgt_mask)
+
+    if scheduled_sampling_p > 0:
+        # Pass 1: teacher-forced to get predictions
+        with torch.no_grad():
+            tf_out = _run_decoder(teacher_input_ids)
+            predicted_ids = output_head(tf_out).argmax(dim=-1)  # (b, seq_len)
+
+        # Build mixed input: for each position, use model's prediction
+        # with probability p, ground truth otherwise.  BOS (position 0)
+        # is always ground truth.
+        mix_mask = torch.rand(b, seq_len, device=device) < scheduled_sampling_p
+        mix_mask[:, 0] = False  # always use BOS
+        mixed_input_ids = torch.where(
+            mix_mask,
+            torch.cat([bos_col, predicted_ids[:, :-1]], dim=1),
+            teacher_input_ids,
+        )
+
+        # Pass 2: decode with mixed input
+        dec_out = _run_decoder(mixed_input_ids)
+    else:
+        # Pure teacher forcing
+        dec_out = _run_decoder(teacher_input_ids)
+
     logits = output_head(dec_out)
 
-    # Reconstruction loss (masked CE)
+    # Reconstruction loss (masked CE) — always against ground truth targets
     ce = F.cross_entropy(
         logits.reshape(-1, full_vocab),
         batch_tokens.reshape(-1),
@@ -583,22 +634,39 @@ class VAEPretrainer:
         cache_path = Path(output_dir) / "preprocessed_cache.pt"
         spm_path_cached = Path(output_dir) / "spm.model"
 
-        # Cache format v2 includes 'languages' alongside token_ids_list.
-        # Detect v1 caches (missing 'languages') and regenerate.
+        def _file_hash(path: str | Path) -> str:
+            """SHA-256 of a file for consistency checks."""
+            import hashlib
+
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            return h.hexdigest()[:16]
+
+        # Cache v3: includes 'languages' and 'spm_hash' for consistency.
         _cache_valid = False
         if cache_path.exists() and spm_path_cached.exists():
             logger.info("Loading preprocessed cache from %s", cache_path)
             cache = torch.load(cache_path, weights_only=False)
-            if "languages" in cache:
+            spm_hash = _file_hash(spm_path_cached)
+            if "languages" not in cache:
+                logger.info(
+                    "Cache missing 'languages' (v1 format) — regenerating..."
+                )
+            elif cache.get("spm_hash") and cache["spm_hash"] != spm_hash:
+                logger.info(
+                    "Cache SPM hash mismatch (cache=%s, file=%s) — "
+                    "regenerating...",
+                    cache["spm_hash"],
+                    spm_hash,
+                )
+            else:
                 token_ids_list = cache["token_ids_list"]
                 languages_list: list[str] = cache["languages"]
                 vocab_size = cache["vocab_size"]
                 spm_path = str(spm_path_cached)
                 _cache_valid = True
-            else:
-                logger.info(
-                    "Cache missing 'languages' (v1 format) — regenerating..."
-                )
 
         if not _cache_valid:
             # 1. Load corpus with language labels preserved
@@ -644,17 +712,18 @@ class VAEPretrainer:
                 vocab_size,
             )
 
-            # Save cache (v2 format with languages)
+            # Save cache (v3 format with languages + SPM hash)
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
                     "token_ids_list": token_ids_list,
                     "languages": languages_list,
                     "vocab_size": vocab_size,
+                    "spm_hash": _file_hash(spm_path),
                 },
                 cache_path,
             )
-            logger.info("Saved preprocessed cache (v2) to %s", cache_path)
+            logger.info("Saved preprocessed cache (v3) to %s", cache_path)
 
         full_vocab = vocab_size + 2
         bos_id = vocab_size
@@ -669,9 +738,16 @@ class VAEPretrainer:
 
         sp = spm_lib.SentencePieceProcessor(model_file=spm_path)
 
-        # 4. Build dataset and split
+        # 4. Build dataset and split.
+        # Identify word-boundary token IDs (sentencepiece ▁ prefix) so
+        # truncated sequences are cut at word boundaries, not mid-word.
+        word_boundary_ids = {
+            i for i in range(vocab_size)
+            if sp.id_to_piece(i).startswith("▁")
+        }
         dataset = MultilingualCorpusDataset(
-            token_ids_list, cfg.max_seq_len, eos_id
+            token_ids_list, cfg.max_seq_len, eos_id,
+            word_boundary_ids=word_boundary_ids,
         )
         val_size = max(1, int(len(dataset) * cfg.val_fraction))
         train_size = len(dataset) - val_size
@@ -738,9 +814,19 @@ class VAEPretrainer:
         start_epoch = 0
 
         resume_path = Path(output_dir) / "vae_resume.pt"
+        current_spm_hash = _file_hash(spm_path)
         if resume_path.exists():
             logger.info("Resuming from %s", resume_path)
             ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+            # Verify SPM consistency
+            ckpt_spm_hash = ckpt.get("spm_hash")
+            if ckpt_spm_hash and ckpt_spm_hash != current_spm_hash:
+                raise RuntimeError(
+                    f"SPM model mismatch: checkpoint was trained with "
+                    f"spm_hash={ckpt_spm_hash} but current spm.model has "
+                    f"hash={current_spm_hash}. Delete vae_resume.pt to "
+                    f"start fresh, or restore the matching spm.model."
+                )
             for k, m in modules.items():
                 if isinstance(m, nn.Module) and k in ckpt["modules"]:
                     m.load_state_dict(ckpt["modules"][k])
@@ -782,6 +868,19 @@ class VAEPretrainer:
         z_stats_momentum = 0.01
 
         for epoch in range(start_epoch, cfg.num_epochs):
+            # -- Scheduled sampling: anneal from 0 to target --
+            ss_p = 0.0
+            if (
+                cfg.scheduled_sampling_target > 0
+                and epoch >= cfg.scheduled_sampling_start_epoch
+            ):
+                ss_frac = min(
+                    (epoch - cfg.scheduled_sampling_start_epoch)
+                    / max(cfg.scheduled_sampling_warmup_epochs, 1),
+                    1.0,
+                )
+                ss_p = ss_frac * cfg.scheduled_sampling_target
+
             # -- Train --
             for m in modules.values():
                 if isinstance(m, nn.Module):
@@ -789,7 +888,7 @@ class VAEPretrainer:
 
             train_ce_sum = 0.0
             train_kl_sum = 0.0
-            train_topo_sum = 0.0
+            train_zvar_sum = 0.0
             train_count = 0
             last_grad_norm = 0.0
             optimizer.zero_grad()
@@ -815,6 +914,7 @@ class VAEPretrainer:
                             compute_kl=_do_kl,
                             repetition_penalty=cfg.repetition_penalty,
                             repetition_window=cfg.repetition_window,
+                            scheduled_sampling_p=ss_p,
                             **modules,
                         )
                     )
@@ -843,35 +943,21 @@ class VAEPretrainer:
                     else:
                         kl_scale = 0.0
 
-                    # Topological regularization: nearby z → similar output.
-                    # Both distances are differentiable (cosine on decoder
-                    # hidden states).  Phonetic Hamming is logged as a
-                    # diagnostic but not used in the loss — its discrete,
-                    # noisy gradients destabilize training.
-                    topo_loss = torch.tensor(0.0, device=device)
-                    if cfg.topo_weight > 0 and b >= 4:
-                        n_pairs = min(cfg.topo_sample_pairs, b // 2)
-                        idx_a = torch.randperm(b, device=device)[:n_pairs]
-                        idx_b = torch.randperm(b, device=device)[:n_pairs]
-
-                        # Both sides differentiable
-                        d_z = (
-                            (z_batch[idx_a] - z_batch[idx_b])
-                            .pow(2)
-                            .sum(-1)
-                            .sqrt()
-                        )
-                        h_a = dec_hidden[idx_a].mean(dim=1)
-                        h_b = dec_hidden[idx_b].mean(dim=1)
-                        d_out = 1.0 - F.cosine_similarity(h_a, h_b, dim=-1)
-
-                        # Normalize to [0,1]
-                        d_z_norm = d_z / d_z.max().clamp(min=1e-6)
-                        d_out_norm = d_out / d_out.max().clamp(min=1e-6)
-                        topo_loss = (d_z_norm - d_out_norm).pow(2).mean()
+                    # Variance floor regularization: prevent latent collapse
+                    # by penalizing when per-dimension z variance drops below
+                    # the floor.  Only activates during collapse — no effect
+                    # when the latent space is healthy.
+                    z_var_loss = torch.tensor(0.0, device=device)
+                    if cfg.z_var_weight > 0 and b >= 4:
+                        z_var = z_batch.var(dim=0)  # (latent_dim,)
+                        # Hinge: only penalize dims below the floor
+                        z_var_loss = F.relu(
+                            cfg.z_var_floor - z_var
+                        ).mean()
 
                     loss = (
-                        ce_loss + kl_scale * kl_loss + cfg.topo_weight * topo_loss
+                        ce_loss + kl_scale * kl_loss
+                        + cfg.z_var_weight * z_var_loss
                     ) / accum
 
                 scaler.scale(loss).backward()
@@ -957,16 +1043,24 @@ class VAEPretrainer:
                 if (i + 1) % accum == 0 or (i + 1) == len(train_loader):
                     scaler.unscale_(optimizer)
                     last_grad_norm = nn.utils.clip_grad_norm_(
-                        all_params, max_norm=10.0
+                        all_params, max_norm=5.0
                     ).item()
-                    scaler.step(optimizer)
+                    # Skip step on inf/nan gradients to prevent corruption
+                    if math.isfinite(last_grad_norm):
+                        scaler.step(optimizer)
+                    else:
+                        logger.warning(
+                            "Skipping optimizer step: gnorm=%s at step %d",
+                            last_grad_norm,
+                            global_step,
+                        )
                     scaler.update()
                     optimizer.zero_grad()
                     global_step += 1
 
                 train_ce_sum += ce_loss.item() * b
                 train_kl_sum += kl_loss.item() * b
-                train_topo_sum += topo_loss.item() * b
+                train_zvar_sum += z_var_loss.item() * b
                 train_count += b
 
                 # -- Per-batch logging --
@@ -1000,8 +1094,8 @@ class VAEPretrainer:
                             f"kl_scale={kl_scale:.4f} "
                             f"active={active}/{cfg.latent_dim}"
                         )
-                    if cfg.topo_weight > 0:
-                        extra_parts.append(f"topo={topo_loss.item():.4f}")
+                    if cfg.z_var_weight > 0:
+                        extra_parts.append(f"zvar={z_var_loss.item():.4f}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
                         extra_parts.append(
                             f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
@@ -1024,8 +1118,8 @@ class VAEPretrainer:
 
             train_ce = train_ce_sum / max(train_count, 1)
             train_kl = train_kl_sum / max(train_count, 1)
-            train_topo = train_topo_sum / max(train_count, 1)
-            train_loss = train_ce + cfg.kl_weight * train_kl + cfg.topo_weight * train_topo
+            train_zvar = train_zvar_sum / max(train_count, 1)
+            train_loss = train_ce + cfg.kl_weight * train_kl + cfg.z_var_weight * train_zvar
 
             # -- Validate --
             for m in modules.values():
@@ -1074,13 +1168,20 @@ class VAEPretrainer:
             epoch_parts.append(f"train: CE={train_ce:.4f}")
             if _do_kl:
                 epoch_parts.append(f"KL={train_kl:.4f}")
-            if cfg.topo_weight > 0:
-                epoch_parts.append(f"topo={train_topo:.4f}")
+            if cfg.z_var_weight > 0:
+                epoch_parts.append(f"zvar={train_zvar:.4f}")
             epoch_parts.append(f"total={train_loss:.4f}")
             epoch_parts.append(f"| val: CE={val_ce:.4f}")
             if _do_kl:
                 epoch_parts.append(f"KL={val_kl:.4f}")
             epoch_parts.append(f"total={val_loss:.4f}")
+            # Log z distribution health — tracks latent space collapse
+            epoch_parts.append(
+                f"| z_std={z_running_std.mean():.4f}"
+                f" z_active={int((z_running_std > 0.01).sum())}/{cfg.latent_dim}"
+            )
+            if ss_p > 0:
+                epoch_parts.append(f"ss={ss_p:.2f}")
             if _do_kl and all_kl_per_dim:
                 kl_cat = torch.cat(all_kl_per_dim, dim=0)
                 mean_kl_per_dim = kl_cat.mean(dim=0)
@@ -1171,7 +1272,7 @@ class VAEPretrainer:
                         probs = F.softmax(logits, dim=-1)
                         nxt = torch.multinomial(probs, num_samples=1)
                         ids = torch.cat([ids, nxt], dim=1)
-                    # SPM special token IDs to exclude from decode
+                    # Decode single-sentence output: truncate at first EOS
                     _spm_specials = {0, 1, 2, 3, bos_id, eos_id}
                     texts = []
                     for j in range(n):
@@ -1183,7 +1284,7 @@ class VAEPretrainer:
                             if x < vocab_size and x not in _spm_specials
                         ]
                         text = sp.decode(toks)
-                        # Strip trailing orphan consonants (truncation artifacts)
+                        # Strip trailing orphan consonants
                         words = text.split()
                         while words and len(words[-1]) == 1 and not _is_vowel(words[-1]):
                             words.pop()
@@ -1321,12 +1422,18 @@ class VAEPretrainer:
                     }
 
                 m = _struct_metrics(all_eval_texts)
+                # EOS rate: fraction of length-test decodes that emitted
+                # EOS before max_seq_len (measures stopping ability)
+                eos_rate = sum(
+                    1 for t in length_texts if len(t.split()) < cfg.max_seq_len // 2
+                ) / max(len(length_texts), 1)
                 logger.info(
                     "  struct: TTR=%.3f rep_rate=%.3f "
-                    "mean_word_len=%.1f",
+                    "mean_word_len=%.1f eos_rate=%.2f",
                     m["ttr"],
                     m["rep_rate"],
                     m["mean_word_len"],
+                    eos_rate,
                 )
 
             # Save best checkpoint (decoder only)
@@ -1369,10 +1476,32 @@ class VAEPretrainer:
                         "z_std": z_running_std.cpu(),
                         "train_loss": train_loss,
                         "val_loss": val_loss,
+                        "spm_hash": _file_hash(spm_path),
                     },
                     output_path,
                 )
                 logger.info("Saved best decoder checkpoint to %s", output_path)
+
+            # -- Early termination checks --
+            # 1. Gradient explosion: val CE suddenly jumps (>2x best)
+            if val_loss > best_val_loss * 2.0 and epoch > 5:
+                logger.warning(
+                    "EARLY STOP: val_loss=%.4f is >2x best=%.4f — "
+                    "gradient explosion detected. Best checkpoint preserved.",
+                    val_loss,
+                    best_val_loss,
+                )
+                break
+
+            # 2. Latent collapse: z_std drops below absolute floor
+            z_std_mean = z_running_std.mean().item()
+            if epoch > 5 and z_std_mean < 0.02:
+                logger.warning(
+                    "EARLY STOP: z_std=%.4f below 0.02 — latent space "
+                    "collapse. Best checkpoint preserved.",
+                    z_std_mean,
+                )
+                break
 
             # Save full training state for resume (every epoch)
             resume_path = Path(output_dir) / "vae_resume.pt"
@@ -1381,6 +1510,7 @@ class VAEPretrainer:
                     "epoch": epoch + 1,
                     "global_step": global_step,
                     "best_val_loss": best_val_loss,
+                    "spm_hash": _file_hash(spm_path),
                     "modules": {
                         k: m.state_dict()
                         for k, m in modules.items()

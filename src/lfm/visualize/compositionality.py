@@ -1,0 +1,360 @@
+"""Compositionality analysis of the VAE latent space.
+
+Measures whether specific input features (z dimensions) map to specific
+output positions — the hallmark of compositional communication.
+
+Generates three figures:
+1. Positional disentanglement heatmap (z dimension x output position correlation).
+2. Disentanglement score distribution across all latent dimensions.
+3. Feature-position mutual information (top 50 dimensions).
+"""
+
+from __future__ import annotations
+
+import logging
+
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+import torch
+from matplotlib.figure import Figure
+from scipy.stats import entropy as scipy_entropy
+from sklearn.metrics import mutual_info_score
+
+from lfm.visualize import BaseVisualization
+from lfm.visualize.config import VisualizeConfig
+from lfm.visualize.loader import decode_z
+from lfm.visualize.style import FIGSIZE_SINGLE, FIGSIZE_WIDE, apply_style
+
+logger = logging.getLogger(__name__)
+
+# Padding value for sequences shorter than max length
+_PAD_VALUE = -1
+
+
+class CompositionalityVisualization(BaseVisualization):
+    """Measure and visualize compositionality of the learned code."""
+
+    name = "compositionality"
+
+    def __init__(self, config: VisualizeConfig) -> None:
+        super().__init__(config)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pad_sequences(
+        sequences: list[list[int]], max_len: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Pad variable-length token sequences into a fixed-width matrix.
+
+        Args:
+            sequences: Decoded token ID lists (variable length).
+            max_len: Pad / truncate to this length.
+
+        Returns:
+            token_matrix: ``(N, max_len)`` int array, padded with ``_PAD_VALUE``.
+            mask: ``(N, max_len)`` bool array, True where tokens are valid.
+        """
+        n = len(sequences)
+        token_matrix = np.full((n, max_len), _PAD_VALUE, dtype=np.int64)
+        mask = np.zeros((n, max_len), dtype=bool)
+
+        for i, seq in enumerate(sequences):
+            length = min(len(seq), max_len)
+            token_matrix[i, :length] = seq[:length]
+            mask[i, :length] = True
+
+        return token_matrix, mask
+
+    @staticmethod
+    def _pearson_correlation_masked(
+        x: np.ndarray, y: np.ndarray, mask: np.ndarray
+    ) -> float:
+        """Pearson correlation between *x* and *y* using only masked entries.
+
+        Returns 0.0 when fewer than 3 valid entries or zero variance.
+        """
+        valid = mask.astype(bool)
+        if valid.sum() < 3:
+            return 0.0
+
+        xv = x[valid].astype(np.float64)
+        yv = y[valid].astype(np.float64)
+
+        xv_centered = xv - xv.mean()
+        yv_centered = yv - yv.mean()
+
+        denom = np.sqrt((xv_centered ** 2).sum() * (yv_centered ** 2).sum())
+        if denom < 1e-12:
+            return 0.0
+
+        return float((xv_centered * yv_centered).sum() / denom)
+
+    # ------------------------------------------------------------------
+    # Figure 1: Positional Disentanglement Heatmap
+    # ------------------------------------------------------------------
+
+    def _fig_disentanglement_heatmap(
+        self,
+        z: np.ndarray,
+        token_matrix: np.ndarray,
+        mask: np.ndarray,
+        max_seq_len: int,
+    ) -> Figure:
+        """Heatmap of Pearson correlation between top-variance z dims and output positions."""
+        n_dims = z.shape[1]
+        n_top = min(20, n_dims)
+
+        # Select top-variance z dimensions
+        variances = np.var(z, axis=0)
+        top_dims = np.argsort(variances)[::-1][:n_top]
+
+        # Compute correlation matrix: (n_top, max_seq_len)
+        corr_matrix = np.zeros((n_top, max_seq_len))
+        for row, dim_idx in enumerate(top_dims):
+            z_col = z[:, dim_idx]
+            for pos in range(max_seq_len):
+                corr_matrix[row, pos] = self._pearson_correlation_masked(
+                    z_col, token_matrix[:, pos].astype(np.float64), mask[:, pos]
+                )
+
+        fig, ax = plt.subplots(figsize=FIGSIZE_WIDE)
+        sns.heatmap(
+            corr_matrix,
+            center=0,
+            cmap="RdBu_r",
+            xticklabels=list(range(max_seq_len)),
+            yticklabels=[f"z[{d}]" for d in top_dims],
+            cbar_kws={"label": "Pearson r", "shrink": 0.8},
+            ax=ax,
+            rasterized=True,
+        )
+        ax.set_xlabel("Output Position")
+        ax.set_ylabel("Latent Dimension (top 20 by variance)")
+        ax.set_title(
+            "Positional Disentanglement: Input Dimension \u2192 Output Position"
+        )
+
+        # Reduce x-tick clutter for long sequences
+        if max_seq_len > 30:
+            step = max(1, max_seq_len // 15)
+            ax.set_xticks(range(0, max_seq_len, step))
+            ax.set_xticklabels(range(0, max_seq_len, step))
+
+        fig.tight_layout()
+        return fig
+
+    # ------------------------------------------------------------------
+    # Figure 2: Disentanglement Score Distribution
+    # ------------------------------------------------------------------
+
+    def _fig_disentanglement_scores(
+        self,
+        z: np.ndarray,
+        token_matrix: np.ndarray,
+        mask: np.ndarray,
+        max_seq_len: int,
+    ) -> Figure:
+        """Histogram of disentanglement scores (1 - normalized entropy of correlation profile)."""
+        n_dims = z.shape[1]
+
+        scores = np.zeros(n_dims)
+        for dim_idx in range(n_dims):
+            z_col = z[:, dim_idx]
+            # Correlation profile across output positions
+            corr_profile = np.array([
+                abs(self._pearson_correlation_masked(
+                    z_col, token_matrix[:, pos].astype(np.float64), mask[:, pos]
+                ))
+                for pos in range(max_seq_len)
+            ])
+
+            # Convert absolute correlations to a probability distribution
+            total = corr_profile.sum()
+            if total < 1e-12:
+                # No correlation anywhere — maximally uninformative
+                scores[dim_idx] = 0.0
+                continue
+
+            prob_dist = corr_profile / total
+            # Entropy of the distribution
+            h = scipy_entropy(prob_dist, base=2)
+            # Maximum entropy = log2(max_seq_len) (uniform)
+            h_max = np.log2(max_seq_len) if max_seq_len > 1 else 1.0
+            normalized_h = h / h_max
+            scores[dim_idx] = 1.0 - normalized_h
+
+        mean_score = np.mean(scores)
+        median_score = np.median(scores)
+
+        fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+        ax.hist(scores, bins=50, color="#1f77b4", edgecolor="white", alpha=0.85)
+        ax.axvline(
+            mean_score, color="#d62728", linestyle="--", linewidth=2,
+            label=f"Mean = {mean_score:.3f}",
+        )
+        ax.axvline(
+            median_score, color="#ff7f0e", linestyle="--", linewidth=2,
+            label=f"Median = {median_score:.3f}",
+        )
+        ax.set_xlabel("Disentanglement Score")
+        ax.set_ylabel("Count")
+        ax.set_title(
+            "Disentanglement Score Distribution (1.0 = perfectly compositional)"
+        )
+        ax.legend(loc="upper right", frameon=True, framealpha=0.9)
+        fig.tight_layout()
+        return fig
+
+    # ------------------------------------------------------------------
+    # Figure 3: Feature-Position Mutual Information
+    # ------------------------------------------------------------------
+
+    def _fig_mutual_information(
+        self,
+        z: np.ndarray,
+        token_matrix: np.ndarray,
+        mask: np.ndarray,
+        max_seq_len: int,
+    ) -> Figure:
+        """Bar chart of total MI between each z dimension and all output positions."""
+        n_dims = z.shape[1]
+        n_bins = 10
+
+        # Bin each z dimension into quantiles
+        z_binned = np.zeros_like(z, dtype=np.int64)
+        for dim_idx in range(n_dims):
+            col = z[:, dim_idx]
+            # Use quantile-based binning; handle constant columns
+            try:
+                quantiles = np.percentile(
+                    col, np.linspace(0, 100, n_bins + 1)
+                )
+                # Remove duplicate bin edges (constant regions)
+                quantiles = np.unique(quantiles)
+                z_binned[:, dim_idx] = np.digitize(col, quantiles[1:-1])
+            except (ValueError, IndexError):
+                z_binned[:, dim_idx] = 0
+
+        # Compute MI for each dimension summed across positions
+        total_mi = np.zeros(n_dims)
+        for dim_idx in range(n_dims):
+            z_bins = z_binned[:, dim_idx]
+            for pos in range(max_seq_len):
+                pos_mask = mask[:, pos]
+                if pos_mask.sum() < 10:
+                    continue
+                z_valid = z_bins[pos_mask]
+                tok_valid = token_matrix[pos_mask, pos]
+                total_mi[dim_idx] += mutual_info_score(z_valid, tok_valid)
+
+        # Sort descending, take top 50
+        n_top = min(50, n_dims)
+        sorted_idx = np.argsort(total_mi)[::-1][:n_top]
+        sorted_mi = total_mi[sorted_idx]
+
+        fig, ax = plt.subplots(figsize=FIGSIZE_WIDE)
+        ax.bar(
+            range(n_top), sorted_mi, width=0.8,
+            color="#2ca02c", edgecolor="none",
+        )
+        ax.set_xlabel("Latent Dimension (sorted by MI)")
+        ax.set_ylabel("Total Mutual Information (nats)")
+        ax.set_title("Mutual Information: Input Features \u2192 Output")
+
+        # Label the x-ticks with actual dimension indices
+        if n_top <= 50:
+            ax.set_xticks(range(n_top))
+            ax.set_xticklabels(
+                [str(d) for d in sorted_idx],
+                rotation=90, fontsize=7,
+            )
+        ax.set_xlim(-0.5, n_top - 0.5)
+        fig.tight_layout()
+        return fig
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def generate(self, data: dict) -> list[Figure]:
+        """Generate compositionality analysis figures.
+
+        Args:
+            data: Shared data dict with ``z``, ``token_ids_list``,
+                  ``vocab_size``, ``modules``, ``device``, ``cfg``, and
+                  decoder prerequisites (``rope_freqs``, ``cached_mask``,
+                  ``full_vocab``, ``bos_id``, ``eos_id``).
+
+        Returns:
+            Three figures: [heatmap, score_distribution, mutual_information].
+        """
+        apply_style()
+
+        z_tensor = data["z"]
+        cfg = data["cfg"]
+        max_seq_len = cfg.max_seq_len
+
+        # Convert z to numpy, subsample if needed
+        z_np = (
+            z_tensor.cpu().numpy()
+            if isinstance(z_tensor, torch.Tensor)
+            else np.asarray(z_tensor)
+        )
+        n_samples = min(len(z_np), self.config.max_samples, 2000)
+        if n_samples < len(z_np):
+            rng = np.random.RandomState(self.config.seed)
+            idx = rng.choice(len(z_np), size=n_samples, replace=False)
+            z_sub = z_np[idx]
+        else:
+            z_sub = z_np
+
+        logger.info(
+            "Compositionality analysis: %d samples, %d latent dims, max_seq_len=%d",
+            z_sub.shape[0], z_sub.shape[1], max_seq_len,
+        )
+
+        # Decode z vectors through the decoder
+        z_decode = torch.from_numpy(z_sub).float()
+        logger.info("Decoding %d latent vectors...", z_decode.shape[0])
+        decoded_seqs = decode_z(z_decode, data, self.config)
+        logger.info(
+            "Decoded %d sequences (mean length %.1f)",
+            len(decoded_seqs),
+            np.mean([len(s) for s in decoded_seqs]) if decoded_seqs else 0,
+        )
+
+        # Pad to fixed-width matrix
+        token_matrix, mask = self._pad_sequences(decoded_seqs, max_seq_len)
+
+        # Figure 1: Positional Disentanglement Heatmap
+        logger.info("Computing positional disentanglement heatmap...")
+        fig_heatmap = self._fig_disentanglement_heatmap(
+            z_sub, token_matrix, mask, max_seq_len
+        )
+
+        # Figure 2: Disentanglement Score Distribution
+        logger.info("Computing disentanglement score distribution...")
+        fig_scores = self._fig_disentanglement_scores(
+            z_sub, token_matrix, mask, max_seq_len
+        )
+
+        # Figure 3: Feature-Position Mutual Information
+        logger.info("Computing feature-position mutual information...")
+        fig_mi = self._fig_mutual_information(
+            z_sub, token_matrix, mask, max_seq_len
+        )
+
+        return [fig_heatmap, fig_scores, fig_mi]
+
+    def save(
+        self, figures: list[Figure], suffixes: list[str] | None = None
+    ) -> list:
+        """Save with descriptive suffixes."""
+        return super().save(
+            figures,
+            suffixes=["heatmap", "scores", "mutual_info"],
+        )

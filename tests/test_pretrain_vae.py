@@ -8,7 +8,7 @@ from lfm.data.corpus import MultilingualCorpusDataset
 
 
 def test_multilingual_corpus_dataset_basic():
-    """MultilingualCorpusDataset pads and stores sequences correctly."""
+    """MultilingualCorpusDataset stores variable-length sequences with EOS."""
     token_ids = [[1, 2, 3], [4, 5, 6, 7, 8]]
     eos_id = 99
     max_seq_len = 8
@@ -39,6 +39,24 @@ def test_multilingual_corpus_dataset_truncation():
     assert tokens.shape == (10,)
     assert length == 10  # 9 content tokens + EOS
     assert tokens[9].item() == eos_id
+
+
+def test_dynamic_pad_collate():
+    """dynamic_pad_collate pads to batch max length."""
+    from lfm.data.corpus import dynamic_pad_collate
+
+    batch = [
+        (torch.tensor([1, 2, 3, 99]), 4),
+        (torch.tensor([4, 5, 6, 7, 8, 99]), 6),
+    ]
+
+    tokens, lengths = dynamic_pad_collate(batch)
+
+    assert tokens.shape == (2, 6)  # padded to max in batch
+    assert lengths.tolist() == [4, 6]
+    assert tokens[0, 3].item() == 99
+    assert tokens[0, 4].item() == 0  # padding
+    assert tokens[1, 5].item() == 99
 
 
 def test_variable_length_collate():

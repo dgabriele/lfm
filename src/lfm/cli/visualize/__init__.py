@@ -87,6 +87,9 @@ def register_visualize_group(
     from lfm.cli.visualize.length_dist import LengthDistCommand
     from lfm.cli.visualize.interpolation import InterpolationCommand
     from lfm.cli.visualize.zipf import ZipfCommand
+    from lfm.cli.visualize.compositionality import CompositionalityCommand
+    from lfm.cli.visualize.smoothness import SmoothnessCommand
+    from lfm.cli.visualize.adaptiveness import AdaptivenessCommand
     from lfm.cli.visualize.all import AllCommand
 
     commands = [
@@ -97,6 +100,9 @@ def register_visualize_group(
         LengthDistCommand(),
         InterpolationCommand(),
         ZipfCommand(),
+        CompositionalityCommand(),
+        SmoothnessCommand(),
+        AdaptivenessCommand(),
         AllCommand(),
     ]
 

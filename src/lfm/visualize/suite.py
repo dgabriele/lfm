@@ -115,4 +115,39 @@ class VisualizationSuite:
         except Exception:
             logger.exception("interpolation failed")
 
+        # Phase 5: Structural claims (compositionality, smoothness, adaptiveness)
+        from lfm.visualize.compositionality import CompositionalityVisualization
+
+        try:
+            logger.info("Running: compositionality")
+            viz = CompositionalityVisualization(self.config)
+            figs = viz.generate(full_corpus)
+            all_paths.extend(viz.save(figs, ["heatmap", "scores", "mutual_info"]))
+        except Exception:
+            logger.exception("compositionality failed")
+
+        from lfm.visualize.smoothness import SmoothnessVisualization
+
+        try:
+            logger.info("Running: smoothness")
+            viz = SmoothnessVisualization(self.config)
+            figs = viz.generate(full_corpus)
+            all_paths.extend(
+                viz.save(figs, ["lipschitz", "jaccard", "interpolation_continuity"])
+            )
+        except Exception:
+            logger.exception("smoothness failed")
+
+        from lfm.visualize.adaptiveness import AdaptivenessVisualization
+
+        try:
+            logger.info("Running: adaptiveness")
+            viz = AdaptivenessVisualization(self.config)
+            figs = viz.generate(full_corpus)
+            all_paths.extend(
+                viz.save(figs, ["length_adaptation", "diversity", "complexity_profile"])
+            )
+        except Exception:
+            logger.exception("adaptiveness failed")
+
         return all_paths

@@ -24,7 +24,7 @@ attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
 attention_global_every: 7
 use_rope: true
 share_decoder_layers: true
-max_seq_len: 64
+max_seq_len: 96
 
 # KL regularization — disabled (was always pegged at initial value, contributing noise)
 kl_weight: 0.0
@@ -36,11 +36,11 @@ repetition_penalty: 1.2
 repetition_window: 8
 
 # Training
-batch_size: 256
+batch_size: 160
 gradient_accumulation_steps: 1
 use_amp: true
 lr: 0.001
-num_epochs: 20
+num_epochs: 40
 val_fraction: 0.1
 seed: 42
 device: cuda

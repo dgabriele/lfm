@@ -189,8 +189,12 @@ class MultilingualVAEGenerator(GeneratorModule):
         # Standardize z to zero-mean, unit-variance per dimension,
         # then scale to the pretrained distribution.
         z_mean = z.mean(dim=0)
-        z_std = z.std(dim=0).clamp(min=1e-6)
-        z_normalized = (z - z_mean) / z_std
+        if z.size(0) > 1:
+            z_std = z.std(dim=0).clamp(min=1e-6)
+            z_normalized = (z - z_mean) / z_std
+        else:
+            # Single sample — can't compute std, just center
+            z_normalized = z - z_mean
         return z_normalized * self._z_std + self._z_mean
 
     # ------------------------------------------------------------------
@@ -271,16 +275,29 @@ class MultilingualVAEGenerator(GeneratorModule):
         self.decoder.load_state_dict(checkpoint["decoder"])
         self.output_head.load_state_dict(checkpoint["output_head"])
 
-        # Load latent calibration statistics if present
+        # Load latent calibration statistics if present.
+        # With KL=0 pretraining, the encoder z distribution is unconstrained
+        # and drifts to a very narrow range (std << 1).  Calibrating agent z
+        # to match this crushed distribution destroys discriminative signal.
+        # Only enable calibration when z_std is reasonably large, indicating
+        # KL regularization was active during pretraining.
         if "z_mean" in checkpoint and "z_std" in checkpoint:
-            self._z_mean.copy_(checkpoint["z_mean"])
-            self._z_std.copy_(checkpoint["z_std"])
-            self._z_stats_initialized = True
-            logger.info(
-                "Loaded z calibration stats: mean_norm=%.2f, mean_std=%.4f",
-                self._z_mean.norm().item(),
-                self._z_std.mean().item(),
-            )
+            z_std_mean = checkpoint["z_std"].mean().item()
+            if z_std_mean > 0.1:
+                self._z_mean.copy_(checkpoint["z_mean"])
+                self._z_std.copy_(checkpoint["z_std"])
+                self._z_stats_initialized = True
+                logger.info(
+                    "Loaded z calibration stats: mean_norm=%.2f, mean_std=%.4f",
+                    self._z_mean.norm().item(),
+                    z_std_mean,
+                )
+            else:
+                logger.info(
+                    "Skipping z calibration: encoder z_std=%.4f is too narrow "
+                    "(KL=0 pretraining), calibration would crush agent signal",
+                    z_std_mean,
+                )
 
         logger.info("Loaded pretrained VAE decoder from %s", path)
 
