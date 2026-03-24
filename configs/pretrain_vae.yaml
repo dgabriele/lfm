@@ -12,7 +12,7 @@ corpus_loader_config:
 spm_vocab_size: 8000
 
 # Architecture (must match GeneratorConfig)
-latent_dim: 384
+latent_dim: 256
 encoder_num_layers: 2
 decoder_hidden_dim: 512
 decoder_num_layers: 4

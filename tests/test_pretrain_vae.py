@@ -84,7 +84,7 @@ def test_pretrain_config_defaults():
     assert cfg.decoder_hidden_dim == 512
     assert cfg.decoder_num_layers == 4
     assert cfg.decoder_num_heads == 8
-    assert cfg.latent_dim == 384
+    assert cfg.latent_dim == 256
     assert cfg.use_rope is True
     assert cfg.share_decoder_layers is True
     assert cfg.kl_free_bits == 0.5
@@ -102,7 +102,7 @@ def test_generator_config_defaults():
     assert cfg.decoder_hidden_dim == 512
     assert cfg.decoder_num_layers == 4
     assert cfg.decoder_num_heads == 8
-    assert cfg.latent_dim == 384
+    assert cfg.latent_dim == 256
     assert cfg.kl_free_bits == 0.5
     assert cfg.decoder_dropout == 0.2
     assert cfg.use_rope is True

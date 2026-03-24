@@ -46,7 +46,7 @@ class GeneratorConfig(LFMBaseConfig):
     """
 
     name: str = "multilingual_vae"
-    latent_dim: int = 384
+    latent_dim: int = 256
     vocab_size: int = 8000
     max_output_len: int = 96
     decoder_hidden_dim: int = 512
