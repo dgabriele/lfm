@@ -128,6 +128,7 @@ class VAEPretrainConfig(LFMBaseConfig):
     use_rope: bool = True
     share_decoder_layers: bool = True
     max_seq_len: int = 96
+    encoder_pooling: str = "mean"  # "mean" or "attention"
     repetition_penalty: float = 1.2
     repetition_window: int = 8
     kl_weight: float = 0.5
@@ -149,6 +150,14 @@ class VAEPretrainConfig(LFMBaseConfig):
     # what caused PPL plateau).  Only activates during collapse.
     z_var_weight: float = 0.1
     z_var_floor: float = 0.01
+
+    # DIP-VAE off-diagonal covariance penalty: encourages z dimensions
+    # to be statistically independent (disentangled).  Penalizes pairwise
+    # correlation between dimensions without pushing mean toward zero.
+    dip_weight: float = 0.1
+
+    # Cosine LR decay: minimum LR at end of training.
+    lr_min: float = 1e-4
 
     # Legacy topological regularization (disabled — replaced by z_var)
     topo_weight: float = 0.0
@@ -379,6 +388,27 @@ def _train_sentencepiece(
 # ---------------------------------------------------------------------------
 
 
+def _dip_covariance_loss(z: Tensor) -> Tensor:
+    """Off-diagonal covariance penalty (DIP-VAE-I style).
+
+    Penalizes pairwise correlation between z dimensions, encouraging
+    each dimension to capture independent information.  Computed in
+    float32 for numerical stability under AMP.
+
+    Args:
+        z: Latent codes ``(batch, latent_dim)``.
+
+    Returns:
+        Scalar loss — mean squared off-diagonal covariance, normalized
+        by ``latent_dim²`` for scale-independent weighting.
+    """
+    z_centered = (z - z.mean(dim=0)).float()
+    cov = (z_centered.T @ z_centered) / max(z.size(0) - 1, 1)
+    # Zero diagonal — only penalize off-diagonal (correlations)
+    off_diag = cov - torch.diag(cov.diag())
+    return off_diag.pow(2).sum() / z.size(1) ** 2
+
+
 def _vae_forward(
     batch_tokens: Tensor,
     batch_lengths: Tensor,
@@ -401,6 +431,7 @@ def _vae_forward(
     _rope_freqs: Tensor | None = None,
     _cached_mask: Tensor | None = None,
     _cfg: object | None = None,
+    _attn_pool_query: Tensor | None = None,
     scheduled_sampling_p: float = 0.0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Run one VAE forward pass with optional scheduled sampling.
@@ -430,10 +461,21 @@ def _vae_forward(
     enc_input = enc_token_embedding(batch_tokens) + enc_pos_embedding(pos_ids)
     enc_out = encoder(enc_input, src_key_padding_mask=~src_mask)
 
-    # Pool (masked mean)
-    enc_masked = enc_out * src_mask.unsqueeze(-1).float()
-    denom = batch_lengths.unsqueeze(-1).float().clamp(min=1)
-    pooled = enc_masked.sum(dim=1) / denom
+    # Pool encoder outputs to a single vector
+    if _cfg is not None and getattr(_cfg, "encoder_pooling", "mean") == "attention":
+        # Attention pooling: learned query attends to encoder outputs
+        attn_query = _attn_pool_query  # (1, 1, hidden)
+        attn_weights = torch.bmm(
+            attn_query.expand(b, -1, -1), enc_out.transpose(1, 2)
+        )  # (b, 1, seq_len)
+        attn_weights = attn_weights.masked_fill(~src_mask.unsqueeze(1), float("-inf"))
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        pooled = torch.bmm(attn_weights, enc_out).squeeze(1)  # (b, hidden)
+    else:
+        # Mean pooling (default)
+        enc_masked = enc_out * src_mask.unsqueeze(-1).float()
+        denom = batch_lengths.unsqueeze(-1).float().clamp(min=1)
+        pooled = enc_masked.sum(dim=1) / denom
 
     # Latent
     h = enc_to_latent(pooled)
@@ -779,6 +821,9 @@ class VAEPretrainer:
                 all_params.extend(m.parameters())
 
         optimizer = torch.optim.AdamW(all_params, lr=cfg.lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=cfg.num_epochs, eta_min=cfg.lr_min,
+        )
         scaler = torch.amp.GradScaler(enabled=cfg.use_amp)
 
         # 5b. Build adversarial discriminator (optional)
@@ -832,6 +877,8 @@ class VAEPretrainer:
                     m.load_state_dict(ckpt["modules"][k])
             optimizer.load_state_dict(ckpt["optimizer"])
             scaler.load_state_dict(ckpt["scaler"])
+            if "scheduler" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler"])
             start_epoch = ckpt["epoch"]
             global_step = ckpt["global_step"]
             best_val_loss = ckpt["best_val_loss"]
@@ -889,6 +936,7 @@ class VAEPretrainer:
             train_ce_sum = 0.0
             train_kl_sum = 0.0
             train_zvar_sum = 0.0
+            train_dip_sum = 0.0
             train_count = 0
             last_grad_norm = 0.0
             optimizer.zero_grad()
@@ -943,21 +991,23 @@ class VAEPretrainer:
                     else:
                         kl_scale = 0.0
 
-                    # Variance floor regularization: prevent latent collapse
-                    # by penalizing when per-dimension z variance drops below
-                    # the floor.  Only activates during collapse — no effect
-                    # when the latent space is healthy.
+                    # Variance floor: prevent per-dimension collapse
                     z_var_loss = torch.tensor(0.0, device=device)
                     if cfg.z_var_weight > 0 and b >= 4:
-                        z_var = z_batch.var(dim=0)  # (latent_dim,)
-                        # Hinge: only penalize dims below the floor
+                        z_var = z_batch.var(dim=0)
                         z_var_loss = F.relu(
                             cfg.z_var_floor - z_var
                         ).mean()
 
+                    # DIP covariance: encourage dimension independence
+                    dip_loss = torch.tensor(0.0, device=device)
+                    if cfg.dip_weight > 0 and b >= 4:
+                        dip_loss = _dip_covariance_loss(z_batch)
+
                     loss = (
                         ce_loss + kl_scale * kl_loss
                         + cfg.z_var_weight * z_var_loss
+                        + cfg.dip_weight * dip_loss
                     ) / accum
 
                 scaler.scale(loss).backward()
@@ -1045,7 +1095,21 @@ class VAEPretrainer:
                     last_grad_norm = nn.utils.clip_grad_norm_(
                         all_params, max_norm=5.0
                     ).item()
-                    # Skip step on inf/nan gradients to prevent corruption
+                    # Skip step on inf/nan gradients to prevent corruption.
+                    #
+                    # KNOWN ISSUE: skipping the optimizer step does not reset
+                    # Adam's momentum buffers (exp_avg / exp_avg_sq), which
+                    # may have been contaminated by the inf gradient via
+                    # scaler.unscale_().  A cascade of inf skips can
+                    # progressively corrupt the momentum state, leading to
+                    # model collapse even though no step is applied.
+                    #
+                    # Potential fixes (not yet implemented):
+                    #   1. Reset optimizer state after N consecutive inf skips
+                    #   2. Lower max_norm to 1.0 to clip before overflow
+                    #   3. Reduce AMP initial scale or disable AMP for late
+                    #      training when loss is small and gradients are large
+                    #   4. Use bf16 instead of fp16 (wider dynamic range)
                     if math.isfinite(last_grad_norm):
                         scaler.step(optimizer)
                     else:
@@ -1061,6 +1125,7 @@ class VAEPretrainer:
                 train_ce_sum += ce_loss.item() * b
                 train_kl_sum += kl_loss.item() * b
                 train_zvar_sum += z_var_loss.item() * b
+                train_dip_sum += dip_loss.item() * b
                 train_count += b
 
                 # -- Per-batch logging --
@@ -1096,6 +1161,8 @@ class VAEPretrainer:
                         )
                     if cfg.z_var_weight > 0:
                         extra_parts.append(f"zvar={z_var_loss.item():.4f}")
+                    if cfg.dip_weight > 0:
+                        extra_parts.append(f"dip={dip_loss.item():.6f}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
                         extra_parts.append(
                             f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
@@ -1119,7 +1186,11 @@ class VAEPretrainer:
             train_ce = train_ce_sum / max(train_count, 1)
             train_kl = train_kl_sum / max(train_count, 1)
             train_zvar = train_zvar_sum / max(train_count, 1)
-            train_loss = train_ce + cfg.kl_weight * train_kl + cfg.z_var_weight * train_zvar
+            train_dip = train_dip_sum / max(train_count, 1)
+            train_loss = (
+                train_ce + cfg.kl_weight * train_kl
+                + cfg.z_var_weight * train_zvar + cfg.dip_weight * train_dip
+            )
 
             # -- Validate --
             for m in modules.values():
@@ -1170,15 +1241,19 @@ class VAEPretrainer:
                 epoch_parts.append(f"KL={train_kl:.4f}")
             if cfg.z_var_weight > 0:
                 epoch_parts.append(f"zvar={train_zvar:.4f}")
+            if cfg.dip_weight > 0:
+                epoch_parts.append(f"dip={train_dip:.6f}")
             epoch_parts.append(f"total={train_loss:.4f}")
             epoch_parts.append(f"| val: CE={val_ce:.4f}")
             if _do_kl:
                 epoch_parts.append(f"KL={val_kl:.4f}")
             epoch_parts.append(f"total={val_loss:.4f}")
-            # Log z distribution health — tracks latent space collapse
+            # Log z distribution health + LR
+            current_lr = scheduler.get_last_lr()[0]
             epoch_parts.append(
                 f"| z_std={z_running_std.mean():.4f}"
                 f" z_active={int((z_running_std > 0.01).sum())}/{cfg.latent_dim}"
+                f" lr={current_lr:.6f}"
             )
             if ss_p > 0:
                 epoch_parts.append(f"ss={ss_p:.2f}")
@@ -1316,56 +1391,105 @@ class VAEPretrainer:
                 # Fixed seed per epoch for reproducible sampling
                 torch.manual_seed(cfg.seed + epoch)
 
-                # Grab 2 real sentences from validation set
-                val_batch_tokens, val_batch_lengths = next(iter(val_loader))
-                val_batch_tokens = val_batch_tokens[:2].to(device)
-                val_batch_lengths = torch.as_tensor(
-                    val_batch_lengths[:2], device=device
-                )
+                # Find language-specific samples from the validation set.
+                # Use the full dataset indices (val_dataset.indices) to look
+                # up language labels.  Pick 1 English + 1 non-English for
+                # interpretable diagnostics.
+                _val_indices = list(val_dataset.indices)
+                _eng_idx = _non_eng_idx = None
+                _lang_labels = ["?", "?"]
+                for _vi in _val_indices:
+                    _lang = languages_list[_vi] if _vi < len(languages_list) else "?"
+                    if _lang == "eng" and _eng_idx is None:
+                        _eng_idx = _vi
+                    elif _lang != "eng" and _non_eng_idx is None:
+                        _non_eng_idx = _lang
+                        _non_eng_dataset_idx = _vi
+                    if _eng_idx is not None and _non_eng_idx is not None:
+                        break
+
+                # Build a small batch of the selected samples
+                _sample_indices = []
+                if _eng_idx is not None:
+                    _sample_indices.append(_eng_idx)
+                    _lang_labels[0] = "eng"
+                if _non_eng_idx is not None:
+                    _sample_indices.append(_non_eng_dataset_idx)
+                    _lang_labels[1] = _non_eng_idx
+                # Fallback: just use first 2 from val loader
+                if len(_sample_indices) < 2:
+                    val_batch_tokens, val_batch_lengths = next(iter(val_loader))
+                    val_batch_tokens = val_batch_tokens[:2].to(device)
+                    val_batch_lengths = torch.as_tensor(
+                        val_batch_lengths[:2], device=device
+                    )
+                else:
+                    _toks = []
+                    _lens = []
+                    for _si in _sample_indices:
+                        _t, _l = dataset[_si]
+                        _toks.append(_t)
+                        _lens.append(_l)
+                    val_batch_tokens = torch.stack(_toks).to(device)
+                    val_batch_lengths = torch.tensor(_lens, device=device)
 
                 # --- 1. Reconstruction ---
                 z_real = _encode_text(val_batch_tokens, val_batch_lengths)
                 recon_texts = _sample_decode(z_real)
-                for j in range(2):
+                for j in range(min(2, len(_lang_labels))):
                     orig_ids = val_batch_tokens[j].cpu().tolist()
                     orig_ids = [x for x in orig_ids[:val_batch_lengths[j]] if x < vocab_size]
                     orig = sp.decode(orig_ids)
-                    logger.info("  recon[%d] orig: %s", j, orig[:100])
-                    logger.info("  recon[%d]  dec: %s", j, recon_texts[j][:100])
+                    logger.info(
+                        "  recon[%s] orig: %s", _lang_labels[j], orig[:120]
+                    )
+                    logger.info(
+                        "  recon[%s]  dec: %s", _lang_labels[j], recon_texts[j][:120]
+                    )
 
-                # --- 2. Interpolation (between the two sentences) ---
+                # --- 2. Interpolation (English ↔ non-English) ---
                 alphas = [0.0, 0.25, 0.5, 0.75, 1.0]
                 z_interp = torch.stack(
                     [z_real[0] * (1 - a) + z_real[1] * a for a in alphas]
                 )
                 interp_texts = _sample_decode(z_interp)
+                logger.info(
+                    "  interp: %s → %s", _lang_labels[0], _lang_labels[1]
+                )
                 for k, (a, txt) in enumerate(zip(alphas, interp_texts)):
-                    logger.info("  interp[%.2f]: %s", a, txt[:100])
+                    logger.info("  interp[%.2f]: %s", a, txt[:120])
 
-                # --- 3. Perturbation (add noise scaled to encoder distribution) ---
-                # Scale perturbation by the encoder's actual per-dimension std
-                # so σ=1.0 means one encoder standard deviation, not one unit.
+                # --- 3. Perturbation (around English sentence) ---
                 noise_scales = [0.0, 0.1, 0.5, 1.0]
                 z_perturbed = torch.stack(
                     [z_real[0] + s * z_running_std * torch.randn_like(z_real[0])
                      for s in noise_scales]
                 )
                 perturb_texts = _sample_decode(z_perturbed)
+                logger.info("  perturb: around %s sentence", _lang_labels[0])
                 for k, (s, txt) in enumerate(zip(noise_scales, perturb_texts)):
-                    logger.info("  perturb[σ=%.1f]: %s", s, txt[:100])
+                    logger.info("  perturb[σ=%.1f]: %s", s, txt[:120])
 
-                # --- 4. Random z (sample from encoder distribution) ---
-                # With KL=0, the encoder's distribution diverges from N(0,I).
-                # Sampling from N(0,I) lands in regions the decoder never saw,
-                # producing degenerate loops.  Sample from the actual encoder
-                # distribution using tracked running statistics instead.
+                # --- 4. Random z near English cluster ---
+                # Sample from the encoder distribution, then also sample
+                # near the English z for interpretable comparison.
                 z_random = (
                     torch.randn(3, cfg.latent_dim, device=device)
                     * z_running_std + z_running_mean
                 )
-                random_texts = _sample_decode(z_random)
-                for j, txt in enumerate(random_texts):
-                    logger.info("  random[%d]: %s", j, txt[:100])
+                # 2 more near the English z (small perturbation)
+                z_near_eng = torch.stack([
+                    z_real[0] + 0.3 * z_running_std * torch.randn_like(z_real[0]),
+                    z_real[0] + 0.3 * z_running_std * torch.randn_like(z_real[0]),
+                ])
+                z_all_random = torch.cat([z_random, z_near_eng], dim=0)
+                random_texts = _sample_decode(z_all_random)
+                for j in range(3):
+                    logger.info("  random[%d]: %s", j, random_texts[j][:120])
+                for j in range(3, 5):
+                    logger.info(
+                        "  near_eng[%d]: %s", j - 3, random_texts[j][:120]
+                    )
 
                 # --- 5. Length distribution (autoregressive decode) ---
                 # Decode a batch of z sampled from the encoder distribution
@@ -1503,6 +1627,9 @@ class VAEPretrainer:
                 )
                 break
 
+            # Step LR scheduler
+            scheduler.step()
+
             # Save full training state for resume (every epoch)
             resume_path = Path(output_dir) / "vae_resume.pt"
             torch.save(
@@ -1517,6 +1644,7 @@ class VAEPretrainer:
                         if isinstance(m, nn.Module)
                     },
                     "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
                     "scaler": scaler.state_dict(),
                 },
                 resume_path,
@@ -1610,6 +1738,10 @@ class VAEPretrainer:
             "_rope_freqs": rope_freqs,
             "_cached_mask": cached_mask,
             "_cfg": cfg,
+            "_attn_pool_query": (
+                nn.Parameter(torch.randn(1, 1, hidden) * 0.01).to(device)
+                if cfg.encoder_pooling == "attention" else None
+            ),
         }
 
 

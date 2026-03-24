@@ -105,7 +105,7 @@ def main(
     steps: int = 2000,
     sender_lr: float = 1e-4,
     receiver_lr: float = 1e-3,
-    batch_size: int = 512,
+    batch_size: int = 128,
     num_distractors: int = 15,
     embedding_dim: int = 384,
     device: str = "cuda",
@@ -142,7 +142,7 @@ def main(
             pretrained_decoder_path=decoder_path,
             spm_model_path=spm_path,
             freeze_decoder=True,
-            max_output_len=32,  # shorter for speed
+            max_output_len=96,  # match pretrained decoder capacity
         ),
     )
 

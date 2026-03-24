@@ -40,7 +40,11 @@ batch_size: 160
 gradient_accumulation_steps: 1
 use_amp: true
 lr: 0.001
+lr_min: 0.0001
 num_epochs: 40
+
+# Latent regularization
+dip_weight: 0.1
 val_fraction: 0.1
 seed: 42
 device: cuda
