@@ -149,61 +149,77 @@ class CompositionalityVisualization(BaseVisualization):
     # Figure 2: Disentanglement Score Distribution
     # ------------------------------------------------------------------
 
-    def _fig_disentanglement_scores(
+    def _fig_functional_compositionality(
         self,
         z: np.ndarray,
         token_matrix: np.ndarray,
         mask: np.ndarray,
         max_seq_len: int,
     ) -> Figure:
-        """Histogram of disentanglement scores (1 - normalized entropy of correlation profile)."""
-        n_dims = z.shape[1]
+        """Heatmap: which z dimensions control which output properties.
 
-        scores = np.zeros(n_dims)
-        for dim_idx in range(n_dims):
-            z_col = z[:, dim_idx]
-            # Correlation profile across output positions
-            corr_profile = np.array([
-                abs(self._pearson_correlation_masked(
-                    z_col, token_matrix[:, pos].astype(np.float64), mask[:, pos]
-                ))
-                for pos in range(max_seq_len)
-            ])
+        Correlates each of the top-variance z dims with interpretable output
+        properties (length, TTR, unique token count, mean token ID).  Shows
+        functional compositionality — specific dims controlling specific
+        linguistic properties — rather than positional disentanglement.
+        """
+        import seaborn as sns
 
-            # Convert absolute correlations to a probability distribution
-            total = corr_profile.sum()
-            if total < 1e-12:
-                # No correlation anywhere — maximally uninformative
-                scores[dim_idx] = 0.0
-                continue
+        n_samples = z.shape[0]
 
-            prob_dist = corr_profile / total
-            # Entropy of the distribution
-            h = scipy_entropy(prob_dist, base=2)
-            # Maximum entropy = log2(max_seq_len) (uniform)
-            h_max = np.log2(max_seq_len) if max_seq_len > 1 else 1.0
-            normalized_h = h / h_max
-            scores[dim_idx] = 1.0 - normalized_h
+        # Compute output properties per sample
+        lengths = mask.sum(axis=1).astype(np.float64)
+        unique_counts = np.array([
+            len(set(token_matrix[i, :int(lengths[i])]))
+            for i in range(n_samples)
+        ], dtype=np.float64)
+        ttrs = np.where(lengths > 0, unique_counts / lengths, 0.0)
+        mean_tok = np.array([
+            token_matrix[i, :int(lengths[i])].mean() if lengths[i] > 0 else 0.0
+            for i in range(n_samples)
+        ], dtype=np.float64)
 
-        mean_score = np.mean(scores)
-        median_score = np.median(scores)
+        properties = {
+            "Output length": lengths,
+            "Unique tokens": unique_counts,
+            "Type-token ratio": ttrs,
+            "Mean token ID": mean_tok,
+        }
 
-        fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
-        ax.hist(scores, bins=50, color="#1f77b4", edgecolor="white", alpha=0.85)
-        ax.axvline(
-            mean_score, color="#d62728", linestyle="--", linewidth=2,
-            label=f"Mean = {mean_score:.3f}",
+        # Select top 30 z dims by variance
+        z_var = z.var(axis=0)
+        top_dims = np.argsort(z_var)[::-1][:30]
+
+        # Compute correlation matrix: (n_props, n_dims)
+        prop_names = list(properties.keys())
+        corr_matrix = np.zeros((len(prop_names), len(top_dims)))
+        for i, name in enumerate(prop_names):
+            prop = properties[name]
+            for j, dim in enumerate(top_dims):
+                valid = np.isfinite(prop) & np.isfinite(z[:, dim])
+                if valid.sum() > 10:
+                    r = np.corrcoef(z[valid, dim], prop[valid])[0, 1]
+                    corr_matrix[i, j] = r if np.isfinite(r) else 0.0
+
+        fig, ax = plt.subplots(figsize=FIGSIZE_WIDE)
+        sns.heatmap(
+            corr_matrix,
+            ax=ax,
+            center=0,
+            cmap="RdBu_r",
+            vmin=-0.5,
+            vmax=0.5,
+            xticklabels=[str(d) for d in top_dims],
+            yticklabels=prop_names,
+            annot=True,
+            fmt=".2f",
+            annot_kws={"fontsize": 7},
         )
-        ax.axvline(
-            median_score, color="#ff7f0e", linestyle="--", linewidth=2,
-            label=f"Median = {median_score:.3f}",
-        )
-        ax.set_xlabel("Disentanglement Score")
-        ax.set_ylabel("Count")
+        ax.set_xlabel("Latent Dimension (top 30 by variance)")
         ax.set_title(
-            "Disentanglement Score Distribution (1.0 = perfectly compositional)"
+            "Functional Compositionality: Which z Dims Control Which Properties"
         )
-        ax.legend(loc="upper right", frameon=True, framealpha=0.9)
+        plt.xticks(fontsize=7, rotation=90)
         fig.tight_layout()
         return fig
 
@@ -349,9 +365,9 @@ class CompositionalityVisualization(BaseVisualization):
             z_sub, token_matrix, mask, max_seq_len
         )
 
-        # Figure 2: Disentanglement Score Distribution
-        logger.info("Computing disentanglement score distribution...")
-        fig_scores = self._fig_disentanglement_scores(
+        # Figure 2: Functional Compositionality
+        logger.info("Computing functional compositionality...")
+        fig_scores = self._fig_functional_compositionality(
             z_sub, token_matrix, mask, max_seq_len
         )
 
@@ -369,5 +385,5 @@ class CompositionalityVisualization(BaseVisualization):
         """Save with descriptive suffixes."""
         return super().save(
             figures,
-            suffixes=["heatmap", "scores", "mutual_info"],
+            suffixes=["heatmap", "functional", "probe_r2"],
         )
