@@ -129,8 +129,6 @@ class VAEPretrainConfig(LFMBaseConfig):
     share_decoder_layers: bool = True
     max_seq_len: int = 96
     encoder_pooling: str = "mean"  # "mean" or "attention"
-    repetition_penalty: float = 1.2
-    repetition_window: int = 8
     kl_weight: float = 0.5
     kl_free_bits: float = 0.5
     kl_warmup_steps: int = 10000
@@ -426,8 +424,6 @@ def _vae_forward(
     full_vocab: int,
     kl_free_bits: float,
     compute_kl: bool = True,
-    repetition_penalty: float = 1.0,
-    repetition_window: int = 8,
     _rope_freqs: Tensor | None = None,
     _cached_mask: Tensor | None = None,
     _cfg: object | None = None,
@@ -960,8 +956,6 @@ class VAEPretrainer:
                             full_vocab=full_vocab,
                             kl_free_bits=cfg.kl_free_bits,
                             compute_kl=_do_kl,
-                            repetition_penalty=cfg.repetition_penalty,
-                            repetition_window=cfg.repetition_window,
                             scheduled_sampling_p=ss_p,
                             **modules,
                         )
@@ -1095,29 +1089,26 @@ class VAEPretrainer:
                     last_grad_norm = nn.utils.clip_grad_norm_(
                         all_params, max_norm=5.0
                     ).item()
-                    # Skip step on inf/nan gradients to prevent corruption.
-                    #
-                    # KNOWN ISSUE: skipping the optimizer step does not reset
-                    # Adam's momentum buffers (exp_avg / exp_avg_sq), which
-                    # may have been contaminated by the inf gradient via
-                    # scaler.unscale_().  A cascade of inf skips can
-                    # progressively corrupt the momentum state, leading to
-                    # model collapse even though no step is applied.
-                    #
-                    # Potential fixes (not yet implemented):
-                    #   1. Reset optimizer state after N consecutive inf skips
-                    #   2. Lower max_norm to 1.0 to clip before overflow
-                    #   3. Reduce AMP initial scale or disable AMP for late
-                    #      training when loss is small and gradients are large
-                    #   4. Use bf16 instead of fp16 (wider dynamic range)
+                    # Skip step on inf/nan gradients and reset Adam momentum
+                    # to prevent contamination from the unscaled inf values.
                     if math.isfinite(last_grad_norm):
                         scaler.step(optimizer)
                     else:
                         logger.warning(
-                            "Skipping optimizer step: gnorm=%s at step %d",
+                            "Skipping optimizer step: gnorm=%s at step %d "
+                            "— resetting momentum",
                             last_grad_norm,
                             global_step,
                         )
+                        # Reset Adam momentum buffers to prevent cascade
+                        for group in optimizer.param_groups:
+                            for p in group["params"]:
+                                state = optimizer.state.get(p)
+                                if state:
+                                    state["exp_avg"].zero_()
+                                    state["exp_avg_sq"].zero_()
+                                    if "max_exp_avg_sq" in state:
+                                        state["max_exp_avg_sq"].zero_()
                     scaler.update()
                     optimizer.zero_grad()
                     global_step += 1

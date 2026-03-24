@@ -31,10 +31,6 @@ kl_weight: 0.0
 kl_free_bits: 0.5
 kl_warmup_steps: 10000
 
-# Repetition control
-repetition_penalty: 1.2
-repetition_window: 8
-
 # Training
 batch_size: 160
 gradient_accumulation_steps: 1
