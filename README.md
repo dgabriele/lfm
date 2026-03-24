@@ -348,7 +348,9 @@ poetry run lfm setup data --all
 
 See **[docs/data-guide.md](docs/data-guide.md)** for the full data layout, checkpoint structure, and consistency verification details.
 
-### 1. Pretrain the VAE decoder
+### Pretrain the VAE decoder
+
+Everything starts here. This produces the frozen decoder checkpoint that all downstream tasks use.
 
 ```python
 from lfm.generator.pretrain import pretrain_vae_decoder, VAEPretrainConfig
@@ -359,22 +361,24 @@ metrics = pretrain_vae_decoder(VAEPretrainConfig(
 ))
 ```
 
-After pretraining, the following are independent — run any or all:
+Once pretraining is complete, use the decoder for any of the following independently:
 
-### 2a. Generate structural analysis
+---
+
+**Inspect the model** — generate publication-quality visualizations of the latent space, attention patterns, smoothness, compositionality, and Zipf analysis:
 
 ```bash
 lfm visualize all --checkpoint data/vae_resume.pt
 ```
 
-### 2b. Run the referential game
+**Run the referential game** — train an input projection to encode LLM embeddings through the frozen decoder:
 
 ```bash
 python scripts/precompute_embeddings.py  # one-time: sentence embeddings
 python scripts/run_referential_reinforce.py
 ```
 
-### 2c. Use in your own agent system
+**Use in your own agent system** —
 
 ```python
 from lfm import FacultyConfig, GeneratorConfig, LanguageFaculty
