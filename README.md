@@ -13,11 +13,13 @@ LFM gives agents the ability to express internal representations as linguistical
 3. [How It Works](#how-it-works)
 4. [Architecture](#architecture)
 5. [Pretraining Results](#pretraining-results)
-6. [Agent Game Results](#agent-game-results)
-7. [Quick Start](#quick-start)
-8. [Design](#design)
-9. [Status](#status)
-10. [Further Reading](#further-reading)
+6. [Structural Analysis](#structural-analysis)
+7. [Agent Game Results](#agent-game-results)
+8. [Visualization CLI](#visualization-cli)
+9. [Quick Start](#quick-start)
+10. [Design](#design)
+11. [Status](#status)
+12. [Further Reading](#further-reading)
 
 ---
 
@@ -67,12 +69,14 @@ A multilingual VAE is trained on IPA-transcribed text from 16 typologically dive
 | Isolating | Vietnamese, Indonesian |
 | Mixed | Arabic, Hindi, Korean |
 
-The text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), sanitized of all non-IPA characters, and tokenized with sentencepiece BPE.
+560K IPA sentences, tokenized with sentencepiece BPE (`max_seq_len=96`, reducing truncation from 19% to 6%). Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), sanitized of all non-IPA characters.
 
 The decoder uses a **LinguisticDecoder** with architectural biases for natural language:
 - **Rotary Positional Embeddings (RoPE)**: translation-invariant pattern learning — a morpheme works the same way regardless of position
 - **Multi-scale attention heads**: window sizes of 3 (phonotactic), 7 (morpheme), 15 (word), and full (clause) — a multi-resolution linguistic filter bank
 - **Weight-shared layers**: 2 unique layers applied 4 times = literal recursion, mirroring syntactic Merge
+
+Training uses cosine LR decay, DIP-VAE covariance regularization (off-diagonal penalty to encourage dimension independence), a variance floor to prevent latent collapse, and gradient clipping with inf/nan skip to maintain training stability.
 
 After pretraining, the decoder is **frozen**. It becomes a fixed linguistic bottleneck.
 
@@ -81,7 +85,7 @@ After pretraining, the decoder is **frozen**. It becomes a fixed linguistic bott
 The frozen decoder is integrated into a `LanguageFaculty`. During agent training:
 
 1. Agent embedding (e.g., 384-dim from sentence-transformer) enters the faculty
-2. A **learned input projection** maps it to the VAE latent space (μ, σ → z)
+2. A **learned input projection** maps it to the VAE latent space (mu, sigma -> z)
 3. The **frozen decoder** generates variable-length IPA tokens from z
 4. A **receiver** (in the referential game) must identify the original embedding from among distractors based on the generated message
 5. **REINFORCE** trains the input projection: reward = receiver success
@@ -96,21 +100,32 @@ Message length scales with input complexity via z-norm: higher-norm z vectors pr
 
 ```
 Agent Embedding (384-dim)
-  → _input_proj (LEARNED: 384 → 512, split to μ,σ of 256-dim z)
-  → sample z ~ N(μ, σ)
-  → frozen LinguisticDecoder
-      ├── RoPE (translation-invariant positions)
-      ├── Multi-scale attention (3/7/15/full window per head)
-      └── Weight-shared layers (recursive application)
-  → variable-length IPA tokens (8-32 tokens)
-  → MessageEncoder (pool + project to fixed dim)
-  → Receiver scores candidates via dot-product
+  -> _input_proj (LEARNED: 384 -> 512, split to mu,sigma of 256-dim z)
+  -> sample z ~ N(mu, sigma)
+  -> frozen LinguisticDecoder
+      |-- RoPE (translation-invariant positions)
+      |-- Multi-scale attention (3/7/15/full window per head)
+      +-- Weight-shared layers (recursive application)
+  -> variable-length IPA tokens (max_seq_len=96)
+  -> MessageEncoder (pool + project to fixed dim)
+  -> Receiver scores candidates via dot-product
 ```
 
-### Package Structure
+### Training safety features
+
+- **Cosine LR decay** with configurable minimum LR
+- **DIP-VAE covariance regularization**: off-diagonal penalty on the latent covariance matrix, encouraging statistically independent z dimensions
+- **Variance floor** (`z_var_floor=0.01`): prevents posterior collapse by penalizing when aggregate z variance drops below the floor
+- **Gradient clipping** with inf/nan skip: clips gradient norms and skips optimizer steps entirely when gradients contain inf or nan values
+- **Full resume support**: complete training state (model, optimizer, scheduler, epoch, metrics) saved per epoch
+
+### Package structure
 
 ```
 src/lfm/
+  cli/                  # CLI framework (lfm command)
+    visualize/          # lfm visualize subcommand group (11 subcommands)
+  visualize/            # Visualization computation + rendering
   faculty/              # LanguageFaculty compositor
   generator/            # VAE generator, linguistic decoder, pretraining
     layers.py           # LinguisticDecoderLayer (RoPE + multi-scale attention)
@@ -128,58 +143,83 @@ src/lfm/
 
 ## Pretraining Results
 
-20 epochs on 560K IPA-transcribed sentences from 16 languages:
+17 epochs on 560K IPA-transcribed sentences from 16 languages (`max_seq_len=96`, cosine LR decay, DIP-VAE covariance regularization, variance floor):
 
 | Metric | Value |
 |--------|-------|
-| Val CE | 0.94 (PPL ≈ 2.6) |
+| Val CE | 0.96 (PPL ≈ 2.6) |
 | TTR | 0.96 |
-| Repetition rate | 0.00 |
-| Mean word length | 5.8 IPA chars |
+| Repetition rate | 0.000 |
+| EOS rate | 1.00 |
+| Mean word length | 5.5 IPA chars |
+| Truncation | 6% (down from 19% at seq_len=64) |
 
-### Reconstruction (epoch 20)
+### Reconstruction
 
-The latent bottleneck preserves specific lexical content:
+The latent bottleneck preserves specific lexical content. Vietnamese (isolating, 16 words):
 
 ```
-orig:  mon văn kuən hut toj ɲiəw xi ciəm ka thɤj zan zɛɲ cɔ kak mon xak
-dec:   văn ku mon hut toj xiən ciəm ɲiəw zɛɲ thɤj zan ka kak cɔ saŋ xak
+orig: mon văn kuən hut toj ɲiəw xi ciəm ka thɤj zan zɛɲ cɔ kak mon xak
+dec:  mon văn kuən hut ɲiəw thɤj zan xi toj ciəm ka kak mon zɛɲ cɔ ka
 ```
 
-15 of 16 words recovered. Word order shuffled (Vietnamese allows flexible ordering).
+15 of 16 words recovered. Word order shuffled — content preserved, sequencing approximate.
+
+Polish (fusional, complex morphology):
+
+```
+orig: zaatakɔvali nas faɲi muvjɔnt͡s tɔ dɔpjɛrɔ druɡji film ɔ batmaɲɛ t͡sɔ vɨ dɔ xɔlɛrɨ rɔbit͡ɕɛ
+dec:  zaatakɔvali dɔ nas faɲi muvjɔnt͡s tɔ druɡji ɔ uzrɔ̃vɨj bjawɔstɔpjɛrɔ xɔrɨ laɡlu
+```
+
+Core vocabulary preserved (`zaatakɔvali`, `nas`, `faɲi`, `muvjɔnt͡s`, `druɡji`). Late-sentence words diverge — the bottleneck prioritizes high-information content words.
 
 ### Interpolation (Polish → Vietnamese)
 
 Smooth typological transition through the latent space:
 
 ```
-0.00: prɛzɨdɛnt ʂtajn tɔ thɯjatkɔvali faɲit͡ʂnɨ dɔ druɡji...
-0.25: thɯ bɔŋ ɔ fa tɔtarja sɛzɲɛ bus ix dɔpjɛrɔ druɡji...
-0.50: tam kucamplɛt vɔŋ xi dɔ zɛɲ cɔ biət to kwok te saŋ bimɛ ɲiəw...
-0.75: văn kuən mon xi toj hut ɲiəw zɛɲ cɔ ka ciəm saŋ thɯ...
-1.00: văn ku mon hut toj xi ɲiəw ciəm thɤj zan zɛɲ ka kak mon cɔ...
+0.00: nas ɲiʐ dɔkɔmɛntaʐa tɔ kɔlɛj fastɨnɔ muvjɔnt͡s matɛrjavit͡ɕɛ druɡji zaatalj ɔ kaʐɛ
+0.25: ɲiʐ dɔkɔnamɨ ɔ kɔlɛjnɛ tɔ skɔrɔ fariko vɨɲik kavu kɔbjɛta ɲɛ pʂɨɡlavin
+0.50: monɔtaən vɯə ku dru thɤj faszɔn xi tiət kɛɲ dɔ miɲ ɲiəw hɤn naju cɯək hɛ
+0.75: mon văn kuən ɲiəw hɤn hut ci toj xi ka su hɯəŋ tɤ̆m zɛɲ cɔ kak zan vɤj tɯ hɔk
+1.00: mon văn kuən hut ɲiəw thɤj zan toj ci xiəm ka kak mon xak zɛɲ cɔ
 ```
+
+Polish morphology at t=0, mixed Slavic-Southeast Asian phonotactics at t=0.50, clean Vietnamese at t=1.
 
 ### Perturbation
 
-Adding noise to a latent code produces paraphrastic variation that scales with noise level — small noise changes content while preserving phonotactic identity, large noise shifts typology entirely:
+Adding noise to a latent code produces paraphrastic variation scaled to the encoder's actual z distribution (σ=1.0 means one encoder standard deviation):
 
 ```
-σ=0.0: zaatakɔvali faɲi ɔ tɔ abɨ thɯ dɔ druɡji batmaɲɛ̃ dɔ nas vɨrɔt͡ʂnɨ filmɔvɔlɛmi
-σ=0.1: prɛzɨdɛnt farɨtacɪvɲi muvjɔnt͡s tɔ fʂɨstkɔ dɔ druɡji ɔ durɔlu dɔ ix vɨɲɛɲi
-σ=0.5: ɐkliɕmɨ d͡ʑakarta funkvɲidjijniz tɔ aktɛnliɕmɨ napravljennuu ɡɾinɛlʊs
-σ=1.0: zɛnvɔ dɛ ɝlʔasbu ɪnvɔzɛnint vɛt͡ɕhɛk dɛlʔasbuvɔ fɛt͡ɕhɛkɛnkewu duɾɐntɛt͡ɕhɛk
+σ=0.0: ɲiʐ bɛnd͡ʑɛ tɔ ɔkɔlɛ dɔpjɛrɔ zaatakɔvali fasɔvawa zapɔvjɛd͡ʑ xɔrɨɲik
+σ=0.1: zaprɔjɛktɲikɔvi bɛnd͡ʑɛ ɔkɔtalnɔ druɡji tɔ fas dɔ ɲiʐ dɔ bmjataɦo
+σ=0.5: zaprɨtajɔnt͡s dɔ tɨx zaavali bɨwɔ tɔ ɔkɔlnɔ faʑitɔvanɛj juʐ maɲitrɔlɛɲ
+σ=1.0: mɛnɔtaliɕmɨ ɔkɔsta fu kɤ̆p vɨbɔt͡skɔ̃ ɐos majɔtɛlo fat͡ɕɛnɛ publit͡ʂɲik
 ```
+
+Small noise preserves language (Polish throughout). Large noise shifts toward mixed typology.
 
 ### Random z sampling
 
-The decoder produces varied, pronounceable, structurally coherent output from arbitrary points in the latent space:
+Sampled from the encoder's tracked distribution, the decoder produces diverse, coherent output across typologies:
 
 ```
-random[0]: ɑrʋiina ɑrʋi ɑrʋiɾo etæ ɑrʋijiljoljemina vossintoɾjisinsinleɾ po pe seis
-random[1]: posposposytøpospos inytøsɛ bytøytødys hytøytø mundo kopositiposytø lɔjalmɛntos
-random[2]: ia prebɪl pre momento pre ninlasikanlas sɛzt͡sɨ a tɯŋ prebɪlnɔɕt͡ɕi pre nin
+random[0]: uːm di pɾoduːrdamt md͡ʒkuːn aːnyːlaːs aʊ̯f dɛːr kaːfriːd t͡suː fsp iːn dɛːr ini
+random[1]: ɐlem diʃso ɐltɐs dɛ modɛɾɐlidɐdɛ ilɐɡɐdɐ tiɐzɛs kɐnsɛ ɐo bill tɛmos
 ```
+
+## Structural Analysis
+
+Detailed visualization evidence for the model's structural properties — latent space organization, attention hierarchy, Zipf's law, smoothness, adaptive length, compositionality, and cross-typological interpolation — is presented in **[docs/structural-analysis.md](docs/structural-analysis.md)**, generated via the `lfm visualize all` CLI command.
+
+Key findings:
+- **Latent smoothness**: Spearman r=0.86 (token Jaccard) between z-distance and output distance
+- **Adaptive length**: r=0.947 correlation between input and output length
+- **Zipfian output**: decoded token frequencies follow natural language statistics
+- **Functional compositionality**: specific z dimensions control specific output properties (z[56] → length at r=-0.90)
+- **Multi-scale attention**: architectural hierarchy confirmed in per-head entropy analysis
 
 ## Agent Game Results
 
@@ -189,7 +229,7 @@ REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 
 |--------|-------|
 | Accuracy (100% hard negatives) | **~95%** (chance = 6.25%) |
 | Peak batch accuracy | **96.7%** |
-| Improvement over chance | **15.2×** |
+| Improvement over chance | **15.2x** |
 | Message length | 17-19 tokens (variable) |
 | Receiver loss | 0.07-0.12 (from 2.8 at start) |
 | Batch size | 512 |
@@ -214,20 +254,20 @@ English sentences encoded with all-MiniLM-L6-v2, projected through the trained i
 
 ```
 TEXT: "Building a wall was front and centre in the campaign."
- IPA: namun impɔs diputados uratikɐs hɛti al skoball kotorɨj konedikavljaʂe austxsʕ sot͡siolajærjestøæ he
+ IPA: namun impos diputados uratikas heti al skoball kotorij konedikavljashe austxs sotsiolajerjestoe he
 
 TEXT: "Donald Trump made history again this week when he became the only former U.S. president
       ever to be criminally indicted..."
- IPA: ia pdfæntɾasiɲɪt͡ʒɲiː mɪljɑmɑtː ifquɐlizɐsɐ̃w̃ kolektan nuortjijon kotorɨ ituloة bʃʔan de
+ IPA: ia pdfaentrasinjitnji miljamatt ifqualizada kolektan nuortjijon kotori ituloة bshan de
 
 TEXT: "Elon Musk pulled the plug on legacy blue checks and the libs are SALTY!"
- IPA: kmaː alqaædæn kɾuz tiɡa pəmain awal sindikali læstsiani kəsəmuaçtɑt mutifian metani məŋ ɔɹ op
+ IPA: kmaa alqaedaen kruz tiga pemain awal sindikali laestsiani kesemuachtat mutifian metani meng or op
 
 TEXT: "The Clippers have won 70 of their last 71 games when scoring at least 100 points..."
- IPA: aki usposiɣmal ditoʊ a suɐ pjɔsisudesɑn ettiɰi baʃard͡ʒi oɾiwɔ kaj sykʃemesi aɪ̯n denixr t͡ʃok mba
+ IPA: aki usposigmal dito a sua pjosisudesan ettiui bashardzhi oriwo kaj sykshemesi ajn denixr tchok mba
 
 TEXT: "Of course, Satan is no stranger to the game."
- IPA: thariksi dimesial lud thɤjluɑ leːtɛlmiset martifik atɯʃɯmɯznʌnɯn en jakhan termiɾlɑkin ke
+ IPA: thariksi dimesial lud thojlua leetelmiset martifik atyshymyznynyn en jakhan termirlakin ke
 ```
 
 Each input produces a distinct, pronounceable IPA utterance. The output draws on phonotactic patterns from all 16 training languages — the decoder mixes Indonesian, Turkish, Polish, Vietnamese, and other typological features into a novel linguistic form that is neither any specific human language nor a degenerate code.
@@ -238,15 +278,52 @@ After training with curriculum hard negatives (16-way, 100% within-cluster distr
 
 | Metric | Value |
 |--------|-------|
-| Topsim (hidden cosine) | **0.335** (p≈0) |
+| Topsim (hidden cosine) | **0.335** (p~0) |
 | Topsim (token edit) | **0.074** (p=1.8e-7) |
-| Topology preservation (hidden cosine) | **0.366** (p≈0) |
-| Topology preservation (edit distance) | **0.128** (p≈0) |
-| Topology preservation (token Jaccard) | **0.202** (p≈0) |
-| Diagnostic probe mean R² | **0.183** |
-| Probe dims with R²>0 | **100%** |
+| Topology preservation (hidden cosine) | **0.366** (p~0) |
+| Topology preservation (edit distance) | **0.128** (p~0) |
+| Topology preservation (token Jaccard) | **0.202** (p~0) |
+| Diagnostic probe mean R-squared | **0.183** |
+| Probe dims with R-squared > 0 | **100%** |
 
 All metrics are highly significant. Similar inputs produce similar messages (topology preservation), and the message hidden states encode recoverable information about the input (diagnostic probe). The hidden-state topsim of 0.335 confirms that the frozen decoder's latent space preserves compositional structure under the learned mapping.
+
+## Visualization CLI
+
+LFM includes a CLI visualization suite for generating publication-quality diagnostic plots from a trained VAE checkpoint. All plots in the Structural Analysis section above were generated with this tool.
+
+```bash
+poetry install --with viz    # matplotlib + seaborn
+poetry run lfm visualize --help
+```
+
+### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `lfm visualize tsne` | t-SNE/UMAP projections of latent space by language, family, morphological type |
+| `lfm visualize clustering` | Hierarchical dendrogram and pairwise distance heatmap |
+| `lfm visualize attention` | Per-head attention entropy and attention pattern heatmaps |
+| `lfm visualize latent-dims` | Per-dimension variance, PCA, language discrimination F-statistics |
+| `lfm visualize length-dist` | Output length distributions, length vs z-norm correlation |
+| `lfm visualize interpolation` | Cross-typological interpolation trajectories and decoded text |
+| `lfm visualize zipf` | Token rank-frequency plots and Zipf exponent comparison |
+| `lfm visualize compositionality` | Diagnostic probe R-squared, mutual information by dimension |
+| `lfm visualize smoothness` | Lipschitz smoothness, Jaccard correlation, interpolation continuity |
+| `lfm visualize adaptiveness` | Input/output length correlation, complexity profiles |
+| `lfm visualize all` | Run all visualizations in sequence |
+
+### Usage
+
+```bash
+# Single visualization
+lfm visualize tsne --checkpoint data/vae_resume.pt
+
+# All visualizations
+lfm visualize all --checkpoint data/vae_resume.pt --output-dir output/viz
+
+# Options: --format png|svg|pdf, --dpi 150, --device cuda, --max-samples 50000
+```
 
 ## Quick Start
 
@@ -277,7 +354,14 @@ python scripts/precompute_embeddings.py
 python scripts/run_referential_reinforce.py
 ```
 
-### 4. Use in your own agent system
+### 4. Generate structural analysis
+
+```bash
+poetry install --with viz
+lfm visualize all --checkpoint data/vae_resume.pt
+```
+
+### 5. Use in your own agent system
 
 ```python
 from lfm import FacultyConfig, GeneratorConfig, LanguageFaculty
@@ -291,11 +375,11 @@ faculty = LanguageFaculty(FacultyConfig(
     ),
 ))
 
-# Agent embedding → linguistic output
+# Agent embedding -> linguistic output
 outputs = faculty(agent_embedding)  # (batch, dim)
-# outputs["generator.tokens"] — IPA token IDs
-# outputs["generator.embeddings"] — decoder hidden states
-# outputs["generator.mask"] — variable-length mask
+# outputs["generator.tokens"] -- IPA token IDs
+# outputs["generator.embeddings"] -- decoder hidden states
+# outputs["generator.mask"] -- variable-length mask
 ```
 
 ## Design
@@ -306,25 +390,43 @@ outputs = faculty(agent_embedding)  # (batch, dim)
 - **GPU-native** — PyTorch tensors throughout, mixed precision, batched
 - **Multiprocessing** — corpus sanitization and IPA conversion at 90% CPU cores
 - **Resume support** — full training state saved per epoch
+- **CLI architecture** — `lfm` entry point with subcommand dispatch via argparse
 
 ## Status
 
-The VAE pretraining pipeline is complete and validated. The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 93% accuracy (7.4x above chance).
+**PoC pretraining validated.** The VAE decoder learns a well-structured latent space over 16 typologically diverse languages, with structural claims backed by visualization evidence:
 
-**Current research phase**: evaluating the structural properties of the emergent language.
+- Latent space organizes languages typologically (t-SNE, clustering)
+- Multi-scale attention heads function as designed (entropy analysis)
+- Output follows Zipfian distribution, refuting degenerate coding (rank-frequency)
+- Latent space is Lipschitz-smooth (Spearman r=0.86 on token Jaccard)
+- Variable-length encoding adapts to input complexity (r=0.947)
+- Compositional structure present (power-law probe R-squared, top dims at 0.6-0.75)
+- Low effective dimensionality (90% variance in 3 PCs)
+
+The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 93% accuracy (7.4x above chance).
+
+### Limitations
+
+- **Positional disentanglement is low.** This is expected: natural languages compose meaning through morphology and syntax, not fixed positional slots. The power-law probe distribution is the more relevant compositionality signal.
+- **Reconstruction is approximate.** The 256-dim bottleneck preserves lexical content but shuffles word order, consistent with a bag-of-morphemes representation at this capacity.
+- **Effective latent dimensionality is low** (3 PCs for 90% variance). Whether this limits downstream agent expressivity or reflects efficient compression of the training distribution is an open question.
+
+### Research directions
+
+- **Inner speech for reasoning**: agents using the linguistic bottleneck as a structured scratchpad for multi-step reasoning, where the compositional structure constrains the thought space
+- **Neuro-symbolic bridge**: the frozen decoder as an interface between continuous neural representations and discrete symbolic structure, without hand-designed grammars
+- **Universal Grammar evidence**: the pretrained decoder as a computational test of whether a fixed structural prior over typologically diverse languages produces the right inductive biases for novel language emergence
+- **IPA-to-English translation**: fine-tuning a small LLM on (IPA, English) parallel text to close the interpretation loop
+- **Domain-specific agents**: integration with dynamical systems (Spinlock VQTokenizer), multi-agent self-play, co-adaptation of speaker/listener conventions
+
+### Evaluation scripts
 
 | Script | Purpose |
 |--------|---------|
 | `scripts/eval_topology.py` | Semantic topology preservation — do similar inputs produce similar messages? |
 | `scripts/eval_compositionality.py` | Compositionality metrics (topsim, disentanglement, diagnostic probes) |
-| `scripts/train_translator.py` | LLM translation pilot — fine-tune a small LM on IPA → English |
-
-**Next steps:**
-
-- Validate topology preservation and compositionality (establishes paper contribution)
-- Train IPA → English translator (closes the vision loop)
-- Integration with domain-specific agent systems (Spinlock VQTokenizer for dynamical systems)
-- Multi-agent self-play (co-adaptation of speaker/listener conventions)
+| `scripts/train_translator.py` | LLM translation pilot — fine-tune a small LM on IPA -> English |
 
 ## Further Reading
 
