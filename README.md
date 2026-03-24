@@ -359,26 +359,22 @@ metrics = pretrain_vae_decoder(VAEPretrainConfig(
 ))
 ```
 
-### 2. Precompute embeddings
+After pretraining, the following are independent — run any or all:
+
+### 2a. Generate structural analysis
 
 ```bash
-python scripts/precompute_embeddings.py
-```
-
-### 3. Run the referential game
-
-```bash
-python scripts/run_referential_reinforce.py
-```
-
-### 4. Generate structural analysis
-
-```bash
-poetry install --with viz
 lfm visualize all --checkpoint data/vae_resume.pt
 ```
 
-### 5. Use in your own agent system
+### 2b. Run the referential game
+
+```bash
+python scripts/precompute_embeddings.py  # one-time: sentence embeddings
+python scripts/run_referential_reinforce.py
+```
+
+### 2c. Use in your own agent system
 
 ```python
 from lfm import FacultyConfig, GeneratorConfig, LanguageFaculty
