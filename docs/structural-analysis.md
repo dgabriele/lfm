@@ -8,9 +8,19 @@ The following results are from the visualization suite (`lfm visualize all`), wh
 
 ### Latent space organization
 
-The t-SNE projection of latent z vectors, colored by language family, shows that the decoder organizes languages typologically — related languages cluster together, with uniform coverage across the latent space and no mode collapse.
+The t-SNE projection of latent z vectors reveals how the decoder organizes languages across three complementary views:
 
-![t-SNE of latent space by language family](static/images/tsne_by_family.png)
+**By individual language** — each of the 16 languages occupies a distinct region, with overlap between typologically related languages:
+
+![t-SNE by language](static/images/tsne_by_language.png)
+
+**By language family** — related languages cluster together (Indo-European, Uralic, Turkic, etc.), with uniform coverage and no mode collapse:
+
+![t-SNE by language family](static/images/tsne_by_family.png)
+
+**By morphological type** — fusional, agglutinative, isolating, and introflexive languages form broad regions reflecting shared structural properties:
+
+![t-SNE by morphological type](static/images/tsne_by_type.png)
 
 Hierarchical clustering of per-language mean z vectors confirms linguistically sensible groupings: Slavic languages cluster together, agglutinative languages form their own branch, and isolating languages separate cleanly.
 
