@@ -19,8 +19,6 @@ import seaborn as sns
 import torch
 from matplotlib.figure import Figure
 from scipy.stats import entropy as scipy_entropy
-from sklearn.metrics import mutual_info_score
-
 from lfm.visualize import BaseVisualization
 from lfm.visualize.config import VisualizeConfig
 from lfm.visualize.loader import decode_z
@@ -213,59 +211,74 @@ class CompositionalityVisualization(BaseVisualization):
     # Figure 3: Feature-Position Mutual Information
     # ------------------------------------------------------------------
 
-    def _fig_mutual_information(
+    def _fig_probe_r2(
         self,
         z: np.ndarray,
         token_matrix: np.ndarray,
         mask: np.ndarray,
         max_seq_len: int,
     ) -> Figure:
-        """Bar chart of total MI between each z dimension and all output positions."""
-        n_dims = z.shape[1]
-        n_bins = 10
+        """Bar chart of per-dimension probe R²: how predictable is each z dim from output."""
+        from sklearn.linear_model import Ridge
 
-        # Bin each z dimension into quantiles
-        z_binned = np.zeros_like(z, dtype=np.int64)
-        for dim_idx in range(n_dims):
-            col = z[:, dim_idx]
-            # Use quantile-based binning; handle constant columns
-            try:
-                quantiles = np.percentile(
-                    col, np.linspace(0, 100, n_bins + 1)
-                )
-                # Remove duplicate bin edges (constant regions)
-                quantiles = np.unique(quantiles)
-                z_binned[:, dim_idx] = np.digitize(col, quantiles[1:-1])
-            except (ValueError, IndexError):
-                z_binned[:, dim_idx] = 0
+        n_samples, n_dims = z.shape
 
-        # Compute MI for each dimension summed across positions
-        total_mi = np.zeros(n_dims)
+        # Build output feature matrix: bag-of-tokens per sample
+        # (more informative than position-specific tokens for probe)
+        vocab_size = int(token_matrix.max()) + 1
+        bow = np.zeros((n_samples, min(vocab_size, 2000)), dtype=np.float32)
+        for i in range(n_samples):
+            length = mask[i].sum()
+            for tok in token_matrix[i, :length]:
+                if 0 <= tok < bow.shape[1]:
+                    bow[i, tok] += 1
+            # Normalize to frequencies
+            if length > 0:
+                bow[i] /= length
+
+        # Also add output length as a feature
+        lengths = mask.sum(axis=1, keepdims=True).astype(np.float32)
+        features = np.concatenate([bow, lengths], axis=1)
+
+        # Train/test split
+        split = int(n_samples * 0.8)
+        X_train, X_test = features[:split], features[split:]
+
+        # Probe each z dimension
+        r2_scores = np.zeros(n_dims)
         for dim_idx in range(n_dims):
-            z_bins = z_binned[:, dim_idx]
-            for pos in range(max_seq_len):
-                pos_mask = mask[:, pos]
-                if pos_mask.sum() < 10:
-                    continue
-                z_valid = z_bins[pos_mask]
-                tok_valid = token_matrix[pos_mask, pos]
-                total_mi[dim_idx] += mutual_info_score(z_valid, tok_valid)
+            y_train = z[:split, dim_idx]
+            y_test = z[split:, dim_idx]
+            y_var = y_test.var()
+            if y_var < 1e-10:
+                continue
+            model = Ridge(alpha=1.0)
+            model.fit(X_train, y_train)
+            pred = model.predict(X_test)
+            ss_res = ((y_test - pred) ** 2).mean()
+            r2_scores[dim_idx] = max(0.0, 1.0 - ss_res / y_var)
 
         # Sort descending, take top 50
         n_top = min(50, n_dims)
-        sorted_idx = np.argsort(total_mi)[::-1][:n_top]
-        sorted_mi = total_mi[sorted_idx]
+        sorted_idx = np.argsort(r2_scores)[::-1][:n_top]
+        sorted_r2 = r2_scores[sorted_idx]
 
         fig, ax = plt.subplots(figsize=FIGSIZE_WIDE)
         ax.bar(
-            range(n_top), sorted_mi, width=0.8,
+            range(n_top), sorted_r2, width=0.8,
             color="#2ca02c", edgecolor="none",
         )
-        ax.set_xlabel("Latent Dimension (sorted by MI)")
-        ax.set_ylabel("Total Mutual Information (nats)")
-        ax.set_title("Mutual Information: Input Features \u2192 Output")
+        ax.set_xlabel("Latent Dimension (sorted by R²)")
+        ax.set_ylabel("Probe R²")
+        ax.set_title(
+            "Output → Input Probe: How Recoverable Is Each z Dimension?"
+        )
+        ax.axhline(
+            y=r2_scores.mean(), color="#d62728", linestyle="--",
+            label=f"Mean R²={r2_scores.mean():.3f}",
+        )
+        ax.legend()
 
-        # Label the x-ticks with actual dimension indices
         if n_top <= 50:
             ax.set_xticks(range(n_top))
             ax.set_xticklabels(
@@ -342,9 +355,9 @@ class CompositionalityVisualization(BaseVisualization):
             z_sub, token_matrix, mask, max_seq_len
         )
 
-        # Figure 3: Feature-Position Mutual Information
-        logger.info("Computing feature-position mutual information...")
-        fig_mi = self._fig_mutual_information(
+        # Figure 3: Probe R² — how recoverable is each z dim from output
+        logger.info("Computing output→input probe R²...")
+        fig_mi = self._fig_probe_r2(
             z_sub, token_matrix, mask, max_seq_len
         )
 
