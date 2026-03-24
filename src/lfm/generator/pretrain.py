@@ -890,7 +890,21 @@ class VAEPretrainer:
                 start_epoch, global_step, best_val_loss,
             )
 
-        # 7. Training history
+        # 7. Save frozen config snapshot for provenance
+        import yaml as _yaml
+
+        config_snapshot_path = Path(output_dir) / "config.yaml"
+        if not config_snapshot_path.exists():
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            with open(config_snapshot_path, "w") as _cf:
+                _yaml.dump(
+                    cfg.model_dump() if hasattr(cfg, "model_dump") else vars(cfg),
+                    _cf,
+                    default_flow_style=False,
+                )
+            logger.info("Saved config snapshot to %s", config_snapshot_path)
+
+        # 8. Training history
         from lfm.generator.training_history import TrainingHistory
 
         history = TrainingHistory(output_dir)
