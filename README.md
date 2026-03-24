@@ -333,8 +333,20 @@ lfm visualize all --checkpoint data/vae_resume.pt --output-dir output/viz
 ## Quick Start
 
 ```bash
-poetry install --with generator
+poetry install --with generator,viz
 ```
+
+### 0. Download corpus data
+
+```bash
+# Automated download of all 16 Leipzig corpora
+poetry run lfm setup data --corpus leipzig
+
+# Or download everything (corpus + embeddings)
+poetry run lfm setup data --all
+```
+
+See **[docs/data-guide.md](docs/data-guide.md)** for the full data layout, checkpoint structure, and consistency verification details.
 
 ### 1. Pretrain the VAE decoder
 

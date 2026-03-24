@@ -26,6 +26,18 @@ def create_parser() -> argparse.ArgumentParser:
 
     register_visualize_group(subparsers)
 
+    # --- setup command ---
+    from lfm.cli.setup import SetupCommand
+
+    setup_cmd = SetupCommand()
+    setup_parser = subparsers.add_parser(
+        setup_cmd.name,
+        help=setup_cmd.help,
+        description=setup_cmd.description,
+    )
+    setup_cmd.add_arguments(setup_parser)
+    setup_parser.set_defaults(command_handler=setup_cmd)
+
     return parser
 
 
