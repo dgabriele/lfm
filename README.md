@@ -153,6 +153,12 @@ src/lfm/
 | EOS rate | 1.00 |
 | Mean word length | 5.5 IPA chars |
 
+<p align="center">
+  <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
+  <img src="docs/static/images/tsne_by_type.png" width="48%" alt="t-SNE of latent space colored by morphological type" />
+</p>
+<p align="center"><em>Left: hierarchical clustering recovers linguistically sensible language groupings from the latent space. Right: t-SNE projection colored by morphological type (fusional, agglutinative, isolating, introflexive). Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
+
 ### Reconstruction
 
 The latent bottleneck preserves specific lexical content. Vietnamese (isolating, 16 words):
