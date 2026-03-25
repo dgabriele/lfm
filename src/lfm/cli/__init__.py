@@ -31,6 +31,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     register_translate_group(subparsers)
 
+    # --- publish subcommand group ---
+    from lfm.cli.publish import register_publish_group
+
+    register_publish_group(subparsers)
+
     # --- setup command ---
     from lfm.cli.setup import SetupCommand
 
