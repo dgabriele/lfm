@@ -144,12 +144,20 @@ class VAEPretrainConfig(LFMBaseConfig):
     device: str = "cuda"
     output_path: str = "data/vae_decoder.pt"
 
-    # Latent variance floor: penalize when per-dimension z variance
-    # drops below ``z_var_floor``, preventing latent space collapse
-    # without pushing the mean toward zero (which is what KL does and
-    # what caused PPL plateau).  Only activates during collapse.
-    z_var_weight: float = 0.1
-    z_var_floor: float = 0.01
+    # Latent variance regularization: smooth quadratic penalty that
+    # pulls per-dimension z variance toward ``z_var_target``.  Provides
+    # continuous gradient signal (not just a hard floor), preventing
+    # the slow variance collapse that leads to gnorm explosion.
+    # Loss = weight * mean((var_per_dim - target)^2).
+    z_var_weight: float = 5.0
+    z_var_target: float = 0.05
+    z_var_floor: float = 0.01  # legacy, unused — kept for checkpoint compat
+
+    # Word dropout (Bowman et al. 2016): randomly zero out decoder input
+    # embeddings with this probability during training.  Forces the decoder
+    # to rely on z for reconstruction instead of the teacher-forced input
+    # highway, preventing the encoder from driving logvar → -∞.
+    word_dropout: float = 0.5
 
     # DIP-VAE off-diagonal covariance penalty: encourages z dimensions
     # to be statistically independent (disentangled).  Penalizes pairwise
@@ -503,9 +511,25 @@ def _vae_forward(
             seq_len, device=device
         )
 
+    # Word dropout rate (0 at eval, configured at train)
+    _word_drop_p = (
+        getattr(_cfg, "word_dropout", 0.0)
+        if _cfg is not None and dec_token_embedding.training
+        else 0.0
+    )
+
     def _run_decoder(input_ids: Tensor) -> Tensor:
         if isinstance(decoder, LinguisticDecoder):
             dec_input = dec_token_embedding(input_ids)
+            # Word dropout: zero out embeddings to force decoder to use z
+            if _word_drop_p > 0:
+                drop_mask = torch.rand(
+                    dec_input.shape[:2], device=device,
+                ) < _word_drop_p
+                drop_mask[:, 0] = False  # never drop BOS
+                dec_input = dec_input.masked_fill(
+                    drop_mask.unsqueeze(-1), 0.0,
+                )
             if not isinstance(dec_pos_embedding, nn.Identity):
                 dec_input = dec_input + dec_pos_embedding(pos_ids)
             return decoder(
@@ -515,6 +539,15 @@ def _vae_forward(
             dec_input = (
                 dec_token_embedding(input_ids) + dec_pos_embedding(pos_ids)
             )
+            # Word dropout for non-linguistic decoder
+            if _word_drop_p > 0:
+                drop_mask = torch.rand(
+                    dec_input.shape[:2], device=device,
+                ) < _word_drop_p
+                drop_mask[:, 0] = False
+                dec_input = dec_input.masked_fill(
+                    drop_mask.unsqueeze(-1), 0.0,
+                )
             return decoder(tgt=dec_input, memory=memory, tgt_mask=tgt_mask)
 
     if scheduled_sampling_p > 0:
@@ -822,11 +855,14 @@ class VAEPretrainer:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=cfg.num_epochs, eta_min=cfg.lr_min,
         )
-        # Lower initial scale to reduce fp16 overflow probability in late training.
+        # Conservative GradScaler: low initial scale, aggressive backoff,
+        # slow growth.  Prevents the gnorm=inf cascades seen with default
+        # settings while keeping fp16 speed.
         scaler = torch.amp.GradScaler(
             enabled=cfg.use_amp,
-            init_scale=2**10,  # 1024 (default is 2**16 = 65536)
-            growth_interval=2000,  # slower scale growth
+            init_scale=2**8,         # 256 (default 65536) — less headroom to overflow
+            backoff_factor=0.25,     # quarter scale on overflow (default 0.5)
+            growth_interval=4000,    # grow scale every 4K steps (default 2000)
         )
 
         # 5b. Build adversarial discriminator (optional)
@@ -1046,13 +1082,12 @@ class VAEPretrainer:
                     else:
                         kl_scale = 0.0
 
-                    # Variance floor: prevent per-dimension collapse
+                    # Smooth variance regularization: quadratic pull toward target.
+                    # Provides gradient signal at all times, not just below a floor.
                     z_var_loss = torch.tensor(0.0, device=device)
                     if cfg.z_var_weight > 0 and b >= 4:
                         z_var = z_batch.var(dim=0)
-                        z_var_loss = F.relu(
-                            cfg.z_var_floor - z_var
-                        ).mean()
+                        z_var_loss = (z_var - cfg.z_var_target).pow(2).mean()
 
                     # DIP covariance: encourage dimension independence
                     dip_loss = torch.tensor(0.0, device=device)
@@ -1155,6 +1190,37 @@ class VAEPretrainer:
                     if math.isfinite(last_grad_norm):
                         scaler.step(optimizer)
                     else:
+                        # Detailed diagnostics on first bad gnorm per epoch
+                        if not getattr(self, "_gnorm_diagnosed", False):
+                            self._gnorm_diagnosed = True
+                            with torch.no_grad():
+                                _h = modules["enc_to_latent"](
+                                    torch.zeros(1, cfg.decoder_hidden_dim, device=device)
+                                )
+                                _mu_dbg, _lv_dbg = _h.chunk(2, dim=-1)
+                                _has_nan_params = any(
+                                    torch.isnan(p).any().item()
+                                    for m in modules.values()
+                                    if isinstance(m, nn.Module)
+                                    for p in m.parameters()
+                                )
+                            logger.warning(
+                                "GNORM DIAGNOSTIC step=%d: "
+                                "ce=%.4f z_var_loss=%.6f dip=%.6f loss=%.4f "
+                                "logvar_range=[%.2f, %.2f] logvar_mean=%.2f "
+                                "z_std_running=%.4f z_batch_std=%.4f "
+                                "scaler_scale=%.1f nan_in_params=%s",
+                                global_step,
+                                ce_loss.item(), z_var_loss.item(),
+                                dip_loss.item(), loss.item() * accum,
+                                kl_per_dim_train.min().item() if _do_kl else -999,
+                                kl_per_dim_train.max().item() if _do_kl else -999,
+                                kl_per_dim_train.mean().item() if _do_kl else -999,
+                                z_running_std.mean().item(),
+                                z_batch.std(dim=0).mean().item(),
+                                scaler.get_scale(),
+                                _has_nan_params,
+                            )
                         logger.warning(
                             "Skipping optimizer step: gnorm=%s at step %d "
                             "— resetting momentum",

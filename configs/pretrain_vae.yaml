@@ -41,6 +41,9 @@ lr_min: 0.0001
 num_epochs: 40
 
 # Latent regularization
+z_var_weight: 5.0
+z_var_target: 0.05
+word_dropout: 0.5
 dip_weight: 0.1
 val_fraction: 0.1
 seed: 42
