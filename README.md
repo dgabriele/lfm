@@ -143,15 +143,16 @@ src/lfm/
 
 ## Pretraining Results
 
-17 epochs on 560K IPA-transcribed sentences from 16 languages (`max_seq_len=96`, cosine LR decay, DIP-VAE covariance regularization, variance floor):
+36 epochs on 560K IPA-transcribed sentences from 16 languages (`max_seq_len=96`, cosine LR decay, DIP-VAE covariance regularization, variance floor, 239/256 active latent dims):
 
 | Metric | Value |
 |--------|-------|
-| Val CE | 0.96 (PPL ≈ 2.6) |
-| TTR | 0.96 |
+| Val CE | **0.59** (PPL ≈ 1.8) |
+| TTR | 0.949 |
 | Repetition rate | 0.000 |
 | EOS rate | 1.00 |
-| Mean word length | 5.5 IPA chars |
+| Mean word length | 5.3 IPA chars |
+| Active z dims | 239/256 |
 
 <p align="center">
   <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
@@ -161,59 +162,62 @@ src/lfm/
 
 ### Reconstruction
 
-The latent bottleneck preserves specific lexical content. Vietnamese (isolating, 16 words):
+The latent bottleneck preserves specific lexical content. English:
 
 ```
-orig: mon văn kuən hut toj ɲiəw xi ciəm ka thɤj zan zɛɲ cɔ kak mon xak
-dec:  mon văn kuən hut ɲiəw thɤj zan xi toj ciəm ka kak mon zɛɲ cɔ ka
+orig: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt pʌlis skɑtlʌnd waɪ ðʌ foʊtʌɡɹæf hæd nɑt bɪn ɹilist
+dec:  ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
 ```
 
-15 of 16 words recovered. Word order shuffled — content preserved, sequencing approximate.
+All content words recovered. Word order slightly shuffled (`skɑtlʌnd pʌlis` vs `pʌlis skɑtlʌnd`, `nɑt` moved to end) — content preserved, sequencing approximate.
 
 Polish (fusional, complex morphology):
 
 ```
 orig: zaatakɔvali nas faɲi muvjɔnt͡s tɔ dɔpjɛrɔ druɡji film ɔ batmaɲɛ t͡sɔ vɨ dɔ xɔlɛrɨ rɔbit͡ɕɛ
-dec:  zaatakɔvali dɔ nas faɲi muvjɔnt͡s tɔ druɡji ɔ uzrɔ̃vɨj bjawɔstɔpjɛrɔ xɔrɨ laɡlu
+dec:  zaatakɔvali muvjɔnt͡s nas faɲi tɔ dɔpjɛrɔ druɡji t͡sɔ film batma ɔlɛ dɔɲɛɕɛnt͡ɕɛ xɔrɨ vɨdal
 ```
 
-Core vocabulary preserved (`zaatakɔvali`, `nas`, `faɲi`, `muvjɔnt͡s`, `druɡji`). Late-sentence words diverge — the bottleneck prioritizes high-information content words.
+Core vocabulary preserved (`zaatakɔvali`, `nas`, `faɲi`, `muvjɔnt͡s`, `dɔpjɛrɔ`, `druɡji`, `t͡sɔ`, `film`). Late-sentence words diverge — the bottleneck prioritizes high-information content words.
 
-### Interpolation (Polish → Vietnamese)
+### Interpolation (English → Polish)
 
 Smooth typological transition through the latent space:
 
 ```
-0.00: nas ɲiʐ dɔkɔmɛntaʐa tɔ kɔlɛj fastɨnɔ muvjɔnt͡s matɛrjavit͡ɕɛ druɡji zaatalj ɔ kaʐɛ
-0.25: ɲiʐ dɔkɔnamɨ ɔ kɔlɛjnɛ tɔ skɔrɔ fariko vɨɲik kavu kɔbjɛta ɲɛ pʂɨɡlavin
-0.50: monɔtaən vɯə ku dru thɤj faszɔn xi tiət kɛɲ dɔ miɲ ɲiəw hɤn naju cɯək hɛ
-0.75: mon văn kuən ɲiəw hɤn hut ci toj xi ka su hɯəŋ tɤ̆m zɛɲ cɔ kak zan vɤj tɯ hɔk
-1.00: mon văn kuən hut ɲiəw thɤj zan toj ci xiəm ka kak mon xak zɛɲ cɔ
+0.00: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
+0.25: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt pʌlis skɑtɪʃ bæl waɪ nɑt hoʊstɝ dɪskʌndʌtaɪtɪŋ ðʌ viniz
+0.50: faʊndɝ ɡʊd seɪ ðʌ lɪθi ælkʌɡɹeɪʃʌnt ɪz ɔlsoʊ wʌn ʌbaʊt kʌlwarnaʃ ɔf dos rɔʃʌn ɔɹ daɪs dɔintos sɔfan
+0.75: zaatakɔvali faɲi nas muvjɔnt͡s tɔ dɔpjɛrɨ zɛwɛnskjɛɡɔ watɡ kak virtualɲa ʂt͡ʂɛrɔ bada ks film andrɛ
+1.00: zaatakɔvali nas faɲi muvjɔnt͡s tɔ dɔpjɛrɔ druɡji t͡sɔ film batma ɔ vɨbiɲɛt͡ɕɛ dɔ rɔlɛ xɔrɨ
 ```
 
-Polish morphology at t=0, mixed Slavic-Southeast Asian phonotactics at t=0.50, clean Vietnamese at t=1.
+English phonology at t=0, mixed English-Slavic phonotactics at t=0.50, clean Polish at t=1.
 
 ### Perturbation
 
 Adding noise to a latent code produces paraphrastic variation scaled to the encoder's actual z distribution (σ=1.0 means one encoder standard deviation):
 
 ```
-σ=0.0: ɲiʐ bɛnd͡ʑɛ tɔ ɔkɔlɛ dɔpjɛrɔ zaatakɔvali fasɔvawa zapɔvjɛd͡ʑ xɔrɨɲik
-σ=0.1: zaprɔjɛktɲikɔvi bɛnd͡ʑɛ ɔkɔtalnɔ druɡji tɔ fas dɔ ɲiʐ dɔ bmjataɦo
-σ=0.5: zaprɨtajɔnt͡s dɔ tɨx zaavali bɨwɔ tɔ ɔkɔlnɔ faʑitɔvanɛj juʐ maɲitrɔlɛɲ
-σ=1.0: mɛnɔtaliɕmɨ ɔkɔsta fu kɤ̆p vɨbɔt͡skɔ̃ ɐos majɔtɛlo fat͡ɕɛnɛ publit͡ʂɲik
+σ=0.0: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
+σ=0.1: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ leɪtʌst pɹʌɡɹæfʌ foʊtʌ it͡ɕikɝ
+σ=0.5: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skæŋlʌnd ðʌ sɛfʌleɪ lɪdmʌ vɪ thew ɐlbɛjkɔmɛ ɹiɲɪt͡seʃ lɔledr
+σ=1.0: ðʌ pʌlis biɪŋ nɪɡɹɝm vɪ vɤ̆n kɔntukwɑt săprʕ ɪn hzb fɪldwensu hɑli ɪz ðʌ aɪskorifs ɪnrktoɾfdi drimi
 ```
 
-Small noise preserves language (Polish throughout). Large noise shifts toward mixed typology.
+Small noise preserves language and sentence structure (English throughout). At σ=0.5, the sentence frame holds but content words shift. At σ=1.0, phonotactics diverge into mixed typology.
 
 ### Random z sampling
 
 Sampled from the encoder's tracked distribution, the decoder produces diverse, coherent output across typologies:
 
 ```
-random[0]: uːm di pɾoduːrdamt md͡ʒkuːn aːnyːlaːs aʊ̯f dɛːr kaːfriːd t͡suː fsp iːn dɛːr ini
-random[1]: ɐlem diʃso ɐltɐs dɛ modɛɾɐlidɐdɛ ilɐɡɐdɐ tiɐzɛs kɐnsɛ ɐo bill tɛmos
+random[0]: pɹoʊtɛlz ʌnd daɪl ɲiən wʌt ðʌ ɪnkɹʌpdeɪʃʌnz ʌv noɦɪ popoɟɪ lɛɟɪ v kɛɹi tu nikolɛt ɪn komːe tu kɐp kiɑntɑla
+random[1]: azeɾvi madinada asanatan ad͡ʒɯ ve duɾumunda tɾaɾt zidɐndoilika ɛsprɛlasa laviki kuɾum baʃkanɯ kon ʔoŋ jɤ̆n zɯllma olduʃc
+random[2]: hɛviʃkoːɑjɑ ivaːn ɛlɛmtɛ ɛzːɛl uːrt͡sukozjɔn køvɛtːɛ zʕmaːl nupunːːɛjː joːbɒn ðʌ fɛdɛrjɒnɒk ɒmit dupupunːn ðʌ neɪʃʌnz tu
 ```
+
+Each sample exhibits different phonotactic patterns — English-like, Turkish-like, Hungarian-like — reflecting the typological diversity of the training data.
 
 ## Structural Analysis
 
@@ -426,8 +430,8 @@ The referential game demonstrates that the linguistic bottleneck carries discrim
 ### Limitations
 
 - **Positional disentanglement is low.** This is expected: natural languages compose meaning through morphology and syntax, not fixed positional slots. The power-law probe distribution is the more relevant compositionality signal.
-- **Reconstruction is approximate.** The 256-dim bottleneck preserves lexical content but shuffles word order, consistent with a bag-of-morphemes representation at this capacity.
-- **Effective latent dimensionality is low** (3 PCs for 90% variance). Whether this limits downstream agent expressivity or reflects efficient compression of the training distribution is an open question.
+- **Reconstruction is near-perfect for content, approximate for order.** The 256-dim bottleneck preserves lexical content faithfully and largely preserves word order, with minor reorderings (e.g. `pʌlis skɑtlʌnd` ↔ `skɑtlʌnd pʌlis`). At 36 epochs (val CE 0.59), this is substantially better than earlier checkpoints.
+- **Latent utilization**: 239 of 256 dimensions are active (z_std > 0.01). Effective dimensionality as measured by PCA may still be concentrated, but raw dimension activity is high.
 
 ### Research directions
 

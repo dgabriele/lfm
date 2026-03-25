@@ -88,36 +88,36 @@ src/lfm/
 
 ## Pretraining Results
 
-20 epochs on 560K IPA sentences from 16 languages:
-- **Val CE: 0.94** (PPL ≈ 2.6)
-- **Reconstruction**: near-perfect through 256-dim latent bottleneck
-- **Interpolation**: smooth typological transitions (Hungarian ↔ Polish ↔ Vietnamese)
+36 epochs on 560K IPA sentences from 16 languages:
+- **Val CE: 0.59** (PPL ≈ 1.8)
+- **Reconstruction**: near-perfect through 256-dim latent bottleneck, word order largely preserved
+- **Interpolation**: smooth typological transitions (English ↔ Polish)
 - **σ=0.5 perturbation**: paraphrastic variation within language
-- **TTR: 0.96**, rep_rate: 0.00, mean word length: 5.8
+- **TTR: 0.949**, rep_rate: 0.00, mean word length: 5.3, active z dims: 239/256
 
-### Sample outputs (epoch 20):
+### Sample outputs (epoch 36):
 
 **Reconstruction:**
 ```
-orig:  mon văn kuən hut toj ɲiəw xi ciəm ka thɤj zan zɛɲ cɔ kak mon xak
-dec:   văn ku mon hut toj xiən ciəm ɲiəw zɛɲ thɤj zan ka kak cɔ saŋ xak
+orig: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt pʌlis skɑtlʌnd waɪ ðʌ foʊtʌɡɹæf hæd nɑt bɪn ɹilist
+dec:  ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
 ```
 
-**Interpolation (Polish → Vietnamese):**
+**Interpolation (English → Polish):**
 ```
-0.00: prɛzɨdɛnt ʂtajn tɔ thɯjatkɔvali faɲit͡ʂnɨ dɔ druɡji...
-0.50: tam kucamplɛt vɔŋ xi dɔ zɛɲ cɔ biət to kwok te saŋ bimɛ ɲiəw...
-1.00: văn ku mon hut toj xi ɲiəw ciəm thɤj zan zɛɲ ka kak mon cɔ saŋ...
+0.00: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
+0.50: faʊndɝ ɡʊd seɪ ðʌ lɪθi ælkʌɡɹeɪʃʌnt ɪz ɔlsoʊ wʌn ʌbaʊt kʌlwarnaʃ ɔf dos rɔʃʌn...
+1.00: zaatakɔvali nas faɲi muvjɔnt͡s tɔ dɔpjɛrɔ druɡji t͡sɔ film batma ɔ vɨbiɲɛt͡ɕɛ dɔ rɔlɛ xɔrɨ
 ```
 
 **Perturbation (σ=0.5):**
 ```
-ɐkliɕmɨ d͡ʑakarta funkvɲidjijniz tɔ aktɛnliɕmɨ napravljennuu ɡɾinɛlʊs
+ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skæŋlʌnd ðʌ sɛfʌleɪ lɪdmʌ vɪ thew ɐlbɛjkɔmɛ ɹiɲɪt͡seʃ lɔledr
 ```
 
 **Random z:**
 ```
-ia prebɪl pre momento pre ninlasikanlas sɛzt͡sɨ a tɯŋ prebɪlnɔɕt͡ɕi pre nin
+pɹoʊtɛlz ʌnd daɪl ɲiən wʌt ðʌ ɪnkɹʌpdeɪʃʌnz ʌv noɦɪ popoɟɪ lɛɟɪ v kɛɹi tu nikolɛt ɪn komːe
 ```
 
 ## Agent Game Results
