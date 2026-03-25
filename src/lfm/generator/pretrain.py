@@ -863,14 +863,16 @@ class VAEPretrainer:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=cfg.num_epochs, eta_min=cfg.lr_min,
         )
-        # Conservative GradScaler: low initial scale, aggressive backoff,
-        # slow growth.  Prevents the gnorm=inf cascades seen with default
-        # settings while keeping fp16 speed.
+        # Fixed-scale GradScaler: init at 256, effectively never grow.
+        # The scaler exists only to prevent fp16 gradient underflow.
+        # NOTE: PyTorch requires growth_factor > 1.0 (asserts on ==1.0),
+        # so we use 1.001 + growth_interval=100K to make growth negligible.
         scaler = torch.amp.GradScaler(
             enabled=cfg.use_amp,
-            init_scale=2**8,         # 256 (default 65536) — less headroom to overflow
-            backoff_factor=0.25,     # quarter scale on overflow (default 0.5)
-            growth_interval=4000,    # grow scale every 4K steps (default 2000)
+            init_scale=2**8,         # 256 — safe for 27M param model
+            growth_factor=1.001,     # effectively never grow (PyTorch requires >1.0)
+            backoff_factor=0.5,      # halve on overflow (recovers if needed)
+            growth_interval=100000,  # check growth every 100K steps (~never)
         )
 
         # 5b. Build adversarial discriminator (optional)

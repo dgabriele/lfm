@@ -25,7 +25,7 @@ attention_global_every: 7
 use_rope: true
 share_decoder_layers: true
 max_seq_len: 96
-encoder_pooling: attention
+encoder_pooling: mean
 
 # KL regularization — disabled (was always pegged at initial value, contributing noise)
 kl_weight: 0.0
@@ -43,8 +43,8 @@ num_epochs: 40
 # Latent regularization
 z_var_weight: 0.0
 z_var_target: 0.05
-word_dropout: 0.3
-word_dropout_min: 0.05
+word_dropout: 0.0
+word_dropout_min: 0.0
 word_dropout_anneal_epochs: 20
 dip_weight: 0.1
 val_fraction: 0.1
