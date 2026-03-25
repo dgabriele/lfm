@@ -110,12 +110,12 @@ class ClusteringVisualization(BaseVisualization):
 
         if linkage_method == "ward" and metric == "cosine":
             warnings.warn(
-                "Ward linkage requires Euclidean distance; switching metric "
-                "from 'cosine' to 'euclidean'.",
+                "Ward linkage requires Euclidean distance; switching linkage "
+                "from 'ward' to 'average'.",
                 UserWarning,
                 stacklevel=2,
             )
-            metric = "euclidean"
+            linkage_method = "average"
 
         # Normalize metric name: config uses "l2" as alias for euclidean
         if metric == "l2":
@@ -213,7 +213,7 @@ class ClusteringVisualization(BaseVisualization):
         labels_ordered = [labels[i] for i in order]
         codes_ordered = [codes[i] for i in order]
 
-        fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+        fig, ax = plt.subplots(figsize=(12, 10))
 
         sns.heatmap(
             dist_ordered,
@@ -221,6 +221,7 @@ class ClusteringVisualization(BaseVisualization):
             yticklabels=labels_ordered,
             annot=True,
             fmt=".2f",
+            annot_kws={"size": 7},
             cmap="YlOrRd",
             square=True,
             linewidths=0.5,

@@ -7,12 +7,18 @@ producing a truly uniform phonetic representation across all languages.
 
 Words not found in the CMU dictionary (English) or not convertible via
 epitran are dropped.
+
+Language-specific post-processing:
+    Hindi (hin): strip leaked Devanagari, drop Latin-script loanwords,
+    apply schwa deletion heuristics for word-final position.
+    Arabic (ara): strip leaked Arabic script characters.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -175,15 +181,148 @@ def _clean_ipa(text: str) -> str:
     return cleaned.strip()
 
 
+# ── Script detection helpers ──────────────────────────────────────────
+
+
+def _has_script(text: str, script_name: str) -> bool:
+    """Check if text contains characters from a specific Unicode script."""
+    return any(
+        unicodedata.name(c, "").startswith(script_name)
+        for c in text if not c.isspace()
+    )
+
+
+def _is_native_script(word: str, script_name: str) -> bool:
+    """Check if a word contains characters from the expected native script."""
+    return any(
+        unicodedata.name(c, "").startswith(script_name)
+        for c in word if c.isalpha()
+    )
+
+
+def _is_ascii_loanword(word: str) -> bool:
+    """Check if a source-text word is a Latin-script loanword.
+
+    Only applied to the *raw source text* (Devanagari/Arabic), not IPA output.
+    A word like "Video" in Hindi text is a loanword; IPA output like "saːtʰ"
+    uses Latin characters but is not a loanword.
+    """
+    return all(c.isascii() for c in word if c.isalpha()) and any(c.isalpha() for c in word)
+
+
+# ── Hindi IPA post-processing ────────────────────────────────────────
+
+
+# Devanagari Unicode block: U+0900-U+097F, extensions U+A8E0-U+A8FF
+_DEVANAGARI_RE = re.compile(r"[\u0900-\u097F\uA8E0-\uA8FF]+")
+
+# Word-final schwa deletion: epitran inserts schwa after final consonants
+# but Hindi drops it in most word-final positions (Ohala 1983).
+_HINDI_FINAL_SCHWA_RE = re.compile(r"ə(?=\s|$)")
+
+
+def _prefilter_hindi(raw_text: str) -> str | None:
+    """Pre-filter Hindi source text before epitran conversion.
+
+    1. Reject lines where >30% of words are Latin-script loanwords.
+    2. Strip Latin-script loanwords from the text.
+
+    Returns:
+        Filtered text, or ``None`` to reject the line entirely.
+    """
+    words = raw_text.split()
+    if not words:
+        return None
+
+    native = [w for w in words if not _is_ascii_loanword(w)]
+    if len(native) < len(words) * 0.5:
+        return None  # too code-mixed
+
+    return " ".join(native)
+
+
+def _postprocess_hindi(ipa: str) -> str | None:
+    """Post-process Hindi IPA to fix epitran artifacts.
+
+    1. Strip any leaked Devanagari characters.
+    2. Apply word-final schwa deletion heuristic.
+
+    Args:
+        ipa: Raw IPA from epitran (already source-filtered).
+
+    Returns:
+        Cleaned IPA, or ``None`` if too short.
+    """
+    # Strip leaked Devanagari
+    ipa = _DEVANAGARI_RE.sub("", ipa)
+
+    # Word-final schwa deletion
+    ipa = _HINDI_FINAL_SCHWA_RE.sub("", ipa)
+
+    ipa = " ".join(ipa.split()).strip()
+    return ipa if len(ipa) >= 10 else None
+
+
+# ── Arabic IPA post-processing ────────────────────────────────────────
+
+
+_ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]+")
+
+
+def _prefilter_arabic(raw_text: str) -> str | None:
+    """Pre-filter Arabic source text: reject/strip Latin loanwords."""
+    words = raw_text.split()
+    if not words:
+        return None
+
+    native = [w for w in words if not _is_ascii_loanword(w)]
+    if len(native) < len(words) * 0.5:
+        return None
+
+    return " ".join(native)
+
+
+def _postprocess_arabic(ipa: str) -> str | None:
+    """Post-process Arabic IPA: strip leaked Arabic script."""
+    ipa = _ARABIC_RE.sub("", ipa)
+    ipa = " ".join(ipa.split()).strip()
+    return ipa if len(ipa) >= 10 else None
+
+
+# Language → pre-filter and post-processor dispatch
+_PREFILTERS: dict[str, callable] = {
+    "hin": _prefilter_hindi,
+    "ara": _prefilter_arabic,
+}
+
+_POSTPROCESSORS: dict[str, callable] = {
+    "hin": _postprocess_hindi,
+    "ara": _postprocess_arabic,
+}
+
+
 def _convert_one(sample: tuple[str, str]) -> str | None:
     """Convert a single ``(lang, text)`` to IPA.  Module-level for pickling."""
     # Each worker gets its own converter (epitran is not thread-safe)
     global _worker_converter  # noqa: PLW0603
     if "_worker_converter" not in globals() or _worker_converter is None:
         _worker_converter = IPAConverter(drop_unconvertible=True)
-    ipa = _worker_converter.convert_line(sample[0], sample[1])
+    lang, text = sample
+    # Pre-filter (strip loanwords, reject code-mixed lines)
+    prefilter = _PREFILTERS.get(lang)
+    if prefilter is not None:
+        text = prefilter(text)
+        if text is None:
+            return None
+    ipa = _worker_converter.convert_line(lang, text)
     if not ipa:
         return None
+    # Post-process (strip leaked script, schwa deletion)
+    postprocess = _POSTPROCESSORS.get(lang)
+    if postprocess is not None:
+        ipa = postprocess(ipa)
+        if ipa is None:
+            return None
     ipa = _clean_ipa(ipa)
     if len(ipa) >= 10:
         return ipa
@@ -195,12 +334,25 @@ def _convert_one_labeled(sample: tuple[str, str]) -> tuple[str, str] | None:
     global _worker_converter  # noqa: PLW0603
     if "_worker_converter" not in globals() or _worker_converter is None:
         _worker_converter = IPAConverter(drop_unconvertible=True)
-    ipa = _worker_converter.convert_line(sample[0], sample[1])
+    lang, text = sample
+    # Pre-filter (strip loanwords, reject code-mixed lines)
+    prefilter = _PREFILTERS.get(lang)
+    if prefilter is not None:
+        text = prefilter(text)
+        if text is None:
+            return None
+    ipa = _worker_converter.convert_line(lang, text)
     if not ipa:
         return None
+    # Post-process (strip leaked script, schwa deletion)
+    postprocess = _POSTPROCESSORS.get(lang)
+    if postprocess is not None:
+        ipa = postprocess(ipa)
+        if ipa is None:
+            return None
     ipa = _clean_ipa(ipa)
     if len(ipa) >= 10:
-        return (sample[0], ipa)
+        return (lang, ipa)
     return None
 
 
