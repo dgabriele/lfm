@@ -157,7 +157,11 @@ class VAEPretrainConfig(LFMBaseConfig):
     # embeddings with this probability during training.  Forces the decoder
     # to rely on z for reconstruction instead of the teacher-forced input
     # highway, preventing the encoder from driving logvar → -∞.
-    word_dropout: float = 0.5
+    # Annealed linearly from word_dropout to word_dropout_min over
+    # word_dropout_anneal_epochs epochs.
+    word_dropout: float = 0.3
+    word_dropout_min: float = 0.05
+    word_dropout_anneal_epochs: int = 20
 
     # DIP-VAE off-diagonal covariance penalty: encourages z dimensions
     # to be statistically independent (disentangled).  Penalizes pairwise
@@ -279,6 +283,7 @@ def _load_corpus_lines(cfg: VAEPretrainConfig) -> list[str]:
 def _sanitize_one(sample: tuple[str, str]) -> tuple[str, str] | None:
     """Sanitize a single ``(lang, text)`` sample.  Returns ``None`` to drop."""
     import re
+    import unicodedata
 
     from cleantext import clean
 
@@ -307,7 +312,13 @@ def _sanitize_one(sample: tuple[str, str]) -> tuple[str, str] | None:
 
     if not line or len(line) < 20:
         return None
-    alpha_ratio = sum(c.isalpha() for c in line) / max(len(line), 1)
+    # Count letters + combining marks (covers Devanagari matras,
+    # Arabic diacritics, Korean jamo — all valid linguistic content).
+    _ling_chars = sum(
+        1 for c in line
+        if c.isalpha() or unicodedata.category(c).startswith("M")
+    )
+    alpha_ratio = _ling_chars / max(len(line), 1)
     if alpha_ratio < 0.7:
         return None
     return (lang, line)
@@ -439,6 +450,7 @@ def _vae_forward(
     _cfg: object | None = None,
     _attn_pool_query: Tensor | None = None,
     scheduled_sampling_p: float = 0.0,
+    _word_dropout_p: float = 0.0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Run one VAE forward pass with optional scheduled sampling.
 
@@ -511,12 +523,8 @@ def _vae_forward(
             seq_len, device=device
         )
 
-    # Word dropout rate (0 at eval, configured at train)
-    _word_drop_p = (
-        getattr(_cfg, "word_dropout", 0.0)
-        if _cfg is not None and dec_token_embedding.training
-        else 0.0
-    )
+    # Word dropout rate (0 at eval, passed in from training loop)
+    _word_drop_p = _word_dropout_p if dec_token_embedding.training else 0.0
 
     def _run_decoder(input_ids: Tensor) -> Tensor:
         if isinstance(decoder, LinguisticDecoder):
@@ -1008,6 +1016,13 @@ class VAEPretrainer:
         z_stats_momentum = 0.01
 
         for epoch in range(start_epoch, cfg.num_epochs):
+            # -- Word dropout: anneal from word_dropout to word_dropout_min --
+            if cfg.word_dropout > 0 and cfg.word_dropout_anneal_epochs > 0:
+                wd_frac = min(epoch / cfg.word_dropout_anneal_epochs, 1.0)
+                wd_p = cfg.word_dropout + wd_frac * (cfg.word_dropout_min - cfg.word_dropout)
+            else:
+                wd_p = cfg.word_dropout
+
             # -- Scheduled sampling: anneal from 0 to target --
             ss_p = 0.0
             if (
@@ -1054,6 +1069,7 @@ class VAEPretrainer:
                             kl_free_bits=cfg.kl_free_bits,
                             compute_kl=_do_kl,
                             scheduled_sampling_p=ss_p,
+                            _word_dropout_p=wd_p,
                             **modules,
                         )
                     )
@@ -1375,6 +1391,8 @@ class VAEPretrainer:
             )
             if ss_p > 0:
                 epoch_parts.append(f"ss={ss_p:.2f}")
+            if wd_p > 0:
+                epoch_parts.append(f"wd={wd_p:.2f}")
             if _do_kl and all_kl_per_dim:
                 kl_cat = torch.cat(all_kl_per_dim, dim=0)
                 mean_kl_per_dim = kl_cat.mean(dim=0)
