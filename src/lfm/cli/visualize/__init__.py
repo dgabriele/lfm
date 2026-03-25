@@ -92,7 +92,8 @@ def register_visualize_group(
     from lfm.cli.visualize.adaptiveness import AdaptivenessCommand
     from lfm.cli.visualize.all import AllCommand
 
-    commands = [
+    # Commands that use shared checkpoint arguments
+    checkpoint_commands = [
         TSNECommand(),
         ClusteringCommand(),
         AttentionCommand(),
@@ -106,13 +107,29 @@ def register_visualize_group(
         AllCommand(),
     ]
 
-    for cmd in commands:
+    for cmd in checkpoint_commands:
         sub = viz_subparsers.add_parser(
             cmd.name,
             help=cmd.help,
             description=cmd.description,
         )
         _add_shared_arguments(sub)
+        cmd.add_arguments(sub)
+        sub.set_defaults(command_handler=cmd)
+
+    # Commands with their own argument sets (no shared checkpoint args)
+    from lfm.cli.visualize.translation import TranslationCommand
+
+    standalone_commands = [
+        TranslationCommand(),
+    ]
+
+    for cmd in standalone_commands:
+        sub = viz_subparsers.add_parser(
+            cmd.name,
+            help=cmd.help,
+            description=cmd.description,
+        )
         cmd.add_arguments(sub)
         sub.set_defaults(command_handler=cmd)
 

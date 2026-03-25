@@ -24,7 +24,9 @@ Usage::
 
 from __future__ import annotations
 
+import atexit
 import logging
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -914,6 +916,34 @@ class VAEPretrainer:
             spm_hash=current_spm_hash,
         )
 
+        # -- Graceful shutdown: save history on SIGTERM/SIGINT/atexit --
+        _session_ended = False
+        # Mutable state container so signal/atexit handlers see latest values.
+        _shutdown_state: dict[str, Any] = {
+            "epoch": start_epoch,
+            "best_val_loss": best_val_loss,
+        }
+
+        def _end_session_once() -> None:
+            nonlocal _session_ended
+            if _session_ended:
+                return
+            _session_ended = True
+            history.end_session(
+                end_epoch=_shutdown_state["epoch"],
+                best_val_loss=_shutdown_state["best_val_loss"],
+            )
+
+        def _signal_handler(signum: int, frame: Any) -> None:
+            _end_session_once()
+            # Re-raise with default handler so exit code reflects the signal.
+            signal.signal(signum, signal.SIG_DFL)
+            signal.raise_signal(signum)
+
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
+        atexit.register(_end_session_once)
+
         # 8. Training loop
         accum = cfg.gradient_accumulation_steps
         log_every = 50  # log every N batches
@@ -1653,6 +1683,8 @@ class VAEPretrainer:
             scheduler.step()
 
             # Update training history
+            _shutdown_state["epoch"] = epoch + 1
+            _shutdown_state["best_val_loss"] = best_val_loss
             history.update_epoch(epoch + 1, best_val_loss)
 
             # Save full training state for resume (every epoch)
@@ -1675,10 +1707,10 @@ class VAEPretrainer:
                 resume_path,
             )
 
-        history.end_session(
-            end_epoch=epoch + 1 if epoch >= start_epoch else start_epoch,
-            best_val_loss=best_val_loss,
-        )
+        _shutdown_state["epoch"] = epoch + 1 if epoch >= start_epoch else start_epoch
+        _shutdown_state["best_val_loss"] = best_val_loss
+        _end_session_once()
+        atexit.unregister(_end_session_once)
         return best_metrics
 
     @staticmethod

@@ -150,4 +150,21 @@ class VisualizationSuite:
         except Exception:
             logger.exception("adaptiveness failed")
 
+        # Phase 6: Translation evaluation (standalone — reads from results dir)
+        try:
+            translator_dir = Path("data/models/v1/translator")
+            if (translator_dir / "results.json").exists():
+                from lfm.visualize.translation import TranslationVisualization
+
+                logger.info("Running: translation")
+                viz = TranslationVisualization(
+                    results_dir=translator_dir,
+                    output_dir=Path(self.config.output_dir),
+                    fmt=self.config.format,
+                    dpi=self.config.dpi,
+                )
+                all_paths.extend(viz.generate_all())
+        except Exception:
+            logger.exception("translation visualization failed")
+
         return all_paths

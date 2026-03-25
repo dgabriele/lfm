@@ -56,6 +56,14 @@ src/lfm/
       interpolation.py  # lfm visualize interpolation
       zipf.py           # lfm visualize zipf
       all.py            # lfm visualize all
+      translation.py    # lfm visualize translation
+    translate.py        # lfm translate {generate-pairs,train,eval}
+  translator/           # IPA -> English translation module
+    config.py           # PairGenerationConfig, TranslatorConfig
+    dataset.py          # IPATranslationDataset
+    pairs.py            # PairGenerator (embeddings -> faculty -> pairs)
+    trainer.py          # TranslatorTrainer (fine-tune causal LM)
+    evaluator.py        # TranslatorEvaluator (BLEU + semantic similarity)
   visualize/            # Visualization computation + rendering
     config.py           # VisualizeConfig (Pydantic)
     loader.py           # VAE model loading + corpus z-encoding
@@ -69,6 +77,7 @@ src/lfm/
     length_dist.py      # Output length histograms
     interpolation.py    # Latent interpolation trajectories
     zipf.py             # Token frequency / Zipf law analysis
+    translation.py      # Translation eval viz (BLEU, similarity, examples)
   data/                 # CorpusDataset, collation, loaders
     loaders/            # Leipzig corpus loader, IPA converter, phonetic distance
   embeddings/           # LLM embedding games, sampler, prefetcher, losses, metrics
@@ -145,12 +154,17 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - `poetry install --with generator` — Install with sentencepiece
 - `poetry install --with viz` — Install with matplotlib/seaborn (visualization)
 - `poetry install --with phonology` — Install with panphon (legacy)
-- `poetry run pytest` — Run tests (61 tests)
+- `poetry install --with translator` — Install with transformers/peft (translation)
+- `poetry run pytest` — Run tests (75 tests)
 - `poetry run ruff check src/` — Lint
 - `poetry run ruff format src/` — Format
 - `poetry run lfm visualize --help` — Show visualization commands
 - `poetry run lfm visualize tsne --checkpoint data/vae_resume.pt` — t-SNE latent space
 - `poetry run lfm visualize all --checkpoint data/vae_resume.pt` — All visualizations
+- `poetry run lfm translate generate-pairs` — Generate (IPA, English) pairs
+- `poetry run lfm translate train` — Train IPA -> English translator
+- `poetry run lfm translate eval --model-dir data/models/v1/translator` — Evaluate translator
+- `poetry run lfm visualize translation --results-dir data/models/v1/translator` — Translation viz
 
 ## Tech Stack
 

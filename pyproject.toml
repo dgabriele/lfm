@@ -40,6 +40,10 @@ sentencepiece = ">=0.2"
 matplotlib = ">=3.8"
 seaborn = ">=0.13"
 
+[tool.poetry.group.translator.dependencies]
+transformers = ">=4.40"
+peft = ">=0.10"
+
 [tool.poetry.scripts]
 lfm = "lfm.cli:main"
 
