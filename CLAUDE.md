@@ -58,6 +58,7 @@ src/lfm/
       all.py            # lfm visualize all
       translation.py    # lfm visualize translation
     translate.py        # lfm translate {generate-pairs,train,eval}
+    publish.py          # lfm publish {model,dataset}
   translator/           # IPA -> English translation module
     config.py           # PairGenerationConfig, TranslatorConfig
     dataset.py          # IPATranslationDataset
@@ -78,6 +79,10 @@ src/lfm/
     interpolation.py    # Latent interpolation trajectories
     zipf.py             # Token frequency / Zipf law analysis
     translation.py      # Translation eval viz (BLEU, similarity, examples)
+  publish/              # HuggingFace Hub publishing
+    base.py             # HFPublisher ABC, ReleaseManifest
+    model.py            # ModelRelease (decoder checkpoint)
+    dataset.py          # DatasetRelease (IPA corpus)
   data/                 # CorpusDataset, collation, loaders
     loaders/            # Leipzig corpus loader, IPA converter, phonetic distance
   embeddings/           # LLM embedding games, sampler, prefetcher, losses, metrics
@@ -155,6 +160,7 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - `poetry install --with viz` — Install with matplotlib/seaborn (visualization)
 - `poetry install --with phonology` — Install with panphon (legacy)
 - `poetry install --with translator` — Install with transformers/peft (translation)
+- `poetry install --with publish` — Install with huggingface-hub (publishing)
 - `poetry run pytest` — Run tests (75 tests)
 - `poetry run ruff check src/` — Lint
 - `poetry run ruff format src/` — Format
@@ -165,6 +171,8 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - `poetry run lfm translate train` — Train IPA -> English translator
 - `poetry run lfm translate eval --model-dir data/models/v1/translator` — Evaluate translator
 - `poetry run lfm visualize translation --results-dir data/models/v1/translator` — Translation viz
+- `poetry run lfm publish model --repo-id user/lfm-decoder-v1` — Publish decoder to HuggingFace
+- `poetry run lfm publish dataset --repo-id user/lfm-ipa-16lang` — Publish IPA corpus to HuggingFace
 
 ## Tech Stack
 
@@ -177,6 +185,7 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - epitran (IPA transcription)
 - clean-text (corpus sanitization)
 - matplotlib + seaborn (visualization)
+- huggingface-hub (model/dataset publishing)
 
 ## Quick Start
 

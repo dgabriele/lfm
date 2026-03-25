@@ -449,6 +449,22 @@ The referential game demonstrates that the linguistic bottleneck carries discrim
 | `scripts/eval_compositionality.py` | Compositionality metrics (topsim, disentanglement, diagnostic probes) |
 | `scripts/train_translator.py` | LLM translation pilot — fine-tune a small LM on IPA -> English |
 
+## Publishing to HuggingFace
+
+Pretrained models and datasets can be published to HuggingFace Hub with auto-generated cards and release manifests:
+
+```bash
+poetry install --with publish
+
+# Publish the pretrained decoder
+lfm publish model --repo-id username/lfm-decoder-v1 --model-dir data/models/v1
+
+# Publish the IPA corpus
+lfm publish dataset --repo-id username/lfm-ipa-16lang --model-dir data/models/v1
+```
+
+Each upload generates a YAML manifest in `releases/huggingface/` recording the arguments, timestamp, HuggingFace URL, and files uploaded. Model cards and dataset cards are auto-generated from checkpoint metadata and corpus statistics.
+
 ## Further Reading
 
 - **[Translation Guide](docs/translation-guide.md)** — Self-supervised IPA -> English translation: generate pairs, train, evaluate, and visualize the interpretability pipeline.
