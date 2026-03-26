@@ -316,15 +316,7 @@ class MultilingualVAEGenerator(GeneratorModule):
             z_q, _, _ = vq(z)
 
         alpha = self.config.vq_residual_alpha
-        residual = z - z_q
-        # Clip residual norm to the encoder's trained scale so the
-        # decoder always sees z within its trained manifold.
-        max_residual_norm = self._z_std.norm().item() * 2  # 2× encoder z_std
-        residual_norm = residual.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-        residual = residual * (
-            residual_norm.clamp(max=max_residual_norm) / residual_norm
-        )
-        return z_q + alpha * residual
+        return z_q + alpha * (z - z_q)
 
     def _load_pretrained_decoder(self, path: str) -> None:
         """Load pretrained VAE decoder weights from a checkpoint.
