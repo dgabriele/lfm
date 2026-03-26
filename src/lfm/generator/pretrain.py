@@ -1870,4 +1870,15 @@ def pretrain_vae_decoder(config: VAEPretrainConfig) -> dict[str, float]:
         Metrics dict with ``train_loss``, ``val_loss``,
         ``active_latent_dims``, and ``num_samples``.
     """
+    # Ensure logging is configured (no-op if already set up by caller).
+    # force=False avoids overriding existing handlers; the handler flushes
+    # after every record so output appears immediately when piped.
+    if not logging.root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(name)s %(message)s")
+        )
+        handler.setLevel(logging.INFO)
+        logging.root.addHandler(handler)
+        logging.root.setLevel(logging.INFO)
     return VAEPretrainer(config).pretrain()
