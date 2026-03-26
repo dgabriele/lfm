@@ -108,9 +108,9 @@ def _load_resume_checkpoint(
         from lfm.generator.layers import multiscale_causal_mask
 
         head_dim = hidden // cfg.decoder_num_heads
-        rope_freqs = precompute_rope_freqs(head_dim, cfg.max_seq_len, device=device)
+        rope_freqs = precompute_rope_freqs(head_dim, cfg.max_seq_len + 1, device=device)
         cached_mask = multiscale_causal_mask(
-            cfg.max_seq_len,
+            cfg.max_seq_len + 1,
             num_heads=cfg.decoder_num_heads,
             head_windows=cfg.attention_head_windows,
             global_every=cfg.attention_global_every,
@@ -175,9 +175,9 @@ def _load_decoder_checkpoint(
     output_head.load_state_dict(ckpt["output_head"])
 
     head_dim = hidden // num_heads
-    rope_freqs = precompute_rope_freqs(head_dim, max_seq_len, device=device)
+    rope_freqs = precompute_rope_freqs(head_dim, max_seq_len + 1, device=device)
     cached_mask = multiscale_causal_mask(
-        max_seq_len,
+        max_seq_len + 1,
         num_heads=num_heads,
         head_windows=cfg.attention_head_windows,
         global_every=cfg.attention_global_every,

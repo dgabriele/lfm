@@ -2242,12 +2242,12 @@ class VAEPretrainer:
         if cfg.use_rope:
             head_dim = hidden // cfg.decoder_num_heads
             rope_freqs = precompute_rope_freqs(
-                head_dim, cfg.max_seq_len, device=device
+                head_dim, cfg.max_seq_len + 1, device=device
             )
 
-        # Precompute multi-scale causal mask (constant for fixed seq_len)
+        # Precompute multi-scale causal mask (+1 for BOS in KV-cached decode)
         cached_mask = multiscale_causal_mask(
-            cfg.max_seq_len,
+            cfg.max_seq_len + 1,
             num_heads=cfg.decoder_num_heads,
             head_windows=cfg.attention_head_windows,
             global_every=cfg.attention_global_every,
