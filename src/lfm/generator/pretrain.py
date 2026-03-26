@@ -1834,7 +1834,11 @@ class VAEPretrainer:
                     denom = lengths.unsqueeze(-1).float().clamp(min=1)
                     pooled = masked.sum(dim=1) / denom
                     h = modules["enc_to_latent"](pooled)
-                    mu, _ = h.chunk(2, dim=-1)
+                    if cfg.use_vq and modules.get("_residual_vq") is not None:
+                        # VQ mode: h is the continuous z, quantize it
+                        mu, _, _ = modules["_residual_vq"](h)
+                    else:
+                        mu, _ = h.chunk(2, dim=-1)
                     return mu  # deterministic at eval
 
                 # Fixed seed per epoch for reproducible sampling
@@ -1901,6 +1905,8 @@ class VAEPretrainer:
                 z_interp = torch.stack(
                     [z_real[0] * (1 - a) + z_real[1] * a for a in alphas]
                 )
+                if cfg.use_vq and modules.get("_residual_vq") is not None:
+                    z_interp, _, _ = modules["_residual_vq"](z_interp)
                 interp_texts = _sample_decode(z_interp)
                 logger.info(
                     "  interp: %s → %s", _lang_labels[0], _lang_labels[1]
@@ -1914,6 +1920,8 @@ class VAEPretrainer:
                     [z_real[0] + s * z_running_std * torch.randn_like(z_real[0])
                      for s in noise_scales]
                 )
+                if cfg.use_vq and modules.get("_residual_vq") is not None:
+                    z_perturbed, _, _ = modules["_residual_vq"](z_perturbed)
                 perturb_texts = _sample_decode(z_perturbed)
                 logger.info("  perturb: around %s sentence", _lang_labels[0])
                 for k, (s, txt) in enumerate(zip(noise_scales, perturb_texts)):
@@ -1932,6 +1940,8 @@ class VAEPretrainer:
                     z_real[0] + 0.3 * z_running_std * torch.randn_like(z_real[0]),
                 ])
                 z_all_random = torch.cat([z_random, z_near_eng], dim=0)
+                if cfg.use_vq and modules.get("_residual_vq") is not None:
+                    z_all_random, _, _ = modules["_residual_vq"](z_all_random)
                 random_texts = _sample_decode(z_all_random)
                 for j in range(3):
                     logger.info("  random[%d]: %s", j, random_texts[j][:120])
@@ -1947,6 +1957,8 @@ class VAEPretrainer:
                     torch.randn(32, cfg.latent_dim, device=device)
                     * z_running_std + z_running_mean
                 )
+                if cfg.use_vq and modules.get("_residual_vq") is not None:
+                    z_length_test, _, _ = modules["_residual_vq"](z_length_test)
                 length_texts = _sample_decode(z_length_test)
                 word_counts = [len(t.split()) for t in length_texts]
                 char_counts = [len(t) for t in length_texts]
