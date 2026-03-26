@@ -220,6 +220,8 @@ class VAEPretrainConfig(LFMBaseConfig):
     vq_num_groups: int = 8    # for grouped mode
     vq_codebook_size: int = 512
     vq_commitment_weight: float = 0.25
+    vq_entropy_weight: float = 0.1
+    vq_balance_weight: float = 0.1
     vq_ema_update: bool = True
     vq_decay: float = 0.99
 
@@ -1534,7 +1536,9 @@ class VAEPretrainer:
                         rvq = modules["_residual_vq"]
                         util = rvq.utilization
                         util_str = "/".join(f"{u:.0%}" for u in util)
-                        extra_parts.append(f"cb_util={util_str}")
+                        extra_parts.append(f"util={util_str}")
+                        if hasattr(rvq, "_last_balance_loss"):
+                            extra_parts.append(f"bal={rvq._last_balance_loss:.3f}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
                         extra_parts.append(
                             f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
@@ -2179,6 +2183,8 @@ class VAEPretrainer:
                     codebook_size=cfg.vq_codebook_size,
                     embedding_dim=cfg.latent_dim,
                     commitment_weight=cfg.vq_commitment_weight,
+                    entropy_weight=cfg.vq_entropy_weight,
+                    balance_weight=cfg.vq_balance_weight,
                     ema_update=cfg.vq_ema_update,
                     ema_decay=cfg.vq_decay,
                 ).to(device)
@@ -2190,6 +2196,7 @@ class VAEPretrainer:
                     codebook_size=cfg.vq_codebook_size,
                     embedding_dim=cfg.latent_dim,
                     commitment_weight=cfg.vq_commitment_weight,
+                    entropy_weight=cfg.vq_entropy_weight,
                     ema_update=cfg.vq_ema_update,
                     ema_decay=cfg.vq_decay,
                 ).to(device)

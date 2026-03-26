@@ -84,5 +84,7 @@ class GeneratorConfig(LFMBaseConfig):
     vq_num_groups: int = 8    # for grouped mode
     vq_codebook_size: int = 512
     vq_commitment_weight: float = 0.25
+    vq_entropy_weight: float = 0.1
+    vq_balance_weight: float = 0.1
     vq_ema_update: bool = True
     vq_decay: float = 0.99

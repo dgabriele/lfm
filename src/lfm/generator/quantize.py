@@ -36,6 +36,8 @@ class VectorQuantizer(nn.Module):
         codebook_size: int,
         embedding_dim: int,
         commitment_weight: float = 0.25,
+        entropy_weight: float = 0.1,
+        orthogonality_weight: float = 0.0,
         ema_update: bool = True,
         ema_decay: float = 0.99,
         epsilon: float = 1e-5,
@@ -44,6 +46,8 @@ class VectorQuantizer(nn.Module):
         self.codebook_size = codebook_size
         self.embedding_dim = embedding_dim
         self.commitment_weight = commitment_weight
+        self.entropy_weight = entropy_weight
+        self.orthogonality_weight = orthogonality_weight
         self.ema_update = ema_update
         self.ema_decay = ema_decay
         self.epsilon = epsilon
@@ -62,6 +66,32 @@ class VectorQuantizer(nn.Module):
             self.register_buffer(
                 "_ema_embedding_sum", self.embedding.weight.data.clone(),
             )
+
+    def _entropy_loss(self, indices: Tensor) -> Tensor:
+        """Negative entropy of codebook usage distribution in this batch.
+
+        Maximizing entropy = encouraging uniform code usage.  Returns
+        the negative entropy so it can be *minimized* as a loss term.
+
+        Args:
+            indices: ``(batch,)`` assigned codebook indices.
+
+        Returns:
+            Scalar: ``-H(p)`` where p is the empirical usage distribution.
+        """
+        # Empirical distribution from batch assignments
+        counts = torch.zeros(
+            self.codebook_size, device=indices.device, dtype=torch.float,
+        )
+        counts.scatter_add_(0, indices, torch.ones_like(indices, dtype=torch.float))
+        probs = counts / counts.sum().clamp(min=1)
+        # Entropy: H = -sum(p * log(p)), skip zeros
+        log_probs = torch.where(probs > 0, probs.log(), torch.zeros_like(probs))
+        entropy = -(probs * log_probs).sum()
+        # Return negative entropy (minimize this = maximize entropy)
+        # Normalize by max entropy (log K) so the loss is in [0, 1]
+        max_entropy = torch.tensor(self.codebook_size, dtype=torch.float).log()
+        return 1.0 - entropy / max_entropy
 
     def forward(self, z: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Quantize input vectors to nearest codebook entries.
@@ -125,11 +155,33 @@ class VectorQuantizer(nn.Module):
                     self._ema_embedding_sum / smoothed.unsqueeze(1)
                 )
 
+        # Entropy regularization: encourage uniform codebook usage
+        entropy_loss = (
+            self._entropy_loss(indices) if self.entropy_weight > 0
+            else torch.tensor(0.0, device=z.device)
+        )
+
         # Straight-through estimator: forward uses quantized,
         # backward passes gradient to z as if quantized == z
         quantized = z + (quantized - z).detach()
 
-        return quantized, self.commitment_weight * commitment_loss, indices
+        # Orthogonality loss: encourage codebook entries to be distinct
+        ortho_loss = torch.tensor(0.0, device=z.device)
+        if self.orthogonality_weight > 0:
+            cb_norm = torch.nn.functional.normalize(
+                self.embedding.weight.float(), dim=-1,
+            )
+            gram = cb_norm @ cb_norm.T
+            # Penalize off-diagonal (similarity between codes)
+            eye = torch.eye(self.codebook_size, device=z.device)
+            ortho_loss = (gram - eye).pow(2).mean()
+
+        total_loss = (
+            self.commitment_weight * commitment_loss
+            + self.entropy_weight * entropy_loss
+            + self.orthogonality_weight * ortho_loss
+        )
+        return quantized, total_loss, indices
 
     def reset_dead_codes(self, threshold: float = 1.0, epsilon: float = 0.01) -> int:
         """Replace dead codebook entries by splitting high-usage codes.
@@ -242,6 +294,7 @@ class ResidualVQ(nn.Module):
         codebook_size: Entries per codebook (K).
         embedding_dim: Dimension of each entry (D = latent_dim).
         commitment_weight: Per-level commitment loss weight.
+        entropy_weight: Per-level entropy regularization weight.
         ema_update: Use EMA codebook updates.
         ema_decay: EMA decay rate.
     """
@@ -252,6 +305,7 @@ class ResidualVQ(nn.Module):
         codebook_size: int = 512,
         embedding_dim: int = 256,
         commitment_weight: float = 0.25,
+        entropy_weight: float = 0.1,
         ema_update: bool = True,
         ema_decay: float = 0.99,
     ) -> None:
@@ -265,6 +319,7 @@ class ResidualVQ(nn.Module):
                 codebook_size=codebook_size,
                 embedding_dim=embedding_dim,
                 commitment_weight=commitment_weight,
+                entropy_weight=entropy_weight,
                 ema_update=ema_update,
                 ema_decay=ema_decay,
             )
@@ -421,6 +476,8 @@ class GroupedVQ(nn.Module):
         codebook_size: int = 64,
         embedding_dim: int = 256,
         commitment_weight: float = 0.25,
+        entropy_weight: float = 0.1,
+        balance_weight: float = 0.1,
         ema_update: bool = True,
         ema_decay: float = 0.99,
     ) -> None:
@@ -436,12 +493,14 @@ class GroupedVQ(nn.Module):
         self.codebook_size = codebook_size
         self.embedding_dim = embedding_dim
         self.group_dim = embedding_dim // num_groups
+        self.balance_weight = balance_weight
 
         self.groups = nn.ModuleList([
             VectorQuantizer(
                 codebook_size=codebook_size,
                 embedding_dim=self.group_dim,
                 commitment_weight=commitment_weight,
+                entropy_weight=entropy_weight,
                 ema_update=ema_update,
                 ema_decay=ema_decay,
             )
@@ -488,6 +547,19 @@ class GroupedVQ(nn.Module):
                     self._usage_total += indices_g.size(0)
 
         quantized = torch.cat(quantized_parts, dim=-1)  # (B, embedding_dim)
+
+        # Balance loss: encourage each group to explain similar variance.
+        balance_loss = torch.tensor(0.0, device=z.device)
+        if self.balance_weight > 0 and len(quantized_parts) > 1:
+            group_norms = torch.stack([
+                qp.detach().norm(dim=-1).mean() for qp in quantized_parts
+            ])
+            balance_loss = group_norms.std() / group_norms.mean().clamp(min=1e-6)
+            total_loss = total_loss + self.balance_weight * balance_loss
+
+        # Store components for logging
+        self._last_balance_loss = balance_loss.item()
+
         return quantized, total_loss, all_indices
 
     def encode(self, z: Tensor) -> list[Tensor]:

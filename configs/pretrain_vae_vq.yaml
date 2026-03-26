@@ -32,6 +32,8 @@ vq_mode: grouped
 vq_num_groups: 8
 vq_codebook_size: 64
 vq_commitment_weight: 0.25
+vq_entropy_weight: 0.1
+vq_balance_weight: 0.1
 vq_ema_update: true
 vq_decay: 0.99
 
