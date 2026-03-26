@@ -76,3 +76,11 @@ class GeneratorConfig(LFMBaseConfig):
     pretrained_decoder_path: str | None = None
     spm_model_path: str | None = None
     freeze_decoder: bool = True
+
+    # Vector Quantization (VQ-VAE mode)
+    use_vq: bool = False
+    vq_num_levels: int = 4
+    vq_codebook_size: int = 512
+    vq_commitment_weight: float = 0.25
+    vq_ema_update: bool = True
+    vq_decay: float = 0.99

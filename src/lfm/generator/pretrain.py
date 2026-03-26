@@ -208,11 +208,18 @@ class VAEPretrainConfig(LFMBaseConfig):
     kl_beta: float = 0.0
 
     # Phonetic embedding initialization and label smoothing.
-    # Uses PanPhon articulatory features to give phonetically similar
-    # tokens similar embeddings and partial credit during training.
     phonetic_init: bool = True
     phonetic_init_scale: float = 0.5
     phonetic_label_smoothing: float = 0.1
+
+    # Vector Quantization (VQ-VAE mode).
+    # Replaces continuous Gaussian latent with discrete codebook.
+    use_vq: bool = False
+    vq_num_levels: int = 4
+    vq_codebook_size: int = 512
+    vq_commitment_weight: float = 0.25
+    vq_ema_update: bool = True
+    vq_decay: float = 0.99
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +486,8 @@ def _vae_forward(
     _word_dropout_p: float = 0.0,
     _phonetic_sim: Tensor | None = None,
     _phonetic_smoothing: float = 0.0,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    _residual_vq: nn.Module | None = None,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None]:
     """Run one VAE forward pass with optional scheduled sampling.
 
     When ``scheduled_sampling_p > 0``, a two-pass approach is used:
@@ -491,7 +499,7 @@ def _vae_forward(
     at long sequence lengths.
 
     Returns:
-        Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden, mu, logvar)``.
+        Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden, mu, logvar, vq_loss)``.
     """
     from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
 
@@ -524,10 +532,19 @@ def _vae_forward(
         pooled = enc_masked.sum(dim=1) / denom
 
     # Latent
-    h = enc_to_latent(pooled)
-    mu, logvar = h.chunk(2, dim=-1)
-    std = (0.5 * logvar).exp()
-    z = mu + std * torch.randn_like(std)
+    if _residual_vq is not None:
+        # VQ-VAE path: deterministic encoding → discrete quantization
+        z_continuous = enc_to_latent(pooled)  # (B, latent_dim)
+        z, vq_commitment_loss, _vq_indices = _residual_vq(z_continuous)
+        mu = z_continuous
+        logvar = torch.zeros_like(z_continuous)
+    else:
+        # Standard VAE path
+        h = enc_to_latent(pooled)
+        mu, logvar = h.chunk(2, dim=-1)
+        std = (0.5 * logvar).exp()
+        z = mu + std * torch.randn_like(std)
+        vq_commitment_loss = None
 
     # Decode
     memory = latent_to_decoder(z).unsqueeze(1)
@@ -640,8 +657,11 @@ def _vae_forward(
 
     ce_loss = (ce * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
 
-    # KL loss (skipped when kl_weight=0)
-    if compute_kl:
+    # KL loss (skipped in VQ mode or when kl_weight=0)
+    if _residual_vq is not None:
+        kl_per_dim = torch.zeros(b, mu.size(-1), device=device)
+        kl_loss = torch.tensor(0.0, device=device)
+    elif compute_kl:
         kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
         if kl_free_bits > 0:
             kl_per_dim = torch.clamp(kl_per_dim, min=kl_free_bits)
@@ -650,7 +670,7 @@ def _vae_forward(
         kl_per_dim = torch.zeros(b, mu.size(-1), device=device)
         kl_loss = torch.tensor(0.0, device=device)
 
-    return ce_loss, kl_loss, kl_per_dim, z, dec_out, mu, logvar
+    return ce_loss, kl_loss, kl_per_dim, z, dec_out, mu, logvar, vq_commitment_loss
 
 
 # ---------------------------------------------------------------------------
@@ -1076,6 +1096,9 @@ class VAEPretrainer:
             # scaler.load_state_dict(ckpt["scaler"])
             if "scheduler" in ckpt:
                 scheduler.load_state_dict(ckpt["scheduler"])
+            if modules.get("_residual_vq") is not None and "residual_vq" in ckpt:
+                modules["_residual_vq"].load_state_dict(ckpt["residual_vq"])
+                logger.info("Restored ResidualVQ codebooks from checkpoint")
             start_epoch = ckpt["epoch"]
             global_step = ckpt["global_step"]
             best_val_loss = ckpt["best_val_loss"]
@@ -1195,6 +1218,7 @@ class VAEPretrainer:
             train_dip_sum = 0.0
             train_cl_sum = 0.0
             train_klb_sum = 0.0
+            train_vq_sum = 0.0
             train_acc_correct = 0
             train_acc_total = 0
             train_count = 0
@@ -1218,7 +1242,8 @@ class VAEPretrainer:
                 ):
                     _do_kl = cfg.kl_weight > 0 or cfg.kl_beta > 0
                     (ce_loss, kl_loss, kl_per_dim_train,
-                     z_batch, dec_hidden, mu_batch, logvar_batch) = (
+                     z_batch, dec_hidden, mu_batch, logvar_batch,
+                     vq_loss_batch) = (
                         _vae_forward(
                             batch_tokens,
                             batch_lengths,
@@ -1285,8 +1310,14 @@ class VAEPretrainer:
                         raw_kl = 0.5 * (mu_batch.pow(2) + logvar_batch.exp() - 1 - logvar_batch)
                         kl_beta_loss = raw_kl.sum(dim=-1).mean()
 
+                    vq_loss = (
+                        vq_loss_batch if vq_loss_batch is not None
+                        else torch.tensor(0.0, device=device)
+                    )
+
                     loss = (
                         ce_loss + kl_scale * kl_loss
+                        + vq_loss
                         + cfg.z_var_weight * z_var_loss
                         + cfg.dip_weight * dip_loss
                         + cfg.contrastive_weight * cl_loss
@@ -1451,6 +1482,7 @@ class VAEPretrainer:
                 train_dip_sum += dip_loss.item() * b
                 train_cl_sum += cl_loss.item() * b
                 train_klb_sum += kl_beta_loss.item() * b
+                train_vq_sum += vq_loss.item() * b
                 train_acc_correct += _correct
                 train_acc_total += _total
                 train_count += b
@@ -1495,6 +1527,8 @@ class VAEPretrainer:
                         extra_parts.append(f"CL={cl_loss.item():.4f}")
                     if cfg.kl_beta > 0:
                         extra_parts.append(f"KLβ={kl_beta_loss.item():.4f}")
+                    if cfg.use_vq:
+                        extra_parts.append(f"VQ={vq_loss.item():.4f}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
                         extra_parts.append(
                             f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
@@ -1521,6 +1555,7 @@ class VAEPretrainer:
             train_dip = train_dip_sum / max(train_count, 1)
             train_cl = train_cl_sum / max(train_count, 1)
             train_klb = train_klb_sum / max(train_count, 1)
+            train_vq = train_vq_sum / max(train_count, 1)
             train_loss = (
                 train_ce + cfg.kl_weight * train_kl
                 + cfg.z_var_weight * train_zvar + cfg.dip_weight * train_dip
@@ -1548,7 +1583,7 @@ class VAEPretrainer:
                     with torch.amp.autocast(
                         device_type=device.type, enabled=cfg.use_amp
                     ):
-                        ce_loss, kl_loss, kl_per_dim, _, _, _, _ = _vae_forward(
+                        ce_loss, kl_loss, kl_per_dim, _, _, _, _, _ = _vae_forward(
                             batch_tokens,
                             batch_lengths,
                             bos_id=bos_id,
@@ -1582,6 +1617,8 @@ class VAEPretrainer:
                 epoch_parts.append(f"CL={train_cl:.4f}")
             if cfg.kl_beta > 0:
                 epoch_parts.append(f"KLβ={train_klb:.4f}")
+            if cfg.use_vq:
+                epoch_parts.append(f"VQ={train_vq:.4f}")
             train_acc = train_acc_correct / max(train_acc_total, 1)
             epoch_parts.append(f"acc={train_acc:.1%}")
             epoch_parts.append(f"total={train_loss:.4f}")
@@ -1629,7 +1666,7 @@ class VAEPretrainer:
                         with torch.amp.autocast(
                             device_type=device.type, enabled=cfg.use_amp,
                         ):
-                            _, _, _, _zb, _, _, _ = _vae_forward(
+                            _, _, _, _zb, _, _, _, _ = _vae_forward(
                                 _dt, _dl, bos_id=bos_id, full_vocab=full_vocab,
                                 kl_free_bits=0.0, compute_kl=False, **modules,
                             )
@@ -1999,6 +2036,11 @@ class VAEPretrainer:
                         "train_loss": train_loss,
                         "val_loss": val_loss,
                         "spm_hash": _file_hash(spm_path),
+                        **({"residual_vq": modules["_residual_vq"].state_dict(),
+                            "use_vq": True,
+                            "vq_num_levels": cfg.vq_num_levels,
+                            "vq_codebook_size": cfg.vq_codebook_size}
+                           if modules.get("_residual_vq") is not None else {}),
                     },
                     output_path,
                 )
@@ -2053,6 +2095,8 @@ class VAEPretrainer:
             }
             if contrastive_proj is not None:
                 _ckpt["contrastive_proj"] = contrastive_proj.state_dict()
+            if modules.get("_residual_vq") is not None:
+                _ckpt["residual_vq"] = modules["_residual_vq"].state_dict()
             torch.save(_ckpt, resume_path)
 
         _shutdown_state["epoch"] = epoch + 1 if epoch >= start_epoch else start_epoch
@@ -2087,7 +2131,6 @@ class VAEPretrainer:
             num_layers=cfg.encoder_num_layers,
             enable_nested_tensor=False,
         ).to(device)
-        enc_to_latent = nn.Linear(hidden, cfg.latent_dim * 2).to(device)
 
         # Decoder (linguistic architecture — must match GeneratorConfig)
         from lfm.generator.layers import (
@@ -2095,6 +2138,24 @@ class VAEPretrainer:
             multiscale_causal_mask,
             precompute_rope_freqs,
         )
+
+        # Encoder → latent: output dim depends on VAE mode
+        if cfg.use_vq:
+            enc_to_latent = nn.Linear(hidden, cfg.latent_dim).to(device)
+
+            from lfm.generator.quantize import ResidualVQ
+
+            residual_vq: nn.Module | None = ResidualVQ(
+                num_levels=cfg.vq_num_levels,
+                codebook_size=cfg.vq_codebook_size,
+                embedding_dim=cfg.latent_dim,
+                commitment_weight=cfg.vq_commitment_weight,
+                ema_update=cfg.vq_ema_update,
+                ema_decay=cfg.vq_decay,
+            ).to(device)
+        else:
+            enc_to_latent = nn.Linear(hidden, cfg.latent_dim * 2).to(device)
+            residual_vq = None
 
         latent_to_decoder = nn.Linear(cfg.latent_dim, hidden).to(device)
         dec_token_embedding = nn.Embedding(full_vocab, hidden).to(device)
@@ -2147,6 +2208,7 @@ class VAEPretrainer:
             "_rope_freqs": rope_freqs,
             "_cached_mask": cached_mask,
             "_cfg": cfg,
+            "_residual_vq": residual_vq,
             "_attn_pool_query": (
                 nn.Parameter(torch.randn(1, 1, hidden) * 0.01).to(device)
                 if cfg.encoder_pooling == "attention" else None

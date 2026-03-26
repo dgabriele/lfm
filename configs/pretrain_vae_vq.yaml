@@ -1,0 +1,76 @@
+# VQ-VAE decoder pretraining config (v3)
+# Residual VQ with 1 level initially (standard VQ-VAE), scalable to 4.
+
+dataset_path: data/datasets/leipzig
+corpus_loader: leipzig
+corpus_loader_config:
+  data_dir: data/leipzig
+
+# Tokenizer
+spm_vocab_size: 8000
+
+# Architecture
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+
+# Linguistic structure
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 96
+encoder_pooling: mean
+
+# Vector Quantization — start with 1 level (standard VQ-VAE)
+use_vq: true
+vq_num_levels: 1
+vq_codebook_size: 1024
+vq_commitment_weight: 0.25
+vq_ema_update: true
+vq_decay: 0.99
+
+# KL/contrastive/phonetic — all disabled in VQ mode
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+kl_beta: 0.0
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+
+# Training
+batch_size: 160
+gradient_accumulation_steps: 1
+use_amp: true
+lr: 0.001
+lr_min: 0.0001
+num_epochs: 40
+
+# Latent regularization — disabled in VQ mode
+z_var_weight: 0.0
+z_var_target: 0.05
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 20
+dip_weight: 0.0
+val_fraction: 0.1
+seed: 42
+device: cuda
+output_path: data/models/v3/vae_decoder.pt
+
+# Adversarial — disabled
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true
