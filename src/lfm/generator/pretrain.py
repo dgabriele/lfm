@@ -1014,6 +1014,9 @@ class VAEPretrainer:
             for k, m in modules.items():
                 if isinstance(m, nn.Module) and k in ckpt["modules"]:
                     m.load_state_dict(ckpt["modules"][k])
+            if contrastive_proj is not None and "contrastive_proj" in ckpt:
+                contrastive_proj.load_state_dict(ckpt["contrastive_proj"])
+                logger.info("Restored contrastive projection from checkpoint")
             optimizer.load_state_dict(ckpt["optimizer"])
             # Skip restoring scaler state — use fresh low-scale init
             # to avoid fp16 overflow from high saved scales.
@@ -1958,25 +1961,25 @@ class VAEPretrainer:
 
             # Save full training state for resume (every epoch)
             resume_path = Path(output_dir) / "vae_resume.pt"
-            torch.save(
-                {
-                    "epoch": epoch + 1,
-                    "global_step": global_step,
-                    "best_val_loss": best_val_loss,
-                    "spm_hash": _file_hash(spm_path),
-                    "z_mean": z_running_mean.cpu(),
-                    "z_std": z_running_std.cpu(),
-                    "modules": {
-                        k: m.state_dict()
-                        for k, m in modules.items()
-                        if isinstance(m, nn.Module)
-                    },
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                    "scaler": scaler.state_dict(),
+            _ckpt = {
+                "epoch": epoch + 1,
+                "global_step": global_step,
+                "best_val_loss": best_val_loss,
+                "spm_hash": _file_hash(spm_path),
+                "z_mean": z_running_mean.cpu(),
+                "z_std": z_running_std.cpu(),
+                "modules": {
+                    k: m.state_dict()
+                    for k, m in modules.items()
+                    if isinstance(m, nn.Module)
                 },
-                resume_path,
-            )
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict(),
+            }
+            if contrastive_proj is not None:
+                _ckpt["contrastive_proj"] = contrastive_proj.state_dict()
+            torch.save(_ckpt, resume_path)
 
         _shutdown_state["epoch"] = epoch + 1 if epoch >= start_epoch else start_epoch
         _shutdown_state["best_val_loss"] = best_val_loss
