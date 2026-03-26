@@ -119,6 +119,7 @@ def main(
     resume: str | None = None,
     vq_codebook_path: str | None = None,
     vq_residual_alpha: float = 1.0,
+    length_cost: float = 0.0,
 ) -> dict[str, float]:
     """Run the REINFORCE referential game.
 
@@ -293,7 +294,13 @@ def main(
         # --- Sender loss (REINFORCE) ---
         with torch.no_grad():
             preds = logits.argmax(dim=1)
-            reward = (preds == target_idx).float()  # 1 if correct, 0 if not
+            correct = (preds == target_idx).float()  # 1 if correct, 0 if not
+            # Length-penalized reward: incentivize accuracy with minimal length.
+            # Simple inputs that can be discriminated with short messages get
+            # higher reward than complex inputs that need long messages.
+            msg_lengths = gen_mask.float().sum(dim=1)  # (B,)
+            max_len = gen_mask.size(1)
+            reward = correct - length_cost * (msg_lengths / max_len)
             # Update baseline
             baseline = baseline_decay * baseline + (1 - baseline_decay) * reward.mean().item()
             advantage = reward - baseline
@@ -391,9 +398,10 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--vq-codebook", default=None, help="Path to VQ codebook")
     parser.add_argument("--vq-alpha", type=float, default=1.0, help="VQ residual alpha (0=discrete, 1=continuous)")
+    parser.add_argument("--length-cost", type=float, default=0.0, help="Length penalty in reward (0=none, 0.5=moderate)")
     args = parser.parse_args()
     main(
         resume=args.resume, steps=args.steps, batch_size=args.batch_size,
         device=args.device, vq_codebook_path=args.vq_codebook,
-        vq_residual_alpha=args.vq_alpha,
+        vq_residual_alpha=args.vq_alpha, length_cost=args.length_cost,
     )
