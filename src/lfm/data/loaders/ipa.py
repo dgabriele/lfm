@@ -390,8 +390,7 @@ def convert_corpus_to_ipa(
         num_workers,
     )
 
-    ctx = mp.get_context("forkserver")
-    with ctx.Pool(num_workers) as pool:
+    with mp.Pool(num_workers) as pool:
         results = pool.map(_convert_one, samples, chunksize=500)
 
     succeeded = [r for r in results if r is not None]
@@ -434,8 +433,7 @@ def convert_corpus_to_ipa_labeled(
         num_workers,
     )
 
-    ctx = mp.get_context("forkserver")
-    with ctx.Pool(num_workers) as pool:
+    with mp.Pool(num_workers) as pool:
         results = pool.map(_convert_one_labeled, samples, chunksize=500)
 
     succeeded = [r for r in results if r is not None]

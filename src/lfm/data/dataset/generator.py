@@ -17,7 +17,7 @@ from lfm.data.dataset.config import DatasetGenerateConfig, ProcessedSample
 from lfm.data.dataset.llm_gate import LLMGatekeeper
 from lfm.data.dataset.manifest import DatasetManifest
 from lfm.data.loaders.base import CorpusLoaderConfig, RawSample
-from lfm.data.sanitize import sanitize_samples_detailed
+from lfm.data.sanitize import _init_worker, _sanitize_one_worker
 
 logger = logging.getLogger(__name__)
 
@@ -129,32 +129,32 @@ class DatasetGenerator:
     ) -> tuple[list[tuple[RawSample, str]], list[tuple[str, str, str]]]:
         """Sanitize samples with rejection tracking.
 
+        Uses multiprocessing via ``sanitize_samples``, then aligns
+        results back to original ``RawSample`` metadata in O(n).
+
         Returns:
             Tuple of:
               - accepted: list of (original_raw_sample, sanitized_text) pairs
               - rejected: list of (language, text, reason) tuples
         """
+        import multiprocessing as mp
+        import os
+
         cfg = self.config.sanitize
-
-        # Run detailed sanitization
         tuples = [(s.language, s.text) for s in samples]
-        accepted_tuples, rejected = sanitize_samples_detailed(tuples, cfg)
+        num_workers = max(1, int(os.cpu_count() * 0.9))
+        with mp.Pool(num_workers, initializer=_init_worker, initargs=(cfg,)) as pool:
+            results = pool.map(_sanitize_one_worker, tuples, chunksize=1000)
 
-        # Map accepted back to RawSamples
-        # Build index: (lang, text) -> RawSample for O(1) lookup
-        accepted_set = set(accepted_tuples)
         accepted: list[tuple[RawSample, str]] = []
-        for raw, (lang, text) in zip(samples, tuples):
-            if (lang, text) in accepted_set:
-                # Find the sanitized version
-                for al, at in accepted_tuples:
-                    if al == lang:
-                        # The sanitized text may differ from original
-                        accepted.append((raw, at))
-                        accepted_tuples.remove((al, at))
-                        break
+        rejected_tuples: list[tuple[str, str, str]] = []
 
-        rejected_tuples = [(r.language, r.text, r.reason) for r in rejected]
+        for raw, result in zip(samples, results):
+            if result is not None:
+                accepted.append((raw, result[1]))
+            else:
+                rejected_tuples.append((raw.language, raw.text, "sanitize_filter"))
+
         return accepted, rejected_tuples
 
     def _llm_gate(

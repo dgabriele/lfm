@@ -377,8 +377,7 @@ def sanitize_samples(
         len(samples), num_workers, cfg.number_policy, cfg.symbol_policy,
     )
 
-    ctx = mp.get_context("forkserver")
-    with ctx.Pool(num_workers, initializer=_init_worker, initargs=(cfg,)) as pool:
+    with mp.Pool(num_workers, initializer=_init_worker, initargs=(cfg,)) as pool:
         results = pool.map(_sanitize_one_worker, samples, chunksize=1000)
 
     accepted = [r for r in results if r is not None]
@@ -392,8 +391,13 @@ def sanitize_samples(
 def sanitize_samples_detailed(
     samples: list[tuple[str, str]],
     cfg: SanitizeConfig | None = None,
+    num_workers: int | None = None,
 ) -> tuple[list[tuple[str, str]], list[RejectedSample]]:
-    """Sanitize with rejection tracking (single-process, for dataset generation).
+    """Sanitize with rejection tracking using multiprocessing.
+
+    Runs ``sanitize_one`` in parallel, then separates accepted from
+    rejected samples.  Rejection reasons are coarse ("sanitize_filter")
+    since the parallel path doesn't track which specific filter rejected.
 
     Returns:
         Tuple of (accepted samples, rejected samples with reasons).
@@ -401,81 +405,25 @@ def sanitize_samples_detailed(
     if cfg is None:
         cfg = SanitizeConfig()
 
+    if num_workers is None:
+        num_workers = max(1, int(os.cpu_count() * 0.9))
+
+    logger.info(
+        "Sanitizing %d samples (detailed) with %d workers...",
+        len(samples), num_workers,
+    )
+
+    with mp.Pool(num_workers, initializer=_init_worker, initargs=(cfg,)) as pool:
+        results = pool.map(_sanitize_one_worker, samples, chunksize=1000)
+
     accepted: list[tuple[str, str]] = []
     rejected: list[RejectedSample] = []
 
-    for lang, text in samples:
-        original = text
-
-        # Number policy
-        result = _apply_number_policy(text, cfg.number_policy, lang)
-        if result is None:
-            rejected.append(RejectedSample(lang, original, "number_policy"))
-            continue
-        text = result
-
-        # Symbol policy
-        result = _apply_symbol_policy(text, cfg.symbol_policy)
-        if result is None:
-            rejected.append(RejectedSample(lang, original, "symbol_policy"))
-            continue
-        text = result
-
-        # Clean
-        text = clean(
-            text,
-            fix_unicode=True, to_ascii=False, lower=False,
-            no_urls=cfg.strip_urls, no_emails=cfg.strip_emails,
-            no_phone_numbers=cfg.strip_phone_numbers,
-            no_numbers=False, no_digits=False,
-            no_currency_symbols=True, no_punct=False,
-        )
-        text = text.replace("<NUMBER>", "").replace("<EMAIL>", "")
-        text = text.replace("<URL>", "").replace("<PHONE>", "")
-        text = " ".join(text.split())
-
-        if not text or len(text) < cfg.min_line_length:
-            rejected.append(RejectedSample(lang, original, "too_short"))
-            continue
-        if len(text) > cfg.max_line_length:
-            text = text[: cfg.max_line_length]
-
-        words = text.split()
-        if len(words) < cfg.min_word_count:
-            rejected.append(RejectedSample(lang, original, "too_few_words"))
-            continue
-
-        ling_chars = sum(
-            1 for c in text
-            if c.isalpha() or unicodedata.category(c).startswith("M")
-        )
-        alpha_ratio = ling_chars / max(len(text), 1)
-        if alpha_ratio < cfg.alpha_ratio_min:
-            rejected.append(RejectedSample(lang, original, "low_alpha_ratio"))
-            continue
-
-        if cfg.max_digit_ratio < 1.0:
-            digit_count = sum(1 for c in text if c.isdigit())
-            if digit_count / max(len(text), 1) > cfg.max_digit_ratio:
-                rejected.append(RejectedSample(lang, original, "too_many_digits"))
-                continue
-
-        if not _check_foreign_script_ratio(text, lang, cfg.max_foreign_script_ratio):
-            rejected.append(RejectedSample(lang, original, "foreign_script"))
-            continue
-
-        if not _check_repetition(
-            text, cfg.max_word_repetition_ratio, cfg.max_bigram_repetition_ratio
-        ):
-            rejected.append(RejectedSample(lang, original, "repetition"))
-            continue
-
-        if cfg.require_terminal_punctuation:
-            if not text or text[-1] not in _TERMINAL_PUNCT:
-                rejected.append(RejectedSample(lang, original, "no_terminal_punct"))
-                continue
-
-        accepted.append((lang, text))
+    for sample, result in zip(samples, results):
+        if result is not None:
+            accepted.append(result)
+        else:
+            rejected.append(RejectedSample(sample[0], sample[1], "sanitize_filter"))
 
     logger.info(
         "Sanitization (detailed): %d accepted, %d rejected (of %d)",
