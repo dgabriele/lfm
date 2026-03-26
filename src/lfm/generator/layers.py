@@ -16,6 +16,7 @@ architectural inductive biases:
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -71,6 +72,91 @@ def apply_rope(x: Tensor, freqs: Tensor) -> Tensor:
     rotated = x_complex * freqs.unsqueeze(0).unsqueeze(0)
     # Back to real
     return torch.view_as_real(rotated).flatten(-2).type_as(x)
+
+
+# ---------------------------------------------------------------------------
+# KV Cache for autoregressive decoding
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class KVCache:
+    """Key-value cache for incremental autoregressive decoding.
+
+    Stores K and V tensors for each decoder layer application (not per
+    unique layer — weight-shared layers get separate cache slots).
+
+    Pre-allocates tensors at ``init()`` to avoid repeated concatenation.
+    """
+
+    batch_size: int = 0
+    max_len: int = 0
+    num_heads: int = 0
+    head_dim: int = 0
+    num_applications: int = 0  # len(layer_order), not len(unique_layers)
+    device: torch.device | str = "cpu"
+    dtype: torch.dtype = torch.float16
+
+    # Pre-allocated: (num_applications, B, H, max_len, D)
+    k_cache: Tensor = field(default_factory=lambda: torch.empty(0))
+    v_cache: Tensor = field(default_factory=lambda: torch.empty(0))
+    # Cross-attention cache (computed once from memory)
+    cross_cache: Tensor = field(default_factory=lambda: torch.empty(0))
+    seq_len: int = 0  # Current position in the cache
+
+    def init(
+        self,
+        batch_size: int,
+        max_len: int,
+        num_heads: int,
+        head_dim: int,
+        num_applications: int,
+        device: torch.device | str,
+        dtype: torch.dtype = torch.float16,
+    ) -> None:
+        """Pre-allocate cache tensors."""
+        self.batch_size = batch_size
+        self.max_len = max_len
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.num_applications = num_applications
+        self.device = device
+        self.dtype = dtype
+        self.seq_len = 0
+
+        self.k_cache = torch.zeros(
+            num_applications, batch_size, num_heads, max_len, head_dim,
+            device=device, dtype=dtype,
+        )
+        self.v_cache = torch.zeros(
+            num_applications, batch_size, num_heads, max_len, head_dim,
+            device=device, dtype=dtype,
+        )
+        self.cross_cache = torch.empty(0)
+
+    def update(self, app_idx: int, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
+        """Write new K, V at current position and return full cached K, V.
+
+        Args:
+            app_idx: Layer application index (0..num_applications-1).
+            k: New key ``(B, H, 1, D)``.
+            v: New value ``(B, H, 1, D)``.
+
+        Returns:
+            Cached (k, v) sliced to ``[:seq_len+1]``.
+        """
+        pos = self.seq_len
+        self.k_cache[app_idx, :, :, pos : pos + 1, :] = k.to(self.dtype)
+        self.v_cache[app_idx, :, :, pos : pos + 1, :] = v.to(self.dtype)
+        # Return cached up to current position (inclusive)
+        return (
+            self.k_cache[app_idx, :, :, : pos + 1, :],
+            self.v_cache[app_idx, :, :, : pos + 1, :],
+        )
+
+    def advance(self) -> None:
+        """Advance the sequence position after processing one token."""
+        self.seq_len += 1
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +364,78 @@ class LinguisticDecoderLayer(nn.Module):
         return tgt
 
 
+    def forward_cached(
+        self,
+        tgt: Tensor,
+        memory: Tensor,
+        kv_cache: KVCache,
+        app_idx: int,
+        rope_freqs: Tensor | None = None,
+        tgt_mask_row: Tensor | None = None,
+    ) -> Tensor:
+        """Cached forward pass: process only the newest token.
+
+        Uses cached K/V from previous steps for self-attention,
+        computing Q/K/V only for the new position.
+
+        Args:
+            tgt: New token embedding ``(batch, 1, d_model)``.
+            memory: Latent memory ``(batch, 1, d_model)``.
+            kv_cache: Shared KV cache.
+            app_idx: This layer's application index in the cache.
+            rope_freqs: Full RoPE frequencies (indexed at current pos).
+            tgt_mask_row: Attention mask row for current position
+                ``(num_heads, 1, seq_len)`` — which past positions
+                this token can attend to.
+
+        Returns:
+            Output for the new position ``(batch, 1, d_model)``.
+        """
+        pos = kv_cache.seq_len
+
+        # --- Self-attention (cached) ---
+        x = self.norm1(tgt)
+        b, _, d = x.shape
+        qkv = self.self_attn_qkv(x).reshape(b, 1, 3, self.nhead, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, 1, D)
+        q, k_new, v_new = qkv[0], qkv[1], qkv[2]
+
+        # Apply RoPE only to current position
+        if rope_freqs is not None:
+            q = apply_rope(q, rope_freqs[pos : pos + 1])
+            k_new = apply_rope(k_new, rope_freqs[pos : pos + 1])
+
+        # Update cache and get full K, V
+        k_full, v_full = kv_cache.update(app_idx, k_new, v_new)
+
+        # Attention: Q(1) @ K(seq_len)^T -> (B, H, 1, seq_len)
+        scale = math.sqrt(self.head_dim)
+        attn = torch.matmul(q, k_full.transpose(-2, -1).to(q.dtype)) / scale
+
+        if tgt_mask_row is not None:
+            attn = attn + tgt_mask_row.unsqueeze(0)  # (1, H, 1, S) broadcast
+
+        attn = F.softmax(attn, dim=-1)
+        # No dropout during inference (eval mode)
+
+        self_attn_out = torch.matmul(attn, v_full.to(q.dtype))  # (B, H, 1, D)
+        self_attn_out = self_attn_out.transpose(1, 2).reshape(b, 1, d)
+        self_attn_out = self.self_attn_out(self_attn_out)
+
+        tgt = tgt + self_attn_out
+
+        # --- Cross-attention (to latent — same every step) ---
+        x = self.norm2(tgt)
+        cross_out, _ = self.cross_attn(x, memory, memory)
+        tgt = tgt + cross_out
+
+        # --- FFN ---
+        x = self.norm3(tgt)
+        tgt = tgt + self.ffn(x)
+
+        return tgt
+
+
 class LinguisticDecoder(nn.Module):
     """Decoder stack with optional weight sharing for recursive application.
 
@@ -354,5 +512,58 @@ class LinguisticDecoder(nn.Module):
                 tgt_mask=tgt_mask,
                 rope_freqs=rope_freqs,
                 capture_attention=capture_attention,
+            )
+        return self.final_norm(x)
+
+    def make_kv_cache(
+        self,
+        batch_size: int,
+        max_len: int,
+        device: torch.device | str,
+        dtype: torch.dtype = torch.float16,
+    ) -> KVCache:
+        """Create a pre-allocated KV cache for autoregressive decoding."""
+        layer0 = self.layers[0]
+        cache = KVCache()
+        cache.init(
+            batch_size=batch_size,
+            max_len=max_len,
+            num_heads=layer0.nhead,
+            head_dim=layer0.head_dim,
+            num_applications=len(self.layer_order),
+            device=device,
+            dtype=dtype,
+        )
+        return cache
+
+    def forward_cached(
+        self,
+        tgt: Tensor,
+        memory: Tensor,
+        kv_cache: KVCache,
+        rope_freqs: Tensor | None = None,
+        tgt_mask_row: Tensor | None = None,
+    ) -> Tensor:
+        """Cached forward: process one new token through all layers.
+
+        Args:
+            tgt: New token embedding ``(batch, 1, d_model)``.
+            memory: Latent memory ``(batch, 1, d_model)``.
+            kv_cache: Pre-allocated KV cache.
+            rope_freqs: Full precomputed RoPE frequencies.
+            tgt_mask_row: Mask row for current position
+                ``(num_heads, 1, past_len+1)``.
+
+        Returns:
+            Output for the new token ``(batch, 1, d_model)``.
+        """
+        x = tgt
+        for app_idx, layer_idx in enumerate(self.layer_order):
+            x = self.layers[layer_idx].forward_cached(
+                x, memory,
+                kv_cache=kv_cache,
+                app_idx=app_idx,
+                rope_freqs=rope_freqs,
+                tgt_mask_row=tgt_mask_row,
             )
         return self.final_norm(x)

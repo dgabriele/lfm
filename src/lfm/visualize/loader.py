@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import logging
 import random
-from pathlib import Path
 
-import numpy as np
 import torch
 from torch import Tensor, nn
 
@@ -251,8 +249,9 @@ def _encode_token_ids(
     modules = model_data["modules"]
     cfg = model_data["cfg"]
 
-    from lfm.data.corpus import MultilingualCorpusDataset
     from torch.utils.data import DataLoader
+
+    from lfm.data.corpus import MultilingualCorpusDataset
 
     eos_id = vocab_size + 1
     dataset = MultilingualCorpusDataset(token_ids_list, cfg.max_seq_len, eos_id)
@@ -472,6 +471,10 @@ def decode_z(
 ) -> list[list[int]]:
     """Decode latent z vectors through the decoder using nucleus sampling.
 
+    Uses KV caching when the decoder is a ``LinguisticDecoder`` — each
+    step only computes Q/K/V for the new token, reusing cached K/V from
+    previous steps.  This is O(n) per step instead of O(n²).
+
     Args:
         z: Latent codes ``(N, latent_dim)``.
         model_data: From ``load_checkpoint()``.
@@ -482,14 +485,13 @@ def decode_z(
     Returns:
         List of decoded token ID lists.
     """
-    from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
+    from lfm.generator.layers import LinguisticDecoder
 
     device = model_data["device"]
     modules = model_data["modules"]
     cfg = model_data["cfg"]
     rope_freqs = model_data.get("rope_freqs")
     cached_mask = model_data.get("cached_mask")
-    full_vocab = model_data["full_vocab"]
     bos_id = model_data["bos_id"]
     eos_id = model_data["eos_id"]
 
@@ -502,10 +504,10 @@ def decode_z(
         if isinstance(m, nn.Module):
             m.eval()
 
+    use_kv_cache = isinstance(decoder, LinguisticDecoder) and cached_mask is not None
     all_tokens: list[list[int]] = []
     max_len = cfg.max_seq_len
 
-    # Process in batches
     for start in range(0, z.size(0), config.batch_size):
         z_batch = z[start : start + config.batch_size].to(device)
         b = z_batch.size(0)
@@ -513,34 +515,51 @@ def decode_z(
         memory = latent_to_decoder(z_batch).unsqueeze(1)
         cur_ids = torch.full((b, 1), bos_id, dtype=torch.long, device=device)
 
-        for t in range(max_len):
-            seq_len = cur_ids.size(1)
-            tgt = dec_tok(cur_ids)
+        if use_kv_cache:
+            kv_cache = decoder.make_kv_cache(
+                b, max_len + 1, device, dtype=memory.dtype,
+            )
 
-            if isinstance(decoder, LinguisticDecoder) and cached_mask is not None:
-                tgt_mask = cached_mask[:, :seq_len, :seq_len]
-                out = decoder(tgt, memory, tgt_mask=tgt_mask, rope_freqs=rope_freqs)
-            else:
+            # Process BOS token to prime the cache
+            bos_embed = dec_tok(cur_ids)  # (B, 1, H)
+            mask_row = cached_mask[:, 0:1, 0:1]  # (H, 1, 1)
+            out = decoder.forward_cached(
+                bos_embed, memory, kv_cache,
+                rope_freqs=rope_freqs, tgt_mask_row=mask_row,
+            )
+            kv_cache.advance()
+
+            for t in range(max_len):
+                logits = output_head(out[:, -1]) / temperature
+
+                # Nucleus sampling
+                probs = _nucleus_sample(logits, top_p)
+                next_token = torch.multinomial(probs, num_samples=1)
+                cur_ids = torch.cat([cur_ids, next_token], dim=1)
+
+                # Cached forward for new token only
+                new_embed = dec_tok(next_token)  # (B, 1, H)
+                seq_so_far = kv_cache.seq_len + 1
+                mask_row = cached_mask[:, kv_cache.seq_len : kv_cache.seq_len + 1, :seq_so_far]
+                out = decoder.forward_cached(
+                    new_embed, memory, kv_cache,
+                    rope_freqs=rope_freqs, tgt_mask_row=mask_row,
+                )
+                kv_cache.advance()
+        else:
+            # Fallback: no KV cache (non-LinguisticDecoder)
+            for t in range(max_len):
+                seq_len = cur_ids.size(1)
+                tgt = dec_tok(cur_ids)
                 tgt_mask = nn.Transformer.generate_square_subsequent_mask(
                     seq_len, device=device
                 )
                 out = decoder(tgt=tgt, memory=memory, tgt_mask=tgt_mask)
+                logits = output_head(out[:, -1]) / temperature
 
-            logits = output_head(out[:, -1]) / temperature  # (B, V)
-
-            # Nucleus sampling
-            sorted_logits, sorted_idx = torch.sort(logits, descending=True)
-            cumulative_probs = torch.cumsum(
-                torch.softmax(sorted_logits, dim=-1), dim=-1
-            )
-            sorted_mask = cumulative_probs - torch.softmax(sorted_logits, dim=-1) >= top_p
-            sorted_logits[sorted_mask] = float("-inf")
-            # Scatter back
-            logits = logits.scatter(1, sorted_idx, sorted_logits)
-
-            probs = torch.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            cur_ids = torch.cat([cur_ids, next_token], dim=1)
+                probs = _nucleus_sample(logits, top_p)
+                next_token = torch.multinomial(probs, num_samples=1)
+                cur_ids = torch.cat([cur_ids, next_token], dim=1)
 
         # Convert to lists, truncate at EOS
         for row in cur_ids[:, 1:]:  # skip BOS
@@ -550,3 +569,15 @@ def decode_z(
             all_tokens.append(tokens)
 
     return all_tokens
+
+
+def _nucleus_sample(logits: Tensor, top_p: float) -> Tensor:
+    """Apply nucleus (top-p) sampling and return probabilities."""
+    sorted_logits, sorted_idx = torch.sort(logits, descending=True)
+    cumulative_probs = torch.cumsum(
+        torch.softmax(sorted_logits, dim=-1), dim=-1
+    )
+    sorted_mask = cumulative_probs - torch.softmax(sorted_logits, dim=-1) >= top_p
+    sorted_logits[sorted_mask] = float("-inf")
+    logits = logits.scatter(1, sorted_idx, sorted_logits)
+    return torch.softmax(logits, dim=-1)

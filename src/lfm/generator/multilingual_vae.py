@@ -97,11 +97,14 @@ class MultilingualVAEGenerator(GeneratorModule):
             head_dim = config.decoder_hidden_dim // config.decoder_num_heads
             self.register_buffer(
                 "_rope_freqs",
-                precompute_rope_freqs(head_dim, config.max_output_len),
+                precompute_rope_freqs(head_dim, config.max_output_len + 1),
                 persistent=False,
             )
         else:
             self._rope_freqs: Tensor | None = None
+
+        # -- Precomputed causal mask (lazy, created on first decode) --
+        self._full_causal_mask: Tensor | None = None
 
         # -- Tokenizer (lazy, loaded from spm_model_path) --
         self._tokenizer: SubwordTokenizer | None = None
@@ -359,7 +362,10 @@ class MultilingualVAEGenerator(GeneratorModule):
     # ------------------------------------------------------------------
 
     def _decode(self, z: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """Autoregressive decoding from latent z.
+        """Autoregressive decoding from latent z with KV caching.
+
+        Uses incremental decoding: each step only computes Q/K/V for the
+        new token and reuses cached K/V from all previous steps.
 
         Args:
             z: ``(batch, latent_dim)``.
@@ -367,92 +373,123 @@ class MultilingualVAEGenerator(GeneratorModule):
         Returns:
             Tuple of ``(token_ids, token_probs, decoder_states, lengths, mask)``.
         """
+        from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
+
         batch = z.size(0)
         device = z.device
         max_len = self._max_output_len
 
-        # Calibrate z to match the pretrained encoder's distribution.
-        # This ensures the decoder sees the same scale/range regardless
-        # of whether z came from the pretrained encoder or from the
-        # agent's learned input projection.  Preserves z direction
-        # (semantics) while matching the expected scale (EOS behavior).
         if self._z_stats_initialized:
             z = self.calibrate_z(z)
 
-        # z -> cross-attention memory: (batch, 1, decoder_hidden_dim)
         memory = self.latent_to_decoder(z).unsqueeze(1)
 
-        # Start with BOS token
-        bos_ids = torch.full((batch, 1), self.bos_id, dtype=torch.long, device=device)
-        generated_embeds = self.token_embedding(bos_ids)  # (B, 1, H)
-
-        all_probs: list[Tensor] = []
-        all_states: list[Tensor] = []
-
-        for t in range(max_len):
-            seq_len = generated_embeds.size(1)
-            decoder_input = generated_embeds
-            if not isinstance(self.pos_embedding, nn.Identity):
-                pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-                decoder_input = decoder_input + self.pos_embedding(pos_ids)
-
-            # Multi-scale causal mask
-            from lfm.generator.layers import multiscale_causal_mask
-
-            tgt_mask = multiscale_causal_mask(
-                seq_len,
+        # Precompute the full causal mask once (reuse rows per step)
+        if self._full_causal_mask is None or self._full_causal_mask.size(1) < max_len + 1:
+            self._full_causal_mask = multiscale_causal_mask(
+                max_len + 1,
                 num_heads=self.config.decoder_num_heads,
                 head_windows=self.config.attention_head_windows,
                 global_every=self.config.attention_global_every,
                 device=device,
             )
 
-            decoder_out = self.decoder(
-                decoder_input,
-                memory,
-                tgt_mask=tgt_mask,
-                rope_freqs=self._rope_freqs,
-            )  # (B, seq_len, H)
+        use_cache = isinstance(self.decoder, LinguisticDecoder)
 
-            last_hidden = decoder_out[:, -1:, :]  # (B, 1, H)
-            logits_t = self.output_head(last_hidden).squeeze(1)  # (B, V)
+        bos_ids = torch.full((batch, 1), self.bos_id, dtype=torch.long, device=device)
+        bos_embed = self.token_embedding(bos_ids)
 
-            all_states.append(last_hidden)
+        all_probs: list[Tensor] = []
+        all_states: list[Tensor] = []
 
-            # Boost EOS probability as sequence gets longer — encourages
-            # variable-length output.  Linear ramp: no boost at t=0,
-            # +2.0 at max_len.
-            eos_boost = 2.0 * (t / max(max_len - 1, 1))
-            logits_t[:, self.eos_id] += eos_boost
-
-            # Differentiable sampling via Gumbel-Softmax
-            probs_t = gumbel_softmax(
-                logits_t,
-                tau=self._current_temperature,
-                hard=self._hard_sample,
-            )  # (B, V)
-            all_probs.append(probs_t.unsqueeze(1))
-
-            # Next input: soft probs @ embedding weight -> differentiable lookup
-            next_embed = probs_t @ self.token_embedding.weight  # (B, H)
-            generated_embeds = torch.cat(
-                [generated_embeds, next_embed.unsqueeze(1)], dim=1
+        if use_cache:
+            kv_cache = self.decoder.make_kv_cache(
+                batch, max_len + 1, device, dtype=memory.dtype,
             )
 
-        token_probs = torch.cat(all_probs, dim=1)  # (B, max_len, V)
-        token_ids = token_probs.argmax(dim=-1)  # (B, max_len)
-        decoder_states = torch.cat(all_states, dim=1)  # (B, max_len, H)
+            # Prime cache with BOS
+            mask_row = self._full_causal_mask[:, 0:1, 0:1]
+            out = self.decoder.forward_cached(
+                bos_embed, memory, kv_cache,
+                rope_freqs=self._rope_freqs, tgt_mask_row=mask_row,
+            )
+            kv_cache.advance()
 
-        # Compute lengths: position of first EOS token, or full
-        # sequence length if no EOS was generated.
+            for t in range(max_len):
+                last_hidden = out  # (B, 1, H)
+                logits_t = self.output_head(last_hidden).squeeze(1)
+
+                all_states.append(last_hidden)
+
+                eos_boost = 2.0 * (t / max(max_len - 1, 1))
+                logits_t[:, self.eos_id] += eos_boost
+
+                probs_t = gumbel_softmax(
+                    logits_t,
+                    tau=self._current_temperature,
+                    hard=self._hard_sample,
+                )
+                all_probs.append(probs_t.unsqueeze(1))
+
+                next_embed = (probs_t @ self.token_embedding.weight).unsqueeze(1)
+                seq_so_far = kv_cache.seq_len + 1
+                mask_row = self._full_causal_mask[
+                    :, kv_cache.seq_len : kv_cache.seq_len + 1, :seq_so_far
+                ]
+                out = self.decoder.forward_cached(
+                    next_embed, memory, kv_cache,
+                    rope_freqs=self._rope_freqs, tgt_mask_row=mask_row,
+                )
+                kv_cache.advance()
+        else:
+            # Fallback: no KV cache
+            generated_embeds = bos_embed
+
+            for t in range(max_len):
+                seq_len = generated_embeds.size(1)
+                decoder_input = generated_embeds
+                if not isinstance(self.pos_embedding, nn.Identity):
+                    pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+                    decoder_input = decoder_input + self.pos_embedding(pos_ids)
+
+                tgt_mask = self._full_causal_mask[:, :seq_len, :seq_len]
+                decoder_out = self.decoder(
+                    decoder_input, memory,
+                    tgt_mask=tgt_mask, rope_freqs=self._rope_freqs,
+                )
+
+                last_hidden = decoder_out[:, -1:, :]
+                logits_t = self.output_head(last_hidden).squeeze(1)
+
+                all_states.append(last_hidden)
+
+                eos_boost = 2.0 * (t / max(max_len - 1, 1))
+                logits_t[:, self.eos_id] += eos_boost
+
+                probs_t = gumbel_softmax(
+                    logits_t,
+                    tau=self._current_temperature,
+                    hard=self._hard_sample,
+                )
+                all_probs.append(probs_t.unsqueeze(1))
+
+                next_embed = probs_t @ self.token_embedding.weight
+                generated_embeds = torch.cat(
+                    [generated_embeds, next_embed.unsqueeze(1)], dim=1
+                )
+
+        token_probs = torch.cat(all_probs, dim=1)
+        token_ids = token_probs.argmax(dim=-1)
+        decoder_states = torch.cat(all_states, dim=1)
+
         eos_mask = token_ids == self.eos_id
         has_eos = eos_mask.any(dim=1)
         first_eos = eos_mask.float().argmax(dim=1)
 
         lengths = torch.where(
             has_eos,
-            first_eos + 1,  # include the EOS token
-            torch.full_like(first_eos, max_len),  # use full length
+            first_eos + 1,
+            torch.full_like(first_eos, max_len),
         )
         output_mask = create_padding_mask(lengths, max_len)
 
