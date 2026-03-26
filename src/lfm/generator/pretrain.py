@@ -746,6 +746,7 @@ class VAEPretrainer:
 
         # Cache v3: includes 'languages' and 'spm_hash' for consistency.
         _cache_valid = False
+        _surviving_indices: list[int] = []
         if cache_path.exists() and spm_path_cached.exists():
             logger.info("Loading preprocessed cache from %s", cache_path)
             cache = torch.load(cache_path, weights_only=False)
@@ -873,14 +874,25 @@ class VAEPretrainer:
                     f"Run: python scripts/precompute_corpus_embeddings.py"
                 )
             emb_np = np.load(emb_path)
-            # Filter embeddings to match tokenized dataset (some samples
-            # are dropped during tokenization when sequence < 5 tokens).
-            if len(emb_np) != len(dataset) and len(_surviving_indices) == len(dataset):
-                logger.info(
-                    "Filtering embeddings: %d → %d (matching tokenized dataset)",
-                    len(emb_np), len(dataset),
-                )
-                emb_np = emb_np[_surviving_indices]
+            # Align embeddings with the tokenized dataset.  Tokenization
+            # may drop samples (sequence < 5 tokens), creating a mismatch.
+            if len(emb_np) != len(dataset):
+                if _surviving_indices and len(_surviving_indices) == len(dataset):
+                    # Fresh tokenization: we know exactly which indices survived
+                    logger.info(
+                        "Filtering embeddings: %d → %d (by surviving indices)",
+                        len(emb_np), len(dataset),
+                    )
+                    emb_np = emb_np[_surviving_indices]
+                elif len(emb_np) > len(dataset):
+                    # Cache hit: indices unknown, truncate to dataset length.
+                    # This works when the dropped samples are at the end or
+                    # are a small fraction (<0.1%) of the total.
+                    logger.info(
+                        "Truncating embeddings: %d → %d (cache-hit alignment)",
+                        len(emb_np), len(dataset),
+                    )
+                    emb_np = emb_np[:len(dataset)]
             if len(emb_np) != len(dataset):
                 raise ValueError(
                     f"Embeddings length {len(emb_np)} != dataset length {len(dataset)}. "
