@@ -1627,6 +1627,11 @@ class VAEPretrainer:
                 util = rvq.utilization
                 util_str = "/".join(f"{u:.0%}" for u in util)
                 epoch_parts.append(f"cb_util={util_str}")
+                # Reset dead codes by splitting high-usage codes
+                resets = rvq.reset_dead_codes(threshold=1.0, epsilon=0.01)
+                if any(r > 0 for r in resets):
+                    reset_str = "/".join(str(r) for r in resets)
+                    logger.info("  Reset %s dead codes (by splitting)", reset_str)
                 rvq.reset_usage()
             train_acc = train_acc_correct / max(train_acc_total, 1)
             epoch_parts.append(f"acc={train_acc:.1%}")

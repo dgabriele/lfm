@@ -131,6 +131,73 @@ class VectorQuantizer(nn.Module):
 
         return quantized, self.commitment_weight * commitment_loss, indices
 
+    def reset_dead_codes(self, threshold: float = 1.0, epsilon: float = 0.01) -> int:
+        """Replace dead codebook entries by splitting high-usage codes.
+
+        Dead codes (usage below ``threshold``) are replaced with
+        perturbations of the most-used codes, scaled by each parent
+        code's internal variance.  This targets the information
+        bottleneck where it's tightest — codes covering too many
+        diverse inputs get split into finer-grained representations.
+
+        EMA state is split proportionally so the new codes don't
+        immediately decay back to the dead position.
+
+        Args:
+            threshold: Minimum EMA cluster size to be considered alive.
+            epsilon: Perturbation scale multiplier.
+
+        Returns:
+            Number of codes reset.
+        """
+        if not self.ema_update:
+            return 0
+
+        alive_mask = self._ema_cluster_size > threshold
+        dead_indices = (~alive_mask).nonzero(as_tuple=True)[0]
+        n_dead = dead_indices.size(0)
+
+        if n_dead == 0:
+            return 0
+
+        # Rank alive codes by usage (highest first)
+        alive_indices = alive_mask.nonzero(as_tuple=True)[0]
+        if alive_indices.size(0) == 0:
+            return 0
+        alive_usage = self._ema_cluster_size[alive_indices]
+        _, sorted_order = alive_usage.sort(descending=True)
+        alive_sorted = alive_indices[sorted_order]
+
+        with torch.no_grad():
+            for i, dead_idx in enumerate(dead_indices):
+                # Pick highest-usage parent (cycle if more dead than alive)
+                parent_idx = alive_sorted[i % alive_sorted.size(0)]
+                parent_embed = self.embedding.weight.data[parent_idx]
+
+                # Compute perturbation from parent's internal variance.
+                # variance ≈ E[x²] - E[x]² estimated from EMA sums.
+                parent_count = self._ema_cluster_size[parent_idx].clamp(min=1)
+                parent_mean = self._ema_embedding_sum[parent_idx] / parent_count
+                # Use parent_mean as the centroid; perturbation is random
+                # scaled by the distance from mean to embedding (a proxy
+                # for internal spread when exact variance isn't tracked).
+                spread = (parent_embed - parent_mean).abs().clamp(min=1e-4)
+                noise = torch.randn_like(parent_embed) * spread * epsilon
+
+                # Split: dead = parent + noise, parent = parent - noise
+                self.embedding.weight.data[dead_idx] = parent_embed + noise
+                self.embedding.weight.data[parent_idx] = parent_embed - noise
+
+                # Split EMA state proportionally
+                half_count = parent_count / 2
+                self._ema_cluster_size[dead_idx] = half_count
+                self._ema_cluster_size[parent_idx] = half_count
+                parent_sum = self._ema_embedding_sum[parent_idx].clone()
+                self._ema_embedding_sum[dead_idx] = parent_sum / 2
+                self._ema_embedding_sum[parent_idx] = parent_sum / 2
+
+        return n_dead
+
     def encode(self, z: Tensor) -> Tensor:
         """Encode to codebook indices (inference, no grad).
 
@@ -304,6 +371,18 @@ class ResidualVQ(nn.Module):
         """Reset codebook utilization counters (call per epoch)."""
         self._usage_counts.zero_()
         self._usage_total = 0
+
+    def reset_dead_codes(self, threshold: float = 1.0, epsilon: float = 0.01) -> list[int]:
+        """Reset dead codes at all levels by splitting high-usage codes.
+
+        Args:
+            threshold: Minimum EMA cluster size to be considered alive.
+            epsilon: Perturbation scale multiplier.
+
+        Returns:
+            List of reset counts per level.
+        """
+        return [level.reset_dead_codes(threshold, epsilon) for level in self.levels]
 
     @property
     def total_codebook_size(self) -> int:

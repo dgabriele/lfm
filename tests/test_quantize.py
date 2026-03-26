@@ -151,3 +151,46 @@ class TestResidualVQ:
     def test_total_codebook_size(self):
         rvq = self._make(num_levels=4, codebook_size=512)
         assert rvq.total_codebook_size == 512 ** 4
+
+
+class TestDeadCodeReset:
+    def test_reset_splits_high_usage_codes(self):
+        vq = VectorQuantizer(
+            codebook_size=8, embedding_dim=4, ema_update=True, ema_decay=0.0,
+        )
+        vq.train()
+        # Send all inputs to code 0 to create dead codes
+        z = vq.embedding.weight.data[0:1].expand(64, -1).clone()
+        z += torch.randn_like(z) * 0.001
+        vq(z)
+        # With decay=0, cluster_size = batch count directly.
+        # Code 0 gets all 64 samples, others get 0.
+        n_reset = vq.reset_dead_codes(threshold=0.5)
+        assert n_reset > 0
+        # The reset codes should now have embeddings near code 0
+        code0 = vq.embedding.weight.data[0]
+        for i in range(1, 8):
+            if vq._ema_cluster_size[i] > 0:
+                dist = (vq.embedding.weight.data[i] - code0).norm()
+                assert dist < 1.0  # should be close to parent
+
+    def test_reset_preserves_ema_consistency(self):
+        vq = VectorQuantizer(codebook_size=8, embedding_dim=4, ema_update=True)
+        vq.train()
+        z = vq.embedding.weight.data[0:1].expand(64, -1).clone()
+        z += torch.randn_like(z) * 0.001
+        vq(z)
+        vq.reset_dead_codes()
+        # EMA cluster sizes should all be positive after reset
+        assert (vq._ema_cluster_size >= 0).all()
+        # Embeddings should not contain NaN
+        assert not torch.isnan(vq.embedding.weight.data).any()
+
+    def test_residual_vq_reset(self):
+        rvq = ResidualVQ(num_levels=2, codebook_size=8, embedding_dim=4)
+        rvq.train()
+        z = torch.randn(32, 4)
+        rvq(z)
+        resets = rvq.reset_dead_codes()
+        assert len(resets) == 2
+        assert all(isinstance(r, int) for r in resets)
