@@ -2168,7 +2168,12 @@ def pretrain_vae_decoder(config: VAEPretrainConfig) -> dict[str, float]:
     # force=False avoids overriding existing handlers; the handler flushes
     # after every record so output appears immediately when piped.
     if not logging.root.handlers:
-        handler = logging.StreamHandler()
+        import sys
+
+        # Force unbuffered stderr so log output appears immediately in pipes
+        sys.stderr = open(sys.stderr.fileno(), "w", buffering=1, closefd=False)
+
+        handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(name)s %(message)s")
         )
