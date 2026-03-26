@@ -1195,6 +1195,8 @@ class VAEPretrainer:
             train_dip_sum = 0.0
             train_cl_sum = 0.0
             train_klb_sum = 0.0
+            train_acc_correct = 0
+            train_acc_total = 0
             train_count = 0
             last_grad_norm = 0.0
             optimizer.zero_grad()
@@ -1431,12 +1433,26 @@ class VAEPretrainer:
                     optimizer.zero_grad()
                     global_step += 1
 
+                # Token accuracy (loss-invariant reconstruction quality metric)
+                with torch.no_grad():
+                    _logits = modules["output_head"](dec_hidden)
+                    _preds = _logits.argmax(dim=-1)
+                    _src_mask = (
+                        torch.arange(batch_tokens.size(1), device=device).unsqueeze(0)
+                        < batch_lengths.unsqueeze(1)
+                    )
+                    _correct = ((_preds == batch_tokens) & _src_mask).sum().item()
+                    _total = _src_mask.sum().item()
+                    _batch_acc = _correct / max(_total, 1)
+
                 train_ce_sum += ce_loss.item() * b
                 train_kl_sum += kl_loss.item() * b
                 train_zvar_sum += z_var_loss.item() * b
                 train_dip_sum += dip_loss.item() * b
                 train_cl_sum += cl_loss.item() * b
                 train_klb_sum += kl_beta_loss.item() * b
+                train_acc_correct += _correct
+                train_acc_total += _total
                 train_count += b
 
                 # -- Per-batch logging --
@@ -1458,6 +1474,7 @@ class VAEPretrainer:
                     # Build optional metric strings
                     extra_parts: list[str] = [
                         f"PPL={ppl:.0f}",
+                        f"acc={_batch_acc:.1%}",
                         f"gnorm={last_grad_norm:.2f}",
                     ]
                     if _do_kl:
@@ -1565,6 +1582,8 @@ class VAEPretrainer:
                 epoch_parts.append(f"CL={train_cl:.4f}")
             if cfg.kl_beta > 0:
                 epoch_parts.append(f"KLβ={train_klb:.4f}")
+            train_acc = train_acc_correct / max(train_acc_total, 1)
+            epoch_parts.append(f"acc={train_acc:.1%}")
             epoch_parts.append(f"total={train_loss:.4f}")
             epoch_parts.append(f"| val: CE={val_ce:.4f}")
             if _do_kl:
