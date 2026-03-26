@@ -295,12 +295,12 @@ def main(
         with torch.no_grad():
             preds = logits.argmax(dim=1)
             correct = (preds == target_idx).float()  # 1 if correct, 0 if not
-            # Length-penalized reward: incentivize accuracy with minimal length.
-            # Simple inputs that can be discriminated with short messages get
-            # higher reward than complex inputs that need long messages.
+            # Length-penalized reward: correct predictions are discounted by
+            # message length.  Incorrect predictions always get 0.  This
+            # incentivizes the shortest message that still discriminates.
             msg_lengths = gen_mask.float().sum(dim=1)  # (B,)
             max_len = gen_mask.size(1)
-            reward = correct - length_cost * (msg_lengths / max_len)
+            reward = correct * (1.0 - length_cost * msg_lengths / max_len)
             # Update baseline
             baseline = baseline_decay * baseline + (1 - baseline_decay) * reward.mean().item()
             advantage = reward - baseline
