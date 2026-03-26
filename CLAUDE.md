@@ -102,12 +102,12 @@ src/lfm/
 
 ## Pretraining Results
 
-40 epochs on 560K IPA sentences from 16 languages:
+42 epochs on 560K IPA sentences from 16 languages:
 - **Val CE: 0.52** (PPL ≈ 1.7)
 - **Reconstruction**: near-perfect through 256-dim latent bottleneck, word order largely preserved
 - **Interpolation**: smooth typological transitions (English ↔ Polish)
 - **σ=0.5 perturbation**: paraphrastic variation within language
-- **TTR: 0.955**, rep_rate: 0.00, mean word length: 4.7, active z dims: 256/256
+- **TTR: 0.958**, rep_rate: 0.00, mean word length: 4.7, active z dims: 256/256
 
 ### Sample outputs (epoch 36):
 

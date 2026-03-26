@@ -147,12 +147,12 @@ src/lfm/
 
 ## Pretraining Results
 
-40 epochs on 560K IPA-transcribed sentences from 16 languages (`max_seq_len=96`, cosine LR decay, DIP-VAE covariance regularization, variance floor, 256/256 active latent dims):
+42 epochs on 560K IPA-transcribed sentences from 16 languages (`max_seq_len=96`, cosine LR decay, DIP-VAE covariance regularization, variance floor, 256/256 active latent dims):
 
 | Metric | Value |
 |--------|-------|
 | Val CE | **0.52** (PPL ≈ 1.7) |
-| TTR | 0.955 |
+| TTR | 0.958 |
 | Repetition rate | 0.000 |
 | EOS rate | 1.00 |
 | Mean word length | 4.7 IPA chars |
