@@ -207,6 +207,13 @@ class VAEPretrainConfig(LFMBaseConfig):
     # Applied without free bits — raw KL(q||N(0,1)).
     kl_beta: float = 0.0
 
+    # Phonetic embedding initialization and label smoothing.
+    # Uses PanPhon articulatory features to give phonetically similar
+    # tokens similar embeddings and partial credit during training.
+    phonetic_init: bool = True
+    phonetic_init_scale: float = 0.5
+    phonetic_label_smoothing: float = 0.1
+
 
 # ---------------------------------------------------------------------------
 # Corpus loading
@@ -470,6 +477,8 @@ def _vae_forward(
     _attn_pool_query: Tensor | None = None,
     scheduled_sampling_p: float = 0.0,
     _word_dropout_p: float = 0.0,
+    _phonetic_sim: Tensor | None = None,
+    _phonetic_smoothing: float = 0.0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Run one VAE forward pass with optional scheduled sampling.
 
@@ -602,12 +611,33 @@ def _vae_forward(
 
     logits = output_head(dec_out)
 
-    # Reconstruction loss (masked CE) — always against ground truth targets
-    ce = F.cross_entropy(
-        logits.reshape(-1, full_vocab),
-        batch_tokens.reshape(-1),
-        reduction="none",
-    ).reshape(b, seq_len)
+    # Reconstruction loss (masked CE) — always against ground truth targets.
+    # With phonetic label smoothing, the target distribution blends one-hot
+    # with phonetic similarity — near-miss predictions (e.g. /b/ for /p/)
+    # incur less loss than distant predictions (e.g. /ʒ/ for /p/).
+    flat_logits = logits.reshape(-1, full_vocab)
+    flat_targets = batch_tokens.reshape(-1)
+
+    if _phonetic_sim is not None and _phonetic_smoothing > 0:
+        # Standard CE + phonetic smoothing correction (memory-efficient).
+        # The smoothing term uses detached log_probs — it modifies the
+        # target distribution, not the gradient path through the model.
+        ce_hard = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+        with torch.no_grad():
+            log_probs_d = F.log_softmax(flat_logits.detach(), dim=-1)
+            _chunk = 4096
+            soft_ce = torch.zeros_like(ce_hard)
+            for _start in range(0, len(flat_targets), _chunk):
+                _end = min(_start + _chunk, len(flat_targets))
+                _tgt = flat_targets[_start:_end]
+                _sim_rows = _phonetic_sim[_tgt.cpu()].to(flat_logits.device)
+                soft_ce[_start:_end] = -(_sim_rows * log_probs_d[_start:_end]).sum(dim=-1)
+        ce = (
+            (1 - _phonetic_smoothing) * ce_hard + _phonetic_smoothing * soft_ce
+        ).reshape(b, seq_len)
+    else:
+        ce = F.cross_entropy(flat_logits, flat_targets, reduction="none").reshape(b, seq_len)
+
     ce_loss = (ce * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
 
     # KL loss (skipped when kl_weight=0)
@@ -934,6 +964,29 @@ class VAEPretrainer:
         hidden = cfg.decoder_hidden_dim
         modules = self._build_model(cfg, hidden, full_vocab, device)
 
+        # 5b. Phonetic embedding initialization
+        phonetic_sim_matrix: Tensor | None = None
+        if cfg.phonetic_init or cfg.phonetic_label_smoothing > 0:
+            from lfm.generator.phonetic_embeddings import (
+                build_phonetic_similarity_matrix,
+                build_token_feature_matrix,
+                init_embeddings_from_features,
+            )
+
+            feature_matrix = build_token_feature_matrix(sp, vocab_size)
+            if cfg.phonetic_init:
+                init_embeddings_from_features(
+                    modules["enc_token_embedding"], feature_matrix, cfg.phonetic_init_scale,
+                )
+                init_embeddings_from_features(
+                    modules["dec_token_embedding"], feature_matrix, cfg.phonetic_init_scale,
+                )
+            if cfg.phonetic_label_smoothing > 0:
+                phonetic_sim_matrix = build_phonetic_similarity_matrix(
+                    feature_matrix
+                )  # Keep on CPU — rows moved to GPU per-batch to save VRAM
+                logger.info("Built phonetic similarity matrix for label smoothing")
+
         # Contrastive projection: z_dim → embed_dim (if dimensions differ)
         contrastive_proj: nn.Module | None = None
         if _use_contrastive and cfg.latent_dim != embed_dim:
@@ -1173,6 +1226,8 @@ class VAEPretrainer:
                             compute_kl=_do_kl,
                             scheduled_sampling_p=ss_p,
                             _word_dropout_p=wd_p,
+                            _phonetic_sim=phonetic_sim_matrix,
+                            _phonetic_smoothing=cfg.phonetic_label_smoothing,
                             **modules,
                         )
                     )

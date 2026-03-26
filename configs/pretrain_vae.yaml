@@ -47,6 +47,11 @@ num_epochs: 40
 # Latent regularization
 z_var_weight: 0.0
 z_var_target: 0.05
+# Phonetic embedding initialization and label smoothing
+phonetic_init: true
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.1
+
 word_dropout: 0.0
 word_dropout_min: 0.0
 word_dropout_anneal_epochs: 20
