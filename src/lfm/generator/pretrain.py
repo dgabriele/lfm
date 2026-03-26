@@ -1529,6 +1529,10 @@ class VAEPretrainer:
                         extra_parts.append(f"KLβ={kl_beta_loss.item():.4f}")
                     if cfg.use_vq:
                         extra_parts.append(f"VQ={vq_loss.item():.4f}")
+                        rvq = modules["_residual_vq"]
+                        util = rvq.utilization
+                        util_str = "/".join(f"{u:.0%}" for u in util)
+                        extra_parts.append(f"cb_util={util_str}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
                         extra_parts.append(
                             f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
@@ -1619,6 +1623,11 @@ class VAEPretrainer:
                 epoch_parts.append(f"KLβ={train_klb:.4f}")
             if cfg.use_vq:
                 epoch_parts.append(f"VQ={train_vq:.4f}")
+                rvq = modules["_residual_vq"]
+                util = rvq.utilization
+                util_str = "/".join(f"{u:.0%}" for u in util)
+                epoch_parts.append(f"cb_util={util_str}")
+                rvq.reset_usage()
             train_acc = train_acc_correct / max(train_acc_total, 1)
             epoch_parts.append(f"acc={train_acc:.1%}")
             epoch_parts.append(f"total={train_loss:.4f}")

@@ -204,6 +204,14 @@ class ResidualVQ(nn.Module):
             for _ in range(num_levels)
         ])
 
+        # Running codebook utilization tracking (per level)
+        self.register_buffer(
+            "_usage_counts",
+            torch.zeros(num_levels, codebook_size),
+            persistent=False,
+        )
+        self._usage_total = 0
+
     def forward(self, z: Tensor) -> tuple[Tensor, Tensor, list[Tensor]]:
         """Residual quantization across all levels.
 
@@ -221,7 +229,7 @@ class ResidualVQ(nn.Module):
         total_loss = torch.tensor(0.0, device=z.device, dtype=z.dtype)
         all_indices: list[Tensor] = []
 
-        for level in self.levels:
+        for i, level in enumerate(self.levels):
             quantized_level, loss_level, indices_level = level(residual)
             # Each level trains on its own residual — detach prevents
             # gradients from flowing through the residual chain
@@ -229,6 +237,14 @@ class ResidualVQ(nn.Module):
             quantized_sum = quantized_sum + quantized_level
             total_loss = total_loss + loss_level
             all_indices.append(indices_level)
+
+            # Track codebook utilization
+            if self.training:
+                with torch.no_grad():
+                    self._usage_counts[i].scatter_add_(
+                        0, indices_level, torch.ones_like(indices_level, dtype=torch.float),
+                    )
+                    self._usage_total += indices_level.size(0)
 
         return quantized_sum, total_loss, all_indices
 
@@ -270,6 +286,24 @@ class ResidualVQ(nn.Module):
         for level, indices in zip(self.levels, all_indices):
             quantized = quantized + level.decode(indices)
         return quantized
+
+    @property
+    def utilization(self) -> list[float]:
+        """Fraction of codebook entries used at each level (0.0–1.0).
+
+        Based on running counts since last ``reset_usage()``.
+        """
+        if self._usage_total == 0:
+            return [0.0] * self.num_levels
+        return [
+            (self._usage_counts[i] > 0).float().mean().item()
+            for i in range(self.num_levels)
+        ]
+
+    def reset_usage(self) -> None:
+        """Reset codebook utilization counters (call per epoch)."""
+        self._usage_counts.zero_()
+        self._usage_total = 0
 
     @property
     def total_codebook_size(self) -> int:
