@@ -196,6 +196,17 @@ class VAEPretrainConfig(LFMBaseConfig):
     scheduled_sampling_start_epoch: int = 5
     scheduled_sampling_warmup_epochs: int = 5
 
+    # Contrastive learning (InfoNCE): encourages similar source sentences
+    # to have similar z vectors.  Requires pre-computed sentence-transformer
+    # embeddings aligned by index with the training corpus.
+    contrastive_weight: float = 0.0
+    contrastive_temperature: float = 0.07
+    embeddings_path: str = ""
+
+    # Fixed KL for distribution smoothness (no warmup/cycling).
+    # Applied without free bits — raw KL(q||N(0,1)).
+    kl_beta: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Corpus loading
@@ -373,6 +384,44 @@ def _train_sentencepiece(
 # ---------------------------------------------------------------------------
 
 
+def _info_nce_loss(
+    z: Tensor,
+    embeddings: Tensor,
+    temperature: float = 0.07,
+) -> Tensor:
+    """InfoNCE contrastive loss between z vectors and source embeddings.
+
+    Pulls z vectors of semantically similar sentences together and
+    pushes dissimilar ones apart.  Similarity is defined by the
+    pre-computed sentence-transformer embeddings.
+
+    Uses a symmetric formulation: z→embed and embed→z directions
+    are averaged for stable gradients.
+
+    Args:
+        z: Latent codes ``(batch, latent_dim)``.
+        embeddings: Pre-computed source text embeddings ``(batch, embed_dim)``.
+        temperature: Softmax temperature (lower = sharper).
+
+    Returns:
+        Scalar InfoNCE loss.
+    """
+    # Normalize both to unit vectors
+    z_norm = F.normalize(z.float(), dim=-1)
+    e_norm = F.normalize(embeddings.float(), dim=-1)
+
+    # Cross-similarity matrix: (B, B)
+    logits_ze = z_norm @ e_norm.T / temperature
+    logits_ez = e_norm @ z_norm.T / temperature
+
+    # Labels: diagonal (each z should match its own embedding)
+    labels = torch.arange(z.size(0), device=z.device)
+
+    loss_ze = F.cross_entropy(logits_ze, labels)
+    loss_ez = F.cross_entropy(logits_ez, labels)
+    return (loss_ze + loss_ez) / 2
+
+
 def _dip_covariance_loss(z: Tensor) -> Tensor:
     """Off-diagonal covariance penalty (DIP-VAE-I style).
 
@@ -417,7 +466,7 @@ def _vae_forward(
     _attn_pool_query: Tensor | None = None,
     scheduled_sampling_p: float = 0.0,
     _word_dropout_p: float = 0.0,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Run one VAE forward pass with optional scheduled sampling.
 
     When ``scheduled_sampling_p > 0``, a two-pass approach is used:
@@ -429,7 +478,7 @@ def _vae_forward(
     at long sequence lengths.
 
     Returns:
-        Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden)``.
+        Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden, mu, logvar)``.
     """
     from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
 
@@ -567,7 +616,7 @@ def _vae_forward(
         kl_per_dim = torch.zeros(b, mu.size(-1), device=device)
         kl_loss = torch.tensor(0.0, device=device)
 
-    return ce_loss, kl_loss, kl_per_dim, z, dec_out
+    return ce_loss, kl_loss, kl_per_dim, z, dec_out, mu, logvar
 
 
 # ---------------------------------------------------------------------------
@@ -804,12 +853,48 @@ class VAEPretrainer:
             generator=torch.Generator().manual_seed(cfg.seed),
         )
 
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-            drop_last=False,
-        )
+        # Load contrastive embeddings if configured
+        import numpy as np
+
+        _use_contrastive = cfg.contrastive_weight > 0 and cfg.embeddings_path
+        corpus_embeddings: Tensor | None = None
+        if _use_contrastive:
+            emb_path = Path(cfg.embeddings_path)
+            if not emb_path.exists():
+                raise FileNotFoundError(
+                    f"Contrastive embeddings not found: {emb_path}. "
+                    f"Run: python scripts/precompute_corpus_embeddings.py"
+                )
+            emb_np = np.load(emb_path)
+            if len(emb_np) != len(dataset):
+                raise ValueError(
+                    f"Embeddings length {len(emb_np)} != dataset length {len(dataset)}. "
+                    f"Regenerate embeddings."
+                )
+            corpus_embeddings = torch.from_numpy(emb_np).float().pin_memory()
+            logger.info(
+                "Loaded contrastive embeddings: %s (%.0f MB, pinned)",
+                corpus_embeddings.shape, corpus_embeddings.nbytes / 1e6,
+            )
+
+        # Wrap dataset to return indices when contrastive is active
+        if _use_contrastive:
+            from lfm.data.corpus import IndexedDatasetWrapper
+
+            indexed_train = IndexedDatasetWrapper(train_dataset)
+            train_loader = DataLoader(
+                indexed_train,
+                batch_size=cfg.batch_size,
+                shuffle=True,
+                drop_last=True,  # InfoNCE needs consistent batch sizes
+            )
+        else:
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=cfg.batch_size,
+                shuffle=True,
+                drop_last=False,
+            )
         val_loader = DataLoader(
             val_dataset,
             batch_size=cfg.batch_size,
@@ -1013,13 +1098,20 @@ class VAEPretrainer:
             train_kl_sum = 0.0
             train_zvar_sum = 0.0
             train_dip_sum = 0.0
+            train_cl_sum = 0.0
+            train_klb_sum = 0.0
             train_count = 0
             last_grad_norm = 0.0
             optimizer.zero_grad()
             epoch_start = time.time()
             batch_start = time.time()
 
-            for i, (batch_tokens, batch_lengths) in enumerate(train_loader):
+            for i, batch_data in enumerate(train_loader):
+                if _use_contrastive:
+                    batch_tokens, batch_lengths, batch_indices = batch_data
+                else:
+                    batch_tokens, batch_lengths = batch_data
+                    batch_indices = None
                 batch_tokens = batch_tokens.to(device)
                 batch_lengths = torch.as_tensor(batch_lengths, device=device)
                 b = batch_tokens.size(0)
@@ -1027,8 +1119,9 @@ class VAEPretrainer:
                 with torch.amp.autocast(
                     device_type=device.type, enabled=cfg.use_amp,
                 ):
-                    _do_kl = cfg.kl_weight > 0
-                    ce_loss, kl_loss, kl_per_dim_train, z_batch, dec_hidden = (
+                    _do_kl = cfg.kl_weight > 0 or cfg.kl_beta > 0
+                    (ce_loss, kl_loss, kl_per_dim_train,
+                     z_batch, dec_hidden, mu_batch, logvar_batch) = (
                         _vae_forward(
                             batch_tokens,
                             batch_lengths,
@@ -1078,10 +1171,26 @@ class VAEPretrainer:
                     if cfg.dip_weight > 0 and b >= 4:
                         dip_loss = _dip_covariance_loss(z_batch)
 
+                    # Contrastive loss (InfoNCE)
+                    cl_loss = torch.tensor(0.0, device=device)
+                    if _use_contrastive and batch_indices is not None:
+                        batch_embs = corpus_embeddings[batch_indices].to(device)
+                        cl_loss = _info_nce_loss(
+                            z_batch, batch_embs, cfg.contrastive_temperature,
+                        )
+
+                    # Fixed KL-beta (raw KL without free bits)
+                    kl_beta_loss = torch.tensor(0.0, device=device)
+                    if cfg.kl_beta > 0:
+                        raw_kl = 0.5 * (mu_batch.pow(2) + logvar_batch.exp() - 1 - logvar_batch)
+                        kl_beta_loss = raw_kl.sum(dim=-1).mean()
+
                     loss = (
                         ce_loss + kl_scale * kl_loss
                         + cfg.z_var_weight * z_var_loss
                         + cfg.dip_weight * dip_loss
+                        + cfg.contrastive_weight * cl_loss
+                        + cfg.kl_beta * kl_beta_loss
                     ) / accum
 
                 scaler.scale(loss).backward()
@@ -1228,6 +1337,8 @@ class VAEPretrainer:
                 train_kl_sum += kl_loss.item() * b
                 train_zvar_sum += z_var_loss.item() * b
                 train_dip_sum += dip_loss.item() * b
+                train_cl_sum += cl_loss.item() * b
+                train_klb_sum += kl_beta_loss.item() * b
                 train_count += b
 
                 # -- Per-batch logging --
@@ -1265,6 +1376,10 @@ class VAEPretrainer:
                         extra_parts.append(f"zvar={z_var_loss.item():.4f}")
                     if cfg.dip_weight > 0:
                         extra_parts.append(f"dip={dip_loss.item():.6f}")
+                    if _use_contrastive:
+                        extra_parts.append(f"CL={cl_loss.item():.4f}")
+                    if cfg.kl_beta > 0:
+                        extra_parts.append(f"KLβ={kl_beta_loss.item():.4f}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
                         extra_parts.append(
                             f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
@@ -1289,9 +1404,12 @@ class VAEPretrainer:
             train_kl = train_kl_sum / max(train_count, 1)
             train_zvar = train_zvar_sum / max(train_count, 1)
             train_dip = train_dip_sum / max(train_count, 1)
+            train_cl = train_cl_sum / max(train_count, 1)
+            train_klb = train_klb_sum / max(train_count, 1)
             train_loss = (
                 train_ce + cfg.kl_weight * train_kl
                 + cfg.z_var_weight * train_zvar + cfg.dip_weight * train_dip
+                + cfg.contrastive_weight * train_cl + cfg.kl_beta * train_klb
             )
 
             # -- Validate --
@@ -1315,7 +1433,7 @@ class VAEPretrainer:
                     with torch.amp.autocast(
                         device_type=device.type, enabled=cfg.use_amp
                     ):
-                        ce_loss, kl_loss, kl_per_dim, _, _ = _vae_forward(
+                        ce_loss, kl_loss, kl_per_dim, _, _, _, _ = _vae_forward(
                             batch_tokens,
                             batch_lengths,
                             bos_id=bos_id,
@@ -1345,6 +1463,10 @@ class VAEPretrainer:
                 epoch_parts.append(f"zvar={train_zvar:.4f}")
             if cfg.dip_weight > 0:
                 epoch_parts.append(f"dip={train_dip:.6f}")
+            if _use_contrastive:
+                epoch_parts.append(f"CL={train_cl:.4f}")
+            if cfg.kl_beta > 0:
+                epoch_parts.append(f"KLβ={train_klb:.4f}")
             epoch_parts.append(f"total={train_loss:.4f}")
             epoch_parts.append(f"| val: CE={val_ce:.4f}")
             if _do_kl:

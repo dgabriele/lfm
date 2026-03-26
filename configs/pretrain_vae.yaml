@@ -27,10 +27,18 @@ share_decoder_layers: true
 max_seq_len: 96
 encoder_pooling: mean
 
-# KL regularization — disabled (was always pegged at initial value, contributing noise)
+# KL regularization — cyclical annealing (disabled, use kl_beta instead)
 kl_weight: 0.0
 kl_free_bits: 0.5
 kl_warmup_steps: 10000
+
+# Contrastive learning (InfoNCE) — semantic structure in latent space
+contrastive_weight: 0.1
+contrastive_temperature: 0.07
+embeddings_path: data/datasets/leipzig/embeddings.npy
+
+# Fixed KL-beta for distribution smoothness (raw KL, no free bits)
+kl_beta: 0.02
 
 # Training
 batch_size: 160

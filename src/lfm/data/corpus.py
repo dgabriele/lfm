@@ -105,6 +105,30 @@ class MultilingualCorpusDataset(Dataset[tuple[Tensor, int]]):
         return self.data[idx]
 
 
+class IndexedDatasetWrapper(Dataset):
+    """Wraps a dataset to additionally return the original sample index.
+
+    Used by contrastive pretraining to look up pre-computed embeddings
+    by index.  Works with ``random_split`` subsets: extracts the
+    original dataset index from the Subset's index mapping.
+    """
+
+    def __init__(self, dataset: Dataset) -> None:
+        self.dataset = dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)  # type: ignore[arg-type]
+
+    def __getitem__(self, idx: int) -> tuple[Tensor, int, int]:
+        tokens, length = self.dataset[idx]
+        # If the dataset is a Subset, map to the original index
+        if hasattr(self.dataset, "indices"):
+            original_idx = self.dataset.indices[idx]
+        else:
+            original_idx = idx
+        return tokens, length, original_idx
+
+
 def dynamic_pad_collate(
     batch: list[tuple[Tensor, int]],
 ) -> tuple[Tensor, Tensor]:
