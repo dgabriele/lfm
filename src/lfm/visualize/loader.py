@@ -122,7 +122,7 @@ def _load_resume_checkpoint(
         rope_freqs = None
         cached_mask = None
 
-    return {
+    result = {
         "modules": modules,
         "rope_freqs": rope_freqs,
         "cached_mask": cached_mask,
@@ -132,6 +132,10 @@ def _load_resume_checkpoint(
         "bos_id": cfg.spm_vocab_size,
         "eos_id": cfg.spm_vocab_size + 1,
     }
+    if "z_mean" in ckpt:
+        result["z_mean"] = ckpt["z_mean"]
+        result["z_std"] = ckpt["z_std"]
+    return result
 
 
 def _load_decoder_checkpoint(

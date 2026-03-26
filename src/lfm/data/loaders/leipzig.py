@@ -14,7 +14,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from lfm._registry import register
-from lfm.data.loaders.base import CorpusLoaderConfig
+from lfm.data.loaders.base import CorpusLoaderBase, CorpusLoaderConfig, RawSample
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class LeipzigCorpusConfig(CorpusLoaderConfig):
 
 
 @register("corpus_loader", "leipzig")
-class LeipzigCorpusLoader:
+class LeipzigCorpusLoader(CorpusLoaderBase):
     """Load and balance data from the Leipzig Corpora Collection.
 
     Leipzig sentence files use tab-separated format::
@@ -67,6 +67,19 @@ class LeipzigCorpusLoader:
         Raises:
             FileNotFoundError: If ``data_dir`` does not exist.
         """
+        return [
+            (s.language, s.text) for s in self.load_detailed()
+        ]
+
+    def load_detailed(self) -> list[RawSample]:
+        """Load Leipzig data with full provenance (source filenames).
+
+        Returns:
+            List of ``RawSample`` namedtuples with source file metadata.
+
+        Raises:
+            FileNotFoundError: If ``data_dir`` does not exist.
+        """
         cfg = self.config
         data_dir = Path(cfg.data_dir)
 
@@ -83,31 +96,29 @@ class LeipzigCorpusLoader:
             logger.warning("No Leipzig sentence files found in %s", data_dir)
             return []
 
-        # Load per-language, applying caps
-        per_lang: dict[str, list[str]] = defaultdict(list)
+        # Load per-language, applying caps.  Keep (text, filename) pairs.
+        per_lang: dict[str, list[tuple[str, str]]] = defaultdict(list)
 
         for lang_code, filepath in sentence_files:
             if lang_filter is not None and lang_code not in lang_filter:
                 continue
 
             lines = self._parse_sentence_file(filepath)
+            fname = filepath.name
             # Apply length filters
-            lines = [
-                ln[:cfg.max_line_length]
-                for ln in lines
-                if len(ln) >= cfg.min_line_length
-            ]
-            per_lang[lang_code].extend(lines)
+            for ln in lines:
+                if len(ln) >= cfg.min_line_length:
+                    per_lang[lang_code].append((ln[:cfg.max_line_length], fname))
 
         # Apply per-language cap with random subsampling
         rng = random.Random(cfg.seed)
-        samples: list[tuple[str, str]] = []
+        samples: list[RawSample] = []
 
-        for lang_code, lines in sorted(per_lang.items()):
-            if len(lines) > cfg.max_samples_per_language:
-                lines = rng.sample(lines, cfg.max_samples_per_language)
-            for line in lines:
-                samples.append((lang_code, line))
+        for lang_code, items in sorted(per_lang.items()):
+            if len(items) > cfg.max_samples_per_language:
+                items = rng.sample(items, cfg.max_samples_per_language)
+            for text, fname in items:
+                samples.append(RawSample(lang_code, text, "leipzig", fname))
 
         logger.info(
             "Loaded %d samples from %d languages",

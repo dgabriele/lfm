@@ -25,7 +25,8 @@ Agent Embedding (384-dim)
   - Multi-scale attention heads (3/7/15/full window) — phonotactic to clause level
   - Weight-shared layers (2 unique applied 4×) — literal recursion
 - **MultilingualVAEGenerator** (`generator/multilingual_vae.py`): Frozen decoder + learned input projection
-- **VAE Pretraining** (`generator/pretrain.py`): Full pipeline with IPA conversion, nucleus sampling, clean-text sanitization
+- **VAE Pretraining** (`generator/pretrain.py`): Full pipeline with IPA conversion, nucleus sampling, sanitization
+- **Dataset Generation** (`data/dataset/`): HDF5 dataset pipeline — load → sanitize → LLM gate → IPA → balance → HDF5
 - **Referential Game** (`scripts/run_referential_reinforce.py`): REINFORCE-based agent game through the linguistic bottleneck
 
 ### Package Structure
@@ -47,6 +48,7 @@ src/lfm/
   cli/                  # CLI framework (lfm command)
     __init__.py         # create_parser(), main() entry point
     base.py             # CLICommand ABC
+    dataset.py          # lfm dataset {generate,list}
     visualize/          # lfm visualize subcommand group
       tsne.py           # lfm visualize tsne
       clustering.py     # lfm visualize clustering
@@ -83,7 +85,14 @@ src/lfm/
     base.py             # HFPublisher ABC, ReleaseManifest
     model.py            # ModelRelease (decoder checkpoint)
     dataset.py          # DatasetRelease (IPA corpus)
-  data/                 # CorpusDataset, collation, loaders
+  data/                 # CorpusDataset, collation, loaders, datasets
+    sanitize.py         # SanitizeConfig + configurable text sanitization
+    dataset/            # HDF5 dataset generation and reader
+      config.py         # DatasetGenerateConfig, LLMGateConfig, ProcessedSample
+      generator.py      # DatasetGenerator pipeline
+      llm_gate.py       # LLMGatekeeper (accept/fix/reject via small LM)
+      manifest.py       # DatasetManifest (YAML metadata)
+      reader.py         # DatasetReader (load HDF5 for pretraining)
     loaders/            # Leipzig corpus loader, IPA converter, phonetic distance
   embeddings/           # LLM embedding games, sampler, prefetcher, losses, metrics
   training/             # TrainingLoop, TrainingPhase, Callbacks
@@ -93,12 +102,12 @@ src/lfm/
 
 ## Pretraining Results
 
-36 epochs on 560K IPA sentences from 16 languages:
-- **Val CE: 0.59** (PPL ≈ 1.8)
+40 epochs on 560K IPA sentences from 16 languages:
+- **Val CE: 0.52** (PPL ≈ 1.7)
 - **Reconstruction**: near-perfect through 256-dim latent bottleneck, word order largely preserved
 - **Interpolation**: smooth typological transitions (English ↔ Polish)
 - **σ=0.5 perturbation**: paraphrastic variation within language
-- **TTR: 0.949**, rep_rate: 0.00, mean word length: 5.3, active z dims: 239/256
+- **TTR: 0.955**, rep_rate: 0.00, mean word length: 4.7, active z dims: 256/256
 
 ### Sample outputs (epoch 36):
 
@@ -156,12 +165,13 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 ## Commands
 
 - `poetry install` — Install dependencies
+- `poetry install --with datasets` — Install with h5py/num2words (dataset generation)
 - `poetry install --with generator` — Install with sentencepiece
 - `poetry install --with viz` — Install with matplotlib/seaborn (visualization)
 - `poetry install --with phonology` — Install with panphon (legacy)
 - `poetry install --with translator` — Install with transformers/peft (translation)
 - `poetry install --with publish` — Install with huggingface-hub (publishing)
-- `poetry run pytest` — Run tests (75 tests)
+- `poetry run pytest` — Run tests (120 tests)
 - `poetry run ruff check src/` — Lint
 - `poetry run ruff format src/` — Format
 - `poetry run lfm visualize --help` — Show visualization commands
@@ -171,6 +181,9 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - `poetry run lfm translate train` — Train IPA -> English translator
 - `poetry run lfm translate eval --model-dir data/models/v1/translator` — Evaluate translator
 - `poetry run lfm visualize translation --results-dir data/models/v1/translator` — Translation viz
+- `poetry run lfm dataset generate --source leipzig` — Generate HDF5 dataset from Leipzig corpus
+- `poetry run lfm dataset generate --source leipzig --no-llm-gate` — Generate without LLM quality gate
+- `poetry run lfm dataset list --detail` — List installed datasets with per-language stats
 - `poetry run lfm publish model --repo-id user/lfm-decoder-v1` — Publish decoder to HuggingFace
 - `poetry run lfm publish dataset --repo-id user/lfm-ipa-16lang` — Publish IPA corpus to HuggingFace
 
@@ -185,6 +198,8 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - epitran (IPA transcription)
 - clean-text (corpus sanitization)
 - matplotlib + seaborn (visualization)
+- h5py (HDF5 dataset storage)
+- num2words (number-to-word conversion for sanitization)
 - huggingface-hub (model/dataset publishing)
 
 ## Quick Start

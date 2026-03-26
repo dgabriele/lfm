@@ -112,6 +112,7 @@ class VAEPretrainConfig(LFMBaseConfig):
         adv_spectral_norm: Apply spectral normalization to discriminator.
     """
 
+    dataset_path: str | None = None
     corpus_loader: str | None = "leipzig"
     corpus_loader_config: dict[str, Any] = {}
     corpus_paths: list[str] = []
@@ -204,12 +205,25 @@ class VAEPretrainConfig(LFMBaseConfig):
 def _load_corpus_labeled(cfg: VAEPretrainConfig) -> list[tuple[str, str]]:
     """Load corpus with language labels preserved through IPA conversion.
 
-    Uses the registry-based corpus loader system when ``corpus_loader`` is
-    set, falling back to plain file reading from ``corpus_paths`` otherwise.
+    When ``dataset_path`` is set, loads pre-generated IPA from a HDF5
+    dataset (no inline sanitization or IPA conversion).  Otherwise falls
+    back to the legacy pipeline: corpus loader → sanitize → IPA.
 
     Returns:
         List of ``(language_code, ipa_text)`` tuples.
     """
+    # ── Fast path: pre-generated dataset ──────────────────────────────
+    if cfg.dataset_path is not None:
+        from lfm.data.dataset.reader import DatasetReader
+
+        reader = DatasetReader(cfg.dataset_path)
+        labeled = reader.load_ipa_tuples()
+        logger.info(
+            "Loaded %d IPA tuples from dataset: %s", len(labeled), cfg.dataset_path
+        )
+        return labeled
+
+    # ── Legacy path: inline corpus loading + sanitization + IPA ───────
     if cfg.corpus_loader is not None:
         import importlib
 
@@ -280,71 +294,23 @@ def _load_corpus_lines(cfg: VAEPretrainConfig) -> list[str]:
     return [ipa for _lang, ipa in _load_corpus_labeled(cfg)]
 
 
-def _sanitize_one(sample: tuple[str, str]) -> tuple[str, str] | None:
-    """Sanitize a single ``(lang, text)`` sample.  Returns ``None`` to drop."""
-    import re
-    import unicodedata
-
-    from cleantext import clean
-
-    lang, line = sample
-
-    if re.search(r"\d", line):
-        return None
-
-    line = clean(
-        line,
-        fix_unicode=True,
-        to_ascii=False,
-        lower=False,
-        no_urls=True,
-        no_emails=True,
-        no_phone_numbers=True,
-        no_numbers=False,
-        no_digits=False,
-        no_currency_symbols=True,
-        no_punct=False,
-    )
-
-    line = line.replace("<NUMBER>", "").replace("<EMAIL>", "")
-    line = line.replace("<URL>", "").replace("<PHONE>", "")
-    line = " ".join(line.split())
-
-    if not line or len(line) < 20:
-        return None
-    # Count letters + combining marks (covers Devanagari matras,
-    # Arabic diacritics, Korean jamo — all valid linguistic content).
-    _ling_chars = sum(
-        1 for c in line
-        if c.isalpha() or unicodedata.category(c).startswith("M")
-    )
-    alpha_ratio = _ling_chars / max(len(line), 1)
-    if alpha_ratio < 0.7:
-        return None
-    return (lang, line)
-
-
 def _sanitize_samples(
     samples: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
     """Sanitize corpus samples using multiprocessing.
 
-    Drops lines with digits, strips URLs/emails/formatting via
-    ``clean-text``, filters by alphabetic ratio.  Uses all available
-    CPU cores for parallel processing.
+    Delegates to ``lfm.data.sanitize.sanitize_samples`` with legacy-compatible
+    defaults (reject digits, no number spell-out).
     """
-    import multiprocessing as mp
-    import os
+    from lfm.data.sanitize import SanitizeConfig, sanitize_samples
 
-    num_workers = max(1, int(os.cpu_count() * 0.9))
-    logger.info(
-        "Sanitizing %d samples with %d workers...", len(samples), num_workers
+    # Legacy behaviour: reject any digits, no terminal punctuation requirement
+    legacy_cfg = SanitizeConfig(
+        number_policy="reject",
+        symbol_policy="strip",
+        require_terminal_punctuation=False,
     )
-
-    with mp.Pool(num_workers) as pool:
-        results = pool.map(_sanitize_one, samples, chunksize=1000)
-
-    return [r for r in results if r is not None]
+    return sanitize_samples(samples, cfg=legacy_cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -1781,6 +1747,8 @@ class VAEPretrainer:
                     "global_step": global_step,
                     "best_val_loss": best_val_loss,
                     "spm_hash": _file_hash(spm_path),
+                    "z_mean": z_running_mean.cpu(),
+                    "z_std": z_running_std.cpu(),
                     "modules": {
                         k: m.state_dict()
                         for k, m in modules.items()

@@ -15,11 +15,12 @@ LFM gives agents the ability to express internal representations as linguistical
 5. [Pretraining Results](#pretraining-results)
 6. [Structural Analysis](#structural-analysis)
 7. [Agent Game Results](#agent-game-results)
-8. [Visualization CLI](#visualization-cli)
-9. [Quick Start](#quick-start)
-10. [Design](#design)
-11. [Status](#status)
-12. [Further Reading](#further-reading)
+8. [Dataset Generation](#dataset-generation)
+9. [Visualization CLI](#visualization-cli)
+10. [Quick Start](#quick-start)
+11. [Design](#design)
+12. [Status](#status)
+13. [Further Reading](#further-reading)
 
 ---
 
@@ -124,6 +125,7 @@ Agent Embedding (384-dim)
 ```
 src/lfm/
   cli/                  # CLI framework (lfm command)
+    dataset.py          # lfm dataset {generate,list}
     visualize/          # lfm visualize subcommand group (11 subcommands)
   visualize/            # Visualization computation + rendering
   faculty/              # LanguageFaculty compositor
@@ -134,6 +136,8 @@ src/lfm/
     discriminator.py    # StructuralDiscriminator (diagnostic)
     tokenizer.py        # SubwordTokenizer (sentencepiece)
   data/                 # Corpus datasets, loaders, collation
+    sanitize.py         # Configurable text sanitization (SanitizeConfig)
+    dataset/            # HDF5 dataset generation + reader
     loaders/            # Leipzig loader, IPA converter, phonetic distance
   embeddings/           # LLM embedding games, sampler, prefetcher
   core/                 # LFMModule (ABC), LFMLoss
@@ -143,16 +147,16 @@ src/lfm/
 
 ## Pretraining Results
 
-36 epochs on 560K IPA-transcribed sentences from 16 languages (`max_seq_len=96`, cosine LR decay, DIP-VAE covariance regularization, variance floor, 239/256 active latent dims):
+40 epochs on 560K IPA-transcribed sentences from 16 languages (`max_seq_len=96`, cosine LR decay, DIP-VAE covariance regularization, variance floor, 256/256 active latent dims):
 
 | Metric | Value |
 |--------|-------|
-| Val CE | **0.59** (PPL ≈ 1.8) |
-| TTR | 0.949 |
+| Val CE | **0.52** (PPL ≈ 1.7) |
+| TTR | 0.955 |
 | Repetition rate | 0.000 |
 | EOS rate | 1.00 |
-| Mean word length | 5.3 IPA chars |
-| Active z dims | 239/256 |
+| Mean word length | 4.7 IPA chars |
+| Active z dims | 256/256 |
 
 <p align="center">
   <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
@@ -165,63 +169,63 @@ src/lfm/
 The latent bottleneck preserves specific lexical content. English:
 
 ```
-orig: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt pʌlis skɑtlʌnd waɪ ðʌ foʊtʌɡɹæf hæd nɑt bɪn ɹilist
-dec:  ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
+orig: mækswɛl sɛd hi meɪd fɹɛndz fɔɹ laɪf ɑn ðʌ ʃoʊ wɪtʃ ɪnkludʌd ðʌ ʌðɝ ækts
+dec:  mækswɛl sɛd hi meɪd fɔɹ fɹɛndz laɪf ɑn ðʌ ʃoʊ wɪtʃ ɪnklud ðʌ ʌðɝ ækts
 ```
 
-All content words recovered. Word order slightly shuffled (`skɑtlʌnd pʌlis` vs `pʌlis skɑtlʌnd`, `nɑt` moved to end) — content preserved, sequencing approximate.
+All content words recovered. Word order slightly shuffled (`fɔɹ fɹɛndz` vs `fɹɛndz fɔɹ`) — content preserved, sequencing approximate.
 
-Polish (fusional, complex morphology):
+Portuguese (fusional):
 
 ```
-orig: zaatakɔvali nas faɲi muvjɔnt͡s tɔ dɔpjɛrɔ druɡji film ɔ batmaɲɛ t͡sɔ vɨ dɔ xɔlɛrɨ rɔbit͡ɕɛ
-dec:  zaatakɔvali muvjɔnt͡s nas faɲi tɔ dɔpjɛrɔ druɡji t͡sɔ film batma ɔlɛ dɔɲɛɕɛnt͡ɕɛ xɔrɨ vɨdal
+orig: ɛʃtowu mujto fɛliz dɛ ɾɛtomɐɾ os sows dɛpowis dɛ dɛʃsɛs dowis ɐnos ɛ tɐntɐs mudɐnsɐs
+dec:  ɛʃtowu mujto fɛliz dɛ ɾɛtomɐɾ os dowis sows dɛpowis dɛ ɐnos dɛʃsɛs ɛ mudɐnsɐs tɐntɐs
 ```
 
-Core vocabulary preserved (`zaatakɔvali`, `nas`, `faɲi`, `muvjɔnt͡s`, `dɔpjɛrɔ`, `druɡji`, `t͡sɔ`, `film`). Late-sentence words diverge — the bottleneck prioritizes high-information content words.
+All content words preserved. Minor reorderings (`dowis sows` vs `sows ... dowis`, `mudɐnsɐs tɐntɐs` vs `tɐntɐs mudɐnsɐs`) — the bottleneck faithfully preserves vocabulary through the 256-dim latent space.
 
-### Interpolation (English → Polish)
+### Interpolation (English → Portuguese)
 
 Smooth typological transition through the latent space:
 
 ```
-0.00: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
-0.25: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt pʌlis skɑtɪʃ bæl waɪ nɑt hoʊstɝ dɪskʌndʌtaɪtɪŋ ðʌ viniz
-0.50: faʊndɝ ɡʊd seɪ ðʌ lɪθi ælkʌɡɹeɪʃʌnt ɪz ɔlsoʊ wʌn ʌbaʊt kʌlwarnaʃ ɔf dos rɔʃʌn ɔɹ daɪs dɔintos sɔfan
-0.75: zaatakɔvali faɲi nas muvjɔnt͡s tɔ dɔpjɛrɨ zɛwɛnskjɛɡɔ watɡ kak virtualɲa ʂt͡ʂɛrɔ bada ks film andrɛ
-1.00: zaatakɔvali nas faɲi muvjɔnt͡s tɔ dɔpjɛrɔ druɡji t͡sɔ film batma ɔ vɨbiɲɛt͡ɕɛ dɔ rɔlɛ xɔrɨ
+0.00: mækswɛl sɛd hi meɪd fɔɹ fɹɛndz laɪf ɑn ðʌ ʃoʊ wɪtʃ ɪnkludʌd ðʌ ʌðɝ ækts
+0.25: mækswɛl sɛd hi meɪd fɔɹ ʌðɝ dɛz ɐnos tɑp ɡɪv ðʌ kjuɾiɐ sɛɡʃʌnɪst ɑn kæʃnos
+0.50: ɛʃtowu fɛksʌz dɛliz sɛd ðæt hi meɪd ðʌ jɪɹ fɹʌm ðʌ swʌŋ fɹeɪnz laɪf aʊtmæs wɑz viʃɪŋ
+0.75: ɛʃtowu mujto fɛliz dɛ ɾɛtomɐɾ sows dɛpowis dɛ dowis ɐnos ɐpɔs os ɐtiɾɐɾɛlɔvɛjs klazy
+1.00: ɛʃtowu mujto fɛliz dɛ ɾɛtomɐɾ os sows dɛpowis dɛ dowis ɐnos dɛʃsɛs mudɐnsɐs ɛ tɐntɐs
 ```
 
-English phonology at t=0, mixed English-Slavic phonotactics at t=0.50, clean Polish at t=1.
+English phonology at t=0, mixed English-Portuguese phonotactics at t=0.50, clean Portuguese at t=1.
 
 ### Perturbation
 
 Adding noise to a latent code produces paraphrastic variation scaled to the encoder's actual z distribution (σ=1.0 means one encoder standard deviation):
 
 ```
-σ=0.0: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
-σ=0.1: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ leɪtʌst pɹʌɡɹæfʌ foʊtʌ it͡ɕikɝ
-σ=0.5: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skæŋlʌnd ðʌ sɛfʌleɪ lɪdmʌ vɪ thew ɐlbɛjkɔmɛ ɹiɲɪt͡seʃ lɔledr
-σ=1.0: ðʌ pʌlis biɪŋ nɪɡɹɝm vɪ vɤ̆n kɔntukwɑt săprʕ ɪn hzb fɪldwensu hɑli ɪz ðʌ aɪskorifs ɪnrktoɾfdi drimi
+σ=0.0: mækswɛl sɛd hi meɪd fɔɹ fɹɛndz ʃoʊ ɑn ðʌ laɪf wɪtʃ ɪnkludʌd ðʌ ækts ʌðɝ
+σ=0.1: mækswɛl sɛd hi meɪd fɔɹ fɹɛndz ʃoʊ ɑn ðʌ laɪf wɪtʃ ɪnkludʌd ðʌ ækts ʌðɝ
+σ=0.5: mækswɛl hi meɪd sɛd laɪf fɹɛndz ɑn ðʌ menlis wɪtʃ fɔɹ ðʌ æstɪʃoʊz klɑpd
+σ=1.0: mækskswɛnd vlad ɔranfilt͡ɕɛ r sɛd aɪ meɪd ðætrne carne ɔ fɔɹmɝ fɹɪtel buktɨ ʌðɝ hetwʌzʔau sɔ̃ tʂɛx pjɛsɪt͡ʂnɨ pɔɦleli re
 ```
 
-Small noise preserves language and sentence structure (English throughout). At σ=0.5, the sentence frame holds but content words shift. At σ=1.0, phonotactics diverge into mixed typology.
+Small noise preserves language and sentence structure (English throughout). At σ=0.5, the sentence frame holds but content words shift. At σ=1.0, phonotactics diverge into mixed typology (Slavic consonant clusters, Portuguese nasalization).
 
 ### Random z sampling
 
 Sampled from the encoder's tracked distribution, the decoder produces diverse, coherent output across typologies:
 
 ```
-random[0]: pɹoʊtɛlz ʌnd daɪl ɲiən wʌt ðʌ ɪnkɹʌpdeɪʃʌnz ʌv noɦɪ popoɟɪ lɛɟɪ v kɛɹi tu nikolɛt ɪn komːe tu kɐp kiɑntɑla
-random[1]: azeɾvi madinada asanatan ad͡ʒɯ ve duɾumunda tɾaɾt zidɐndoilika ɛsprɛlasa laviki kuɾum baʃkanɯ kon ʔoŋ jɤ̆n zɯllma olduʃc
-random[2]: hɛviʃkoːɑjɑ ivaːn ɛlɛmtɛ ɛzːɛl uːrt͡sukozjɔn køvɛtːɛ zʕmaːl nupunːːɛjː joːbɒn ðʌ fɛdɛrjɒnɒk ɒmit dupupunːn ðʌ neɪʃʌnz tu
+random[0]: ɐɡlɔstivanɨ xɛjinin kamjɛɲajnɨ ne pʂɨznautsja v kompjɛtɲu vipklja pɔjatkji pɔjalami fojkɛk fajrkejkænd naprav
+random[1]: krɨːmanalæːpːlinkjuːɑtːi jɑ jɪɹz vɤrxtɛnspːænjit hanɯn supt͡sialj fjeonofolʔinsaviɐ o kteri rihʌn
+random[2]: wollʌ on t͡ɕɛkaʋwat ani ʌnt͡ɕe tɛsto estjswaʐɛɲɛ nonfmain suls kɑmuljɑ sʌm alɑme phlok ʌnsust bisa
 ```
 
-Each sample exhibits different phonotactic patterns — English-like, Turkish-like, Hungarian-like — reflecting the typological diversity of the training data.
+Each sample exhibits different phonotactic patterns — Russian-like, mixed Uralic/Germanic, Indonesian-like — reflecting the typological diversity of the training data.
 
 ## Structural Analysis
 
-Detailed visualization evidence for the model's structural properties — latent space organization, attention hierarchy, Zipf's law, smoothness, adaptive length, compositionality, and cross-typological interpolation — is presented in **[docs/structural-analysis.md](docs/structural-analysis.md)**, generated via the `lfm visualize all` CLI command.
+Detailed visualization evidence for the model's structural properties — latent space organization, attention hierarchy, Zipf's law, smoothness, adaptive length, compositionality, cross-typological interpolation, and per-dimension latent sweeps — is presented in **[docs/structural-analysis.md](docs/structural-analysis.md)**, generated via the `lfm visualize all` and `lfm explore dim-sweep` CLI commands.
 
 Key findings:
 - **Latent smoothness**: Spearman r=0.86 (token Jaccard) between z-distance and output distance
@@ -297,6 +301,57 @@ After training with curriculum hard negatives (16-way, 100% within-cluster distr
 
 All metrics are highly significant. Similar inputs produce similar messages (topology preservation), and the message hidden states encode recoverable information about the input (diagnostic probe). The hidden-state topsim of 0.335 confirms that the frozen decoder's latent space preserves compositional structure under the learned mapping.
 
+## Dataset Generation
+
+LFM includes a standalone dataset generation pipeline that preprocesses raw corpus text into reusable HDF5 datasets. This decouples preprocessing from pretraining — generate once, reuse across experiments.
+
+The pipeline: **load** (corpus loader) → **sanitize** (configurable rule-based filters) → **LLM gate** (optional quality validation via small LM) → **IPA conversion** → **balance** (per-language caps) → **HDF5 output** (LZ-compressed, with rejected samples saved for inspection).
+
+```bash
+poetry install --with datasets
+
+# Generate from Leipzig corpus
+lfm dataset generate --source leipzig
+
+# Custom: specific languages, skip LLM gate for speed
+lfm dataset generate --source leipzig \
+  --languages eng deu pol hin ara \
+  --max-samples 50000 \
+  --no-llm-gate
+
+# List installed datasets
+lfm dataset list --detail
+```
+
+Each dataset is self-contained at `data/datasets/<name>/`:
+
+```
+data/datasets/leipzig/
+  manifest.yaml    # Metadata: languages, sample counts, config used
+  samples.h5       # Accepted samples (IPA + raw text + provenance)
+  rejected.h5      # Rejected samples with rejection reasons
+```
+
+Pretraining can load directly from a generated dataset — no inline sanitization or IPA conversion:
+
+```yaml
+# configs/pretrain_vae.yaml
+dataset_path: data/datasets/leipzig
+```
+
+### Sanitization
+
+Configurable via `--sanitize-*` CLI flags. Key options:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `number_policy` | `spell_out` | `reject` / `strip` / `keep` / `spell_out` (numbers → words) |
+| `symbol_policy` | `spell_out` | Greek/math symbols: `reject` / `strip` / `keep` / `spell_out` (α → alpha) |
+| `max_foreign_script_ratio` | 0.3 | Code-switching threshold (reject mixed-script lines) |
+| `require_terminal_punctuation` | true | Require sentence-final punctuation |
+
+See **[docs/data-guide.md](docs/data-guide.md)** for the full HDF5 schema and configuration reference.
+
 ## Visualization CLI
 
 LFM includes a CLI visualization suite for generating publication-quality diagnostic plots from a trained VAE checkpoint. All plots in the Structural Analysis section above were generated with this tool.
@@ -337,7 +392,7 @@ lfm visualize all --checkpoint data/vae_resume.pt --output-dir output/viz
 ## Quick Start
 
 ```bash
-poetry install --with generator,viz
+poetry install --with generator,viz,datasets
 ```
 
 ### 0. Download corpus data
@@ -352,13 +407,27 @@ poetry run lfm setup data --all
 
 See **[docs/data-guide.md](docs/data-guide.md)** for the full data layout, checkpoint structure, and consistency verification details.
 
-### Pretrain the VAE decoder
+### 1. Generate dataset (recommended)
+
+Pre-generate an HDF5 dataset for reproducible, fast pretraining:
+
+```bash
+lfm dataset generate --source leipzig --no-llm-gate
+```
+
+### 2. Pretrain the VAE decoder
 
 Everything starts here. This produces the frozen decoder checkpoint that all downstream tasks use.
 
 ```python
 from lfm.generator.pretrain import pretrain_vae_decoder, VAEPretrainConfig
 
+# Using pre-generated dataset (fast — no inline preprocessing)
+metrics = pretrain_vae_decoder(VAEPretrainConfig(
+    dataset_path="data/datasets/leipzig",
+))
+
+# Or legacy: inline corpus loading + sanitization + IPA conversion
 metrics = pretrain_vae_decoder(VAEPretrainConfig(
     corpus_loader="leipzig",
     corpus_loader_config={"data_dir": "data/leipzig"},

@@ -6,12 +6,19 @@ multilingual text data from various sources (Leipzig, OPUS, etc.).
 
 from __future__ import annotations
 
-from lfm.data.loaders.base import CorpusLoader, CorpusLoaderConfig
+from lfm.data.loaders.base import (
+    CorpusLoader,
+    CorpusLoaderBase,
+    CorpusLoaderConfig,
+    RawSample,
+)
 from lfm.data.loaders.leipzig import LeipzigCorpusConfig, LeipzigCorpusLoader
 
 __all__ = [
     "CorpusLoader",
+    "CorpusLoaderBase",
     "CorpusLoaderConfig",
     "LeipzigCorpusConfig",
     "LeipzigCorpusLoader",
+    "RawSample",
 ]

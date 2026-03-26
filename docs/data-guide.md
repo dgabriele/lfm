@@ -114,6 +114,99 @@ Append-only JSON recording each training session (start/resume to completion/kil
 }
 ```
 
+## Pre-generated Datasets (HDF5)
+
+The dataset generation system creates reusable, pre-processed HDF5 datasets
+from corpus sources. Pre-generated datasets skip inline sanitization and IPA
+conversion during pretraining, making experiments faster and reproducible.
+
+### Dataset Layout
+
+```
+data/datasets/<name>/
+  manifest.yaml             # Dataset metadata (languages, config, stats)
+  samples.h5                # Accepted samples (HDF5 with LZ compression)
+  rejected.h5               # Rejected samples with reasons (for inspection)
+```
+
+### HDF5 Schema (`samples.h5`)
+
+| Dataset | Type | Description |
+|---------|------|-------------|
+| `seq` | int64 | Global sequence number |
+| `language` | string | ISO 639-3 code |
+| `source` | string | Corpus source name |
+| `source_file` | string | Original filename |
+| `raw` | string | Original text |
+| `ipa` | string | IPA transcription |
+| `ipa_length` | int32 | Character length of IPA |
+
+### Generating Datasets
+
+```bash
+# Install dataset dependencies
+poetry install --with datasets
+
+# Generate from Leipzig corpus (default settings)
+lfm dataset generate --source leipzig
+
+# Custom: specific languages, spell out numbers
+lfm dataset generate --source leipzig \
+  --languages eng deu pol hin ara \
+  --max-samples 50000 \
+  --sanitize-number-policy spell_out
+
+# Strict script purity for Hindi
+lfm dataset generate --source leipzig \
+  --languages hin \
+  --sanitize-max-foreign-script-ratio 0.1
+
+# Skip LLM quality gate (faster)
+lfm dataset generate --source leipzig --no-llm-gate
+
+# List installed datasets
+lfm dataset list
+lfm dataset list --detail
+```
+
+### Using in Pretraining
+
+Set `dataset_path` in the pretraining config to skip inline preprocessing:
+
+```yaml
+# configs/pretrain_vae.yaml
+dataset_path: data/datasets/leipzig
+```
+
+Or via Python:
+
+```python
+config = VAEPretrainConfig(
+    dataset_path="data/datasets/leipzig",
+)
+```
+
+### Sanitization Pipeline
+
+The dataset generator applies configurable rule-based filters:
+
+| Filter | Default | Description |
+|--------|---------|-------------|
+| `number_policy` | `spell_out` | `reject`/`strip`/`keep`/`spell_out` |
+| `symbol_policy` | `spell_out` | Greek/math symbols: `reject`/`strip`/`keep`/`spell_out` |
+| `alpha_ratio_min` | 0.7 | Min ratio of alphabetic characters |
+| `max_foreign_script_ratio` | 0.3 | Max ratio of foreign-script words |
+| `max_word_repetition_ratio` | 0.5 | Reject degenerate repetitive text |
+| `require_terminal_punctuation` | true | Require sentence-final punctuation |
+
+### LLM Quality Gate
+
+An optional stage that uses a small LM (Qwen2.5-0.5B) to validate sanitized
+text quality. Each sample receives an accept/fix/reject verdict. Rejected
+samples are saved to `rejected.h5` for inspection.
+
+Disable with `--no-llm-gate` for faster generation.
+
 ## Corpus Acquisition
 
 ### Leipzig Corpora Collection

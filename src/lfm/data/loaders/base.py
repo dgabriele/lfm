@@ -1,16 +1,30 @@
 """Abstract base for corpus loaders.
 
-Defines the ``CorpusLoader`` protocol and ``CorpusLoaderConfig`` base config
-for the modular corpus loading system.  Concrete loaders (Leipzig, OPUS, etc.)
-register via ``@register("corpus_loader", name)`` and produce balanced
+Defines the ``CorpusLoader`` protocol, ``CorpusLoaderBase`` ABC, and
+``CorpusLoaderConfig`` base config for the modular corpus loading system.
+Concrete loaders (Leipzig, OPUS, etc.) register via
+``@register("corpus_loader", name)`` and produce balanced
 ``(language_code, text_line)`` tuples.
 """
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from lfm.config.base import LFMBaseConfig
+
+
+class RawSample(NamedTuple):
+    """A single raw text sample with full provenance metadata.
+
+    Used by the dataset generation pipeline to track where each sample
+    came from through the entire load → sanitize → IPA → HDF5 pipeline.
+    """
+
+    language: str       # ISO 639-3
+    text: str           # Raw text
+    source: str         # Corpus source name (e.g. "leipzig")
+    source_file: str    # Original filename (e.g. "eng_news_2023_100K-sentences.txt")
 
 
 class CorpusLoaderConfig(LFMBaseConfig):
@@ -48,3 +62,33 @@ class CorpusLoader(Protocol):
             across languages according to the loader's configuration.
         """
         ...
+
+
+class CorpusLoaderBase:
+    """Base class for corpus loaders with ``load_detailed()`` support.
+
+    Provides a default ``load_detailed()`` that wraps ``load()`` output
+    into ``RawSample`` namedtuples.  Subclasses can override to provide
+    richer metadata (e.g. source filenames).
+    """
+
+    config: CorpusLoaderConfig
+
+    def load(self) -> list[tuple[str, str]]:
+        """Load and balance corpus data (abstract — subclasses must implement)."""
+        raise NotImplementedError
+
+    def load_detailed(self) -> list[RawSample]:
+        """Load corpus data with full provenance metadata.
+
+        Default implementation wraps ``load()`` output with the config
+        name as source and empty source_file.  Override in subclasses
+        to preserve actual filenames.
+
+        Returns:
+            List of ``RawSample`` namedtuples.
+        """
+        return [
+            RawSample(lang, text, self.config.name, "")
+            for lang, text in self.load()
+        ]

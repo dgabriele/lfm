@@ -216,7 +216,11 @@ class LengthDistVisualization(BaseVisualization):
         decoded_tokens = decode_z(z_subset, data, self.config)
 
         decoded_lengths = self._measure_lengths(decoded_tokens)
-        corpus_lengths = self._measure_lengths(token_ids_list)
+        # Cap corpus lengths at max_seq_len — training truncates to this
+        max_seq = data["cfg"].max_seq_len
+        corpus_lengths = np.minimum(
+            self._measure_lengths(token_ids_list), max_seq
+        )
 
         logger.info(
             "Decoded lengths — mean: %.1f, std: %.1f | "
