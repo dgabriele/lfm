@@ -1538,6 +1538,9 @@ class VAEPretrainer:
                         util = rvq.utilization
                         util_str = "/".join(f"{u:.0%}" for u in util)
                         extra_parts.append(f"util={util_str}")
+                        if hasattr(rvq, "quant_errors"):
+                            qe = rvq.quant_errors
+                            extra_parts.append(f"qe={sum(qe)/len(qe):.4f}")
                         if hasattr(rvq, "_last_balance_loss"):
                             extra_parts.append(f"bal={rvq._last_balance_loss:.3f}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:

@@ -122,6 +122,9 @@ class VectorQuantizer(nn.Module):
         # Commitment loss: encourage encoder to commit to codebook entries
         commitment_loss = (z - quantized.detach()).pow(2).mean()
 
+        # Track quantization error for diagnostics
+        self._last_quant_error = commitment_loss.detach().item()
+
         # EMA codebook update (during training only)
         if self.ema_update and self.training:
             with torch.no_grad():
@@ -599,6 +602,13 @@ class GroupedVQ(nn.Module):
         return [
             (self._usage_counts[i] > 0).float().mean().item()
             for i in range(self.num_groups)
+        ]
+
+    @property
+    def quant_errors(self) -> list[float]:
+        """Per-group mean quantization error from last forward pass."""
+        return [
+            getattr(g, "_last_quant_error", 0.0) for g in self.groups
         ]
 
     def reset_usage(self) -> None:
