@@ -117,6 +117,8 @@ def main(
     curriculum_start: float = 0.0,
     curriculum_end: float = 1.0,
     resume: str | None = None,
+    vq_codebook_path: str | None = None,
+    vq_residual_alpha: float = 1.0,
 ) -> dict[str, float]:
     """Run the REINFORCE referential game.
 
@@ -143,7 +145,9 @@ def main(
             pretrained_decoder_path=decoder_path,
             spm_model_path=spm_path,
             freeze_decoder=True,
-            max_output_len=96,  # match pretrained decoder capacity
+            max_output_len=96,
+            vq_codebook_path=vq_codebook_path,
+            vq_residual_alpha=vq_residual_alpha,
         ),
     )
 
@@ -385,5 +389,11 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--vq-codebook", default=None, help="Path to VQ codebook")
+    parser.add_argument("--vq-alpha", type=float, default=1.0, help="VQ residual alpha (0=discrete, 1=continuous)")
     args = parser.parse_args()
-    main(resume=args.resume, steps=args.steps, batch_size=args.batch_size, device=args.device)
+    main(
+        resume=args.resume, steps=args.steps, batch_size=args.batch_size,
+        device=args.device, vq_codebook_path=args.vq_codebook,
+        vq_residual_alpha=args.vq_alpha,
+    )

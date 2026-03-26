@@ -238,6 +238,26 @@ class MultilingualVAEGenerator(GeneratorModule):
             self._input_refine[-1].weight.mul_(0.01)
             self._input_refine[-1].bias.zero_()
 
+        # Scale initialization to the encoder's z distribution so the
+        # agent starts in-distribution from step 0.  Without this, the
+        # default init produces z at σ≈0.5 while the decoder expects σ≈0.04.
+        if self._z_stats_initialized:
+            with torch.no_grad():
+                target_std = self._z_std.mean().item()
+                target_mean = self._z_mean
+                # Estimate current output std from weight norms
+                current_std = self._input_proj.weight.data.std().item() * (input_dim ** 0.5)
+                scale = target_std / max(current_std, 1e-6)
+                self._input_proj.weight.data.mul_(scale)
+                self._input_proj.bias.data.copy_(
+                    target_mean.repeat(2)  # mu and logvar both centered
+                )
+                self._input_refine[0].weight.data.mul_(scale)
+                logger.info(
+                    "Scaled _input_proj init: target_std=%.4f, scale=%.4f",
+                    target_std, scale,
+                )
+
         if self._pooling == "attention":
             self._attention_pool_query = nn.Parameter(
                 torch.randn(1, 1, input_dim, device=device) * 0.02
