@@ -77,6 +77,14 @@ class GeneratorConfig(LFMBaseConfig):
     spm_model_path: str | None = None
     freeze_decoder: bool = True
 
+    # Post-hoc VQ codebook for hybrid discrete+continuous agent interface.
+    # Fitted to the pretrained encoder's z distribution via fit_vq_codebook.py.
+    # When set, the agent's z is decomposed into a discrete VQ code (anchor)
+    # plus a continuous residual (fine detail), both in-distribution for the
+    # decoder.  Controls the blend via vq_residual_alpha.
+    vq_codebook_path: str | None = None
+    vq_residual_alpha: float = 1.0  # 0=pure VQ, 1=full residual passthrough
+
     # Vector Quantization (VQ-VAE mode)
     use_vq: bool = False
     vq_mode: str = "grouped"  # "residual" or "grouped"

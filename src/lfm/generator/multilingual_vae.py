@@ -106,6 +106,11 @@ class MultilingualVAEGenerator(GeneratorModule):
         # -- Precomputed causal mask (lazy, created on first decode) --
         self._full_causal_mask: Tensor | None = None
 
+        # -- Post-hoc VQ codebook for hybrid agent interface --
+        self._vq_codebook: nn.Module | None = None
+        if config.vq_codebook_path is not None:
+            self._load_vq_codebook(config.vq_codebook_path)
+
         # -- Tokenizer (lazy, loaded from spm_model_path) --
         self._tokenizer: SubwordTokenizer | None = None
         if config.spm_model_path is not None:
@@ -242,6 +247,58 @@ class MultilingualVAEGenerator(GeneratorModule):
     # Pretrained weight loading
     # ------------------------------------------------------------------
 
+    def _load_vq_codebook(self, path: str) -> None:
+        """Load a post-hoc VQ codebook fitted to the encoder z distribution.
+
+        The codebook provides discrete anchor points over the continuous
+        latent manifold.  At agent time, z is decomposed into the nearest
+        VQ code (in-distribution anchor) plus a continuous residual.
+        """
+        from pathlib import Path as _Path
+
+        from lfm.generator.quantize import GroupedVQ
+
+        if not _Path(path).exists():
+            logger.warning("VQ codebook not found: %s — skipping", path)
+            return
+
+        cb = torch.load(path, map_location="cpu", weights_only=False)
+        self._vq_codebook = GroupedVQ(
+            num_groups=cb["num_groups"],
+            codebook_size=cb["codebook_size"],
+            embedding_dim=cb["embedding_dim"],
+        )
+        self._vq_codebook.load_state_dict(cb["vq_state_dict"])
+        self._vq_codebook.eval()
+        logger.info(
+            "Loaded VQ codebook: %d groups × %d codes (qe=%.6f, util=%.0f%%)",
+            cb["num_groups"], cb["codebook_size"],
+            cb.get("final_qe", 0), cb.get("final_util", 0) * 100,
+        )
+
+    def _quantize_z(self, z: Tensor) -> Tensor:
+        """Decompose z into VQ anchor + scaled residual.
+
+        Returns z_quantized + alpha * (z - z_quantized), where alpha
+        controls how much continuous detail passes through.  At alpha=0,
+        output is pure codebook entries (fully discrete).  At alpha=1,
+        output equals the original z (codebook has no effect).
+
+        The VQ anchor ensures the decoder always sees a point that's
+        in-distribution (a codebook entry ± small residual), solving
+        the calibration problem for the agent game.
+        """
+        if self._vq_codebook is None:
+            return z
+
+        vq = self._vq_codebook.to(z.device)
+        with torch.no_grad():
+            z_q, _, _ = vq(z)
+
+        alpha = self.config.vq_residual_alpha
+        # Straight-through for the VQ part, continuous gradient for residual
+        return z_q + alpha * (z - z_q)
+
     def _load_pretrained_decoder(self, path: str) -> None:
         """Load pretrained VAE decoder weights from a checkpoint.
 
@@ -317,6 +374,8 @@ class MultilingualVAEGenerator(GeneratorModule):
             self.decoder,
             self.output_head,
         ]
+        if self._vq_codebook is not None:
+            frozen_modules.append(self._vq_codebook)
         for module in frozen_modules:
             for param in module.parameters():
                 param.requires_grad_(False)
@@ -383,7 +442,12 @@ class MultilingualVAEGenerator(GeneratorModule):
         device = z.device
         max_len = self._max_output_len
 
-        if self._z_stats_initialized:
+        # Hybrid VQ: decompose into discrete anchor + continuous residual.
+        # This replaces calibrate_z when a codebook is available — the VQ
+        # anchor is always in-distribution by construction.
+        if self._vq_codebook is not None:
+            z = self._quantize_z(z)
+        elif self._z_stats_initialized:
             z = self.calibrate_z(z)
 
         memory = self.latent_to_decoder(z).unsqueeze(1)
