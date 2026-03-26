@@ -1533,16 +1533,14 @@ class VAEPretrainer:
                     if cfg.kl_beta > 0:
                         extra_parts.append(f"KLβ={kl_beta_loss.item():.4f}")
                     if cfg.use_vq:
-                        extra_parts.append(f"VQ={vq_loss.item():.4f}")
                         rvq = modules["_residual_vq"]
-                        util = rvq.utilization
-                        util_str = "/".join(f"{u:.0%}" for u in util)
-                        extra_parts.append(f"util={util_str}")
+                        extra_parts.append(f"VQ={vq_loss.item():.4f}")
                         if hasattr(rvq, "quant_errors"):
                             qe = rvq.quant_errors
                             extra_parts.append(f"qe={sum(qe)/len(qe):.4f}")
                         if hasattr(rvq, "_last_balance_loss"):
                             extra_parts.append(f"bal={rvq._last_balance_loss:.3f}")
+                        _vq_util_str = " ".join(f"{u:.0%}" for u in rvq.utilization)
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
                         extra_parts.append(
                             f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
@@ -1561,6 +1559,8 @@ class VAEPretrainer:
                         mem_mb,
                         extra_str,
                     )
+                    if cfg.use_vq:
+                        logger.info("    util: %s", _vq_util_str)
                     batch_start = time.time()
 
             train_ce = train_ce_sum / max(train_count, 1)
