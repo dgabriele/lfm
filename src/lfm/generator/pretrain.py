@@ -1519,6 +1519,61 @@ class VAEPretrainer:
 
             logger.info("  ".join(epoch_parts))
 
+            # -- Contrastive alignment diagnostic --
+            # Measure Spearman correlation between z-cosine and embedding-cosine
+            # on a sample of training data.  This quantifies how much semantic
+            # structure the z space has — independent of the CL loss value.
+            if _use_contrastive and corpus_embeddings is not None:
+                with torch.no_grad():
+                    # Collect z vectors from a subset of training data
+                    _diag_z: list[Tensor] = []
+                    _diag_idx: list[int] = []
+                    _diag_count = 0
+                    for _db in train_loader:
+                        if _use_contrastive:
+                            _dt, _dl, _di = _db
+                        else:
+                            _dt, _dl = _db
+                            _di = None
+                        _dt = _dt.to(device)
+                        _dl = torch.as_tensor(_dl, device=device)
+                        with torch.amp.autocast(
+                            device_type=device.type, enabled=cfg.use_amp,
+                        ):
+                            _, _, _, _zb, _, _, _ = _vae_forward(
+                                _dt, _dl, bos_id=bos_id, full_vocab=full_vocab,
+                                kl_free_bits=0.0, compute_kl=False, **modules,
+                            )
+                        _diag_z.append(_zb.cpu())
+                        if _di is not None:
+                            _diag_idx.extend(_di.tolist())
+                        _diag_count += _zb.size(0)
+                        if _diag_count >= 2000:
+                            break
+
+                    _dz = torch.cat(_diag_z, dim=0)[:2000]
+                    _di_list = _diag_idx[:2000]
+                    _de = corpus_embeddings[_di_list]
+
+                    _zn = F.normalize(_dz.float(), dim=-1)
+                    _en = F.normalize(_de.float(), dim=-1)
+
+                    # Sample 2000 random pairs
+                    _rng = torch.Generator().manual_seed(epoch)
+                    _ia = torch.randint(0, len(_dz), (2000,), generator=_rng)
+                    _ib = torch.randint(0, len(_dz), (2000,), generator=_rng)
+                    _z_sims = (_zn[_ia] * _zn[_ib]).sum(dim=-1)
+                    _e_sims = (_en[_ia] * _en[_ib]).sum(dim=-1)
+
+                    # Spearman correlation
+                    from scipy.stats import spearmanr as _spearmanr
+
+                    _corr, _ = _spearmanr(_z_sims.numpy(), _e_sims.numpy())
+                    logger.info(
+                        "  z-embed alignment: r=%.3f (v1 baseline=0.245)",
+                        _corr,
+                    )
+
             # -- Epoch-end evaluation: reconstruction, interpolation, perturbation, random --
             with torch.no_grad():
 
