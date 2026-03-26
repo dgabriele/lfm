@@ -126,6 +126,10 @@ class MultilingualVAEGenerator(GeneratorModule):
         )
         self._z_stats_initialized = False
 
+        # -- Agent z running statistics (for calibration) --
+        self._agent_z_mean: Tensor | None = None
+        self._agent_z_std: Tensor | None = None
+
         # -- Forward cache for extra_losses --
         self._cached_mu: Tensor | None = None
         self._cached_logvar: Tensor | None = None
@@ -172,16 +176,13 @@ class MultilingualVAEGenerator(GeneratorModule):
     def calibrate_z(self, z: Tensor) -> Tensor:
         """Transform z to match the pretrained encoder's distribution.
 
-        Applies an affine transform so that the decoder sees z values
-        with the same per-dimension mean and standard deviation as during
-        pretraining.  This preserves the *direction* of z (which encodes
-        semantics) while matching the *scale* the decoder expects (which
-        controls EOS behavior and output quality).
+        Rescales each z vector so its L2 norm matches the typical norm
+        from pretraining, then shifts to the encoder's mean.  This is a
+        stable, per-sample operation that doesn't depend on batch
+        statistics or running averages — no moving target for REINFORCE.
 
-        At pretraining time (stats not yet loaded from checkpoint), this
-        is approximately a no-op since the stats track the current encoder.
-        The real value is at agent time, where the input projection may
-        produce z in a completely different range.
+        Preserves the *direction* of z (semantic content) while ensuring
+        the decoder sees values in the magnitude range it was trained on.
 
         Args:
             z: Latent codes ``(batch, latent_dim)``.
@@ -189,16 +190,14 @@ class MultilingualVAEGenerator(GeneratorModule):
         Returns:
             Calibrated z with the pretrained distribution's statistics.
         """
-        # Standardize z to zero-mean, unit-variance per dimension,
-        # then scale to the pretrained distribution.
-        z_mean = z.mean(dim=0)
-        if z.size(0) > 1:
-            z_std = z.std(dim=0).clamp(min=1e-6)
-            z_normalized = (z - z_mean) / z_std
-        else:
-            # Single sample — can't compute std, just center
-            z_normalized = z - z_mean
-        return z_normalized * self._z_std + self._z_mean
+        # Target norm: typical L2 norm of encoder z during pretraining
+        target_norm = (self._z_mean.norm() ** 2 + (self._z_std ** 2).sum()).sqrt()
+
+        # Center z around origin, rescale to target norm, shift to encoder mean
+        z_centered = z - z.mean(dim=0, keepdim=True)
+        z_norm = z_centered.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        z_scaled = z_centered * (target_norm / z_norm)
+        return z_scaled + self._z_mean
 
     # ------------------------------------------------------------------
     # Lazy initialization
@@ -279,11 +278,12 @@ class MultilingualVAEGenerator(GeneratorModule):
         self.output_head.load_state_dict(checkpoint["output_head"])
 
         # Load latent calibration statistics if present.
-        # With KL=0 pretraining, the encoder z distribution is unconstrained
-        # and drifts to a very narrow range (std << 1).  Calibrating agent z
-        # to match this crushed distribution destroys discriminative signal.
-        # Only enable calibration when z_std is reasonably large, indicating
-        # KL regularization was active during pretraining.
+        # calibrate_z() rescales agent z to match the encoder's distribution,
+        # preserving direction (semantics) while matching magnitude (EOS
+        # behavior).  Only enabled when z_std is reasonably large; with
+        # KL=0 pretraining (σ≈0.04), calibration destabilizes REINFORCE
+        # training — the uncalibrated path produces fixed-length messages
+        # but achieves higher accuracy.
         if "z_mean" in checkpoint and "z_std" in checkpoint:
             z_std_mean = checkpoint["z_std"].mean().item()
             if z_std_mean > 0.1:
@@ -296,9 +296,13 @@ class MultilingualVAEGenerator(GeneratorModule):
                     z_std_mean,
                 )
             else:
+                # Store stats for exploration tools (dim-sweep etc.)
+                # but don't use them for calibration during agent training.
+                self._z_mean.copy_(checkpoint["z_mean"])
+                self._z_std.copy_(checkpoint["z_std"])
                 logger.info(
-                    "Skipping z calibration: encoder z_std=%.4f is too narrow "
-                    "(KL=0 pretraining), calibration would crush agent signal",
+                    "z calibration disabled (σ=%.4f, KL=0 pretraining) — "
+                    "stats loaded for exploration only",
                     z_std_mean,
                 )
 
