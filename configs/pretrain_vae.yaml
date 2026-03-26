@@ -1,5 +1,5 @@
 # VAE decoder pretraining config (v2)
-# Retrained on CLI-generated dataset with attention pooling.
+# Identical to v1 recipe except: attention pooling, new dataset pipeline.
 
 dataset_path: data/datasets/leipzig
 corpus_loader: leipzig
@@ -23,7 +23,7 @@ attention_global_every: 7
 use_rope: true
 share_decoder_layers: true
 max_seq_len: 96
-encoder_pooling: mean
+encoder_pooling: attention
 
 # KL regularization — disabled
 kl_weight: 0.0
@@ -36,6 +36,11 @@ contrastive_temperature: 0.07
 embeddings_path: ""
 kl_beta: 0.0
 
+# Phonetic features — disabled
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+
 # Training
 batch_size: 160
 gradient_accumulation_steps: 1
@@ -47,11 +52,6 @@ num_epochs: 40
 # Latent regularization
 z_var_weight: 0.0
 z_var_target: 0.05
-# Phonetic embedding initialization and label smoothing
-phonetic_init: true
-phonetic_init_scale: 0.5
-phonetic_label_smoothing: 0.1
-
 word_dropout: 0.0
 word_dropout_min: 0.0
 word_dropout_anneal_epochs: 20
