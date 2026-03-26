@@ -223,6 +223,7 @@ class VAEPretrainConfig(LFMBaseConfig):
     vq_entropy_weight: float = 0.1
     vq_balance_weight: float = 0.1
     vq_orthogonality_weight: float = 0.01
+    vq_noise_sigma: float = 0.0
     vq_ema_update: bool = True
     vq_decay: float = 0.99
 
@@ -541,6 +542,12 @@ def _vae_forward(
         # VQ-VAE path: deterministic encoding → discrete quantization
         z_continuous = enc_to_latent(pooled)  # (B, latent_dim)
         z, vq_commitment_loss, _vq_indices = _residual_vq(z_continuous)
+        # Noise augmentation: train decoder to handle continuous
+        # perturbations around codebook entries.  At agent time, the
+        # continuous residual from _input_proj stays within this envelope.
+        if _cfg is not None and getattr(_cfg, "vq_noise_sigma", 0) > 0:
+            if enc_token_embedding.training:
+                z = z + torch.randn_like(z) * _cfg.vq_noise_sigma
         mu = z_continuous
         logvar = torch.zeros_like(z_continuous)
     else:

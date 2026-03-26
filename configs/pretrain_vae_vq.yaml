@@ -10,7 +10,7 @@ corpus_loader_config:
 spm_vocab_size: 8000
 
 # Architecture
-latent_dim: 384
+latent_dim: 256
 encoder_num_layers: 2
 decoder_hidden_dim: 512
 decoder_num_layers: 4
@@ -28,9 +28,10 @@ encoder_pooling: mean
 # Vector Quantization
 use_vq: true
 vq_mode: grouped                 # "grouped" (product VQ) or "residual" (sequential)
-vq_num_groups: 48                # number of independent codebook groups (384/48 = 8 dims each)
+vq_num_groups: 32                # number of independent codebook groups (256/32 = 8 dims each)
 vq_num_levels: 4                 # for residual mode (unused in grouped)
 vq_codebook_size: 256            # entries per codebook (256^32 combinations)
+vq_noise_sigma: 0.05             # noise augmentation — train decoder for continuous offsets
 vq_commitment_weight: 0.1        # ||z_e - sg(e)||² (lower — qe is already near zero)
 vq_entropy_weight: 0.02          # maximize codebook usage entropy (scaled for 32 groups)
 vq_balance_weight: 0.05          # equalize variance-explained across groups
