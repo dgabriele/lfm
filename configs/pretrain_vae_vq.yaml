@@ -34,7 +34,7 @@ vq_codebook_size: 64             # entries per codebook
 vq_commitment_weight: 0.25       # ||z_e - sg(e)||²
 vq_entropy_weight: 0.1           # maximize codebook usage entropy
 vq_balance_weight: 0.1           # equalize variance-explained across groups
-vq_orthogonality_weight: 0.01    # maximize angular separation between codes
+vq_orthogonality_weight: 0.0     # disabled — conflicts with EMA codebook updates
 vq_ema_update: true              # EMA codebook updates (vs gradient)
 vq_decay: 0.99                   # EMA decay rate
 
