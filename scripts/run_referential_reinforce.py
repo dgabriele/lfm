@@ -116,6 +116,7 @@ def main(
     curriculum_warmup: int = 500,
     curriculum_start: float = 0.0,
     curriculum_end: float = 1.0,
+    resume: str | None = None,
 ) -> dict[str, float]:
     """Run the REINFORCE referential game.
 
@@ -178,15 +179,25 @@ def main(
         sum(p.numel() for p in receiver_params),
     )
 
+    # Resume from checkpoint
+    start_step = 0
+    baseline = 0.0
+    if resume is not None:
+        ckpt = torch.load(resume, map_location=torch_device, weights_only=False)
+        faculty.generator._input_proj.load_state_dict(ckpt["input_proj"])
+        faculty.generator._input_refine.load_state_dict(ckpt["input_refine"])
+        msg_encoder.load_state_dict(ckpt["msg_encoder"])
+        receiver.load_state_dict(ckpt["receiver"])
+        start_step = ckpt.get("step", 0)
+        baseline = ckpt.get("baseline", 0.0)
+        logger.info("Resumed from %s at step %d (baseline=%.3f)", resume, start_step, baseline)
+
     embeddings_np = store._embeddings
     cluster_labels = store._cluster_labels
     n = embeddings_np.shape[0]
     num_candidates = num_distractors + 1
     chance = 1.0 / num_candidates
     rng = np.random.default_rng(42)
-
-    # REINFORCE baseline (running mean of rewards)
-    baseline = 0.0
 
     logger.info(
         "REINFORCE referential game: %d distractors, chance=%.1f%%, curriculum=%s",
@@ -198,7 +209,7 @@ def main(
             curriculum_start * 100, curriculum_end * 100, curriculum_warmup,
         )
 
-    for step in range(steps):
+    for step in range(start_step, steps):
         # --- Curriculum difficulty ---
         if curriculum:
             frac = min(step / max(curriculum_warmup, 1), 1.0)
@@ -367,4 +378,12 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="REINFORCE referential game")
+    parser.add_argument("--resume", default=None, help="Resume from checkpoint")
+    parser.add_argument("--steps", type=int, default=2000)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--device", default="cuda")
+    args = parser.parse_args()
+    main(resume=args.resume, steps=args.steps, batch_size=args.batch_size, device=args.device)

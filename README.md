@@ -34,7 +34,7 @@ The key mechanism is a **frozen linguistic bottleneck**: a VAE decoder pretraine
 
 The goal is to synthesize consistent, structured, non-human natural language corpora — the output of agents reasoning over dynamical systems in their own terms — and then translate those corpora into human language. Listen to what agents have to say about systems we study, from perspectives grounded in the dynamics but fundamentally outside our own scientific trajectory. Perspectives that might see structure where we see noise, or draw distinctions where we see uniformity.
 
-This is not metaphorical. The pipeline is concrete: an agent's internal embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for another agent to identify what was communicated (93% accuracy, 7.4x above chance). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
+This is not metaphorical. The pipeline is concrete: an agent's internal embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for another agent to identify what was communicated (89% accuracy, 14x above chance). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
 
 ## The Problem
 
@@ -240,25 +240,26 @@ REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 
 
 | Metric | Value |
 |--------|-------|
-| Accuracy (100% hard negatives) | **~95%** (chance = 6.25%) |
-| Peak batch accuracy | **96.7%** |
-| Improvement over chance | **15.2x** |
-| Message length | 17-19 tokens (variable) |
-| Receiver loss | 0.07-0.12 (from 2.8 at start) |
-| Batch size | 512 |
+| Accuracy (100% hard negatives) | **~89%** (chance = 6.25%) |
+| Peak batch accuracy | **92.2%** |
+| Improvement over chance | **14.3x** |
+| Message length | 96 tokens |
+| Receiver loss | 0.27-0.50 (from 2.8 at start) |
+| Batch size | 128 |
 | Convergence | ~500 steps to plateau |
 
 ### Curriculum training
 
-The game starts with random (easy) distractors and linearly ramps to 100% within-cluster (hard) distractors over 500 steps. The system maintains >93% accuracy even when all 15 distractors come from the same semantic cluster as the target — meaning the frozen linguistic bottleneck carries fine-grained discriminative information, not just coarse topic-level distinctions.
+The game starts with random (easy) distractors and linearly ramps to 100% within-cluster (hard) distractors over 500 steps. The system maintains ~89% accuracy even when all 15 distractors come from the same semantic cluster as the target — meaning the frozen linguistic bottleneck carries fine-grained discriminative information, not just coarse topic-level distinctions.
 
 ```
-step=0    hard=0%    acc=4.7%    (random init)
-step=100  hard=20%   acc=89.1%
-step=250  hard=50%   acc=93.9%
-step=500  hard=100%  acc=94.9%
-step=700  hard=100%  acc=96.7%   (peak)
-step=1500 hard=100%  acc=94.3%   (stable plateau)
+step=0    hard=0%    acc=6.2%    (random init)
+step=50   hard=10%   acc=91.4%
+step=250  hard=50%   acc=81.2%
+step=500  hard=100%  acc=88.3%
+step=1000 hard=100%  acc=90.6%
+step=1500 hard=100%  acc=88.3%
+step=2000 hard=100%  acc=89.1%   (stable plateau)
 ```
 
 ### Example outputs
