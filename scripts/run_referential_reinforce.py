@@ -156,6 +156,7 @@ def main(
     vq_codebook_path: str | None = None,
     vq_residual_alpha: float = 1.0,
     length_cost: float = 0.0,
+    target_length: int = 96,
     num_statements: int = 1,
     max_output_len: int = 96,
 ) -> dict[str, float]:
@@ -346,8 +347,9 @@ def main(
             # message length.  Incorrect predictions always get 0.  This
             # incentivizes the shortest message that still discriminates.
             msg_lengths = gen_mask.float().sum(dim=1)  # (B,)
-            max_len = gen_mask.size(1)
-            reward = correct * (1.0 - length_cost * msg_lengths / max_len)
+            # Normalize by the target message length. Messages shorter than
+            # this get bonus reward, longer get penalized toward zero.
+            reward = correct * (1.0 - length_cost * msg_lengths / target_length).clamp(min=0)
             # Update baseline
             baseline = baseline_decay * baseline + (1 - baseline_decay) * reward.mean().item()
             advantage = reward - baseline
@@ -456,12 +458,16 @@ if __name__ == "__main__":
     parser.add_argument("--vq-codebook", default=None, help="Path to VQ codebook")
     parser.add_argument("--vq-alpha", type=float, default=1.0, help="VQ residual alpha")
     parser.add_argument("--length-cost", type=float, default=0.0, help="Length penalty")
+    parser.add_argument("--target-length", type=int, default=96, help="Length cost norm")
     parser.add_argument("--num-statements", type=int, default=1, help="Statements per input")
     parser.add_argument("--max-output-len", type=int, default=96, help="Max tokens per statement")
+    parser.add_argument("--curriculum-warmup", type=int, default=500, help="Curriculum steps")
     args = parser.parse_args()
     main(
         resume=args.resume, steps=args.steps, batch_size=args.batch_size,
         device=args.device, vq_codebook_path=args.vq_codebook,
         vq_residual_alpha=args.vq_alpha, length_cost=args.length_cost,
+        target_length=args.target_length,
         num_statements=args.num_statements, max_output_len=args.max_output_len,
+        curriculum_warmup=args.curriculum_warmup,
     )
