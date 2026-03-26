@@ -4,6 +4,7 @@
 # Previous successful run achieved:
 #   Val CE: 0.94 (PPL ≈ 2.6), TTR: 0.96, rep_rate: 0.00
 
+dataset_path: data/datasets/leipzig
 corpus_loader: leipzig
 corpus_loader_config:
   data_dir: data/leipzig
@@ -46,7 +47,7 @@ gradient_accumulation_steps: 1
 use_amp: true
 lr: 0.001
 lr_min: 0.0001
-num_epochs: 45
+num_epochs: 20
 
 # Latent regularization
 z_var_weight: 0.0
@@ -58,7 +59,7 @@ dip_weight: 0.1
 val_fraction: 0.1
 seed: 42
 device: cuda
-output_path: data/models/v1/vae_decoder.pt
+output_path: data/models/v2/vae_decoder.pt
 
 # Topological regularization
 topo_weight: 0.0

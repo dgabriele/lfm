@@ -388,6 +388,7 @@ def _info_nce_loss(
     z: Tensor,
     embeddings: Tensor,
     temperature: float = 0.07,
+    projection: nn.Module | None = None,
 ) -> Tensor:
     """InfoNCE contrastive loss between z vectors and source embeddings.
 
@@ -395,19 +396,22 @@ def _info_nce_loss(
     pushes dissimilar ones apart.  Similarity is defined by the
     pre-computed sentence-transformer embeddings.
 
-    Uses a symmetric formulation: z→embed and embed→z directions
-    are averaged for stable gradients.
+    When z and embeddings have different dimensions, ``projection``
+    maps z into the embedding space.
 
     Args:
         z: Latent codes ``(batch, latent_dim)``.
         embeddings: Pre-computed source text embeddings ``(batch, embed_dim)``.
         temperature: Softmax temperature (lower = sharper).
+        projection: Optional linear layer to project z → embed_dim.
 
     Returns:
         Scalar InfoNCE loss.
     """
+    z_proj = projection(z) if projection is not None else z
+
     # Normalize both to unit vectors
-    z_norm = F.normalize(z.float(), dim=-1)
+    z_norm = F.normalize(z_proj.float(), dim=-1)
     e_norm = F.normalize(embeddings.float(), dim=-1)
 
     # Cross-similarity matrix: (B, B)
@@ -791,16 +795,19 @@ class VAEPretrainer:
             sp = spm_lib.SentencePieceProcessor(model_file=spm_path)
             vocab_size = sp.vocab_size()
 
-            # 3. Tokenize, keeping language labels aligned
+            # 3. Tokenize, keeping language labels aligned.
+            # Track which input indices survived for embedding alignment.
             _spm_specials = {0, 1, 2, 3}
             token_ids_list = []
             languages_list = []
-            for lang, ipa in labeled:
+            _surviving_indices: list[int] = []
+            for idx, (lang, ipa) in enumerate(labeled):
                 ids = sp.encode(ipa, out_type=int)
                 ids = [x for x in ids if x not in _spm_specials]
                 if len(ids) >= 5:
                     token_ids_list.append(ids)
                     languages_list.append(lang)
+                    _surviving_indices.append(idx)
 
             logger.info(
                 "Tokenized %d sequences (vocab_size=%d)",
@@ -866,12 +873,21 @@ class VAEPretrainer:
                     f"Run: python scripts/precompute_corpus_embeddings.py"
                 )
             emb_np = np.load(emb_path)
+            # Filter embeddings to match tokenized dataset (some samples
+            # are dropped during tokenization when sequence < 5 tokens).
+            if len(emb_np) != len(dataset) and len(_surviving_indices) == len(dataset):
+                logger.info(
+                    "Filtering embeddings: %d → %d (matching tokenized dataset)",
+                    len(emb_np), len(dataset),
+                )
+                emb_np = emb_np[_surviving_indices]
             if len(emb_np) != len(dataset):
                 raise ValueError(
                     f"Embeddings length {len(emb_np)} != dataset length {len(dataset)}. "
                     f"Regenerate embeddings."
                 )
             corpus_embeddings = torch.from_numpy(emb_np).float().pin_memory()
+            embed_dim = corpus_embeddings.shape[1]
             logger.info(
                 "Loaded contrastive embeddings: %s (%.0f MB, pinned)",
                 corpus_embeddings.shape, corpus_embeddings.nbytes / 1e6,
@@ -905,10 +921,21 @@ class VAEPretrainer:
         # 5. Build VAE model components
         hidden = cfg.decoder_hidden_dim
         modules = self._build_model(cfg, hidden, full_vocab, device)
+
+        # Contrastive projection: z_dim → embed_dim (if dimensions differ)
+        contrastive_proj: nn.Module | None = None
+        if _use_contrastive and cfg.latent_dim != embed_dim:
+            contrastive_proj = nn.Linear(cfg.latent_dim, embed_dim).to(device)
+            logger.info(
+                "Created contrastive projection: %d → %d", cfg.latent_dim, embed_dim,
+            )
+
         all_params: list[nn.Parameter] = []
         for m in modules.values():
             if isinstance(m, nn.Module):
                 all_params.extend(m.parameters())
+        if contrastive_proj is not None:
+            all_params.extend(contrastive_proj.parameters())
 
         optimizer = torch.optim.AdamW(all_params, lr=cfg.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -1177,6 +1204,7 @@ class VAEPretrainer:
                         batch_embs = corpus_embeddings[batch_indices].to(device)
                         cl_loss = _info_nce_loss(
                             z_batch, batch_embs, cfg.contrastive_temperature,
+                            projection=contrastive_proj,
                         )
 
                     # Fixed KL-beta (raw KL without free bits)
