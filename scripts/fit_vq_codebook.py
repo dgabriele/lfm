@@ -23,8 +23,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 
 import torch
+
+# Force line-buffered output
+sys.stderr = open(sys.stderr.fileno(), "w", buffering=1, closefd=False)
+sys.stdout = open(sys.stdout.fileno(), "w", buffering=1, closefd=False)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -53,6 +58,7 @@ def main(
     logger.info("Loading checkpoint: %s", checkpoint)
     config = VisualizeConfig(
         checkpoint=checkpoint, spm_model=spm_model, device=device,
+        batch_size=2048,
     )
     model_data = load_checkpoint(config)
 
