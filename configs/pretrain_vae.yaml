@@ -1,8 +1,5 @@
-# VAE decoder pretraining config
-# Produces: data/vae_decoder.pt, data/spm.model
-#
-# Previous successful run achieved:
-#   Val CE: 0.94 (PPL ≈ 2.6), TTR: 0.96, rep_rate: 0.00
+# VAE decoder pretraining config (v2)
+# Retrained on CLI-generated dataset with attention pooling.
 
 dataset_path: data/datasets/leipzig
 corpus_loader: leipzig
@@ -26,21 +23,17 @@ attention_global_every: 7
 use_rope: true
 share_decoder_layers: true
 max_seq_len: 96
-encoder_pooling: mean
+encoder_pooling: attention
 
-# KL regularization — cyclical annealing (disabled, use kl_beta instead)
+# KL regularization — disabled
 kl_weight: 0.0
 kl_free_bits: 0.5
 kl_warmup_steps: 10000
 
-# Contrastive learning (InfoNCE) — semantic structure in latent space
-contrastive_weight: 0.1
+# Contrastive / KL-beta — disabled
+contrastive_weight: 0.0
 contrastive_temperature: 0.07
-embeddings_path: data/datasets/leipzig/embeddings.npy
-
-# Fixed KL-beta for distribution smoothness (raw KL, no free bits)
-# Disabled: even β=0.02 forces z→N(0,1), preventing the encoder from
-# learning structure. Let contrastive loss shape the space instead.
+embeddings_path: ""
 kl_beta: 0.0
 
 # Training
@@ -49,7 +42,7 @@ gradient_accumulation_steps: 1
 use_amp: true
 lr: 0.001
 lr_min: 0.0001
-num_epochs: 20
+num_epochs: 40
 
 # Latent regularization
 z_var_weight: 0.0
