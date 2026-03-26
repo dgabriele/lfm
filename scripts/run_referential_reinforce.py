@@ -43,36 +43,72 @@ logger = logging.getLogger(__name__)
 
 
 class MessageEncoder(nn.Module):
-    """Re-encode generated token embeddings into a fixed-size vector.
+    """Re-encode N variable-length statement hidden states into a fixed vector.
 
-    Takes the decoder's hidden states (from the full AR decode) and
-    produces a single vector that the receiver uses for scoring.
-    This is a learned module — it trains to extract discriminative
-    information from the generated linguistic form.
+    For each statement, mean-pools the decoder hidden states into a
+    statement-level embedding, then uses learned cross-statement attention
+    to aggregate N statement embeddings into one message vector.
+
+    When num_statements=1, degrades to the original single-pool behavior.
     """
 
-    def __init__(self, hidden_dim: int, output_dim: int) -> None:
+    def __init__(
+        self, hidden_dim: int, output_dim: int, num_statements: int = 1,
+    ) -> None:
         super().__init__()
-        self.pool_proj = nn.Sequential(
+        self.num_statements = num_statements
+        self.statement_proj = nn.Sequential(
             nn.Linear(hidden_dim, output_dim),
             nn.ReLU(),
             nn.Linear(output_dim, output_dim),
         )
+        if num_statements > 1:
+            self.agg_query = nn.Parameter(torch.randn(1, 1, output_dim) * 0.02)
+            self.agg_attn = nn.MultiheadAttention(
+                embed_dim=output_dim, num_heads=4, batch_first=True,
+            )
+        else:
+            self.agg_query = None
+            self.agg_attn = None
 
-    def forward(self, embeddings: Tensor, mask: Tensor) -> Tensor:
-        """Pool decoder hidden states into a fixed vector.
+    def forward(
+        self,
+        statement_embeddings: Tensor,
+        statement_mask: Tensor,
+    ) -> Tensor:
+        """Pool N statement hidden states into a single message vector.
 
         Args:
-            embeddings: (batch, seq_len, hidden_dim) decoder states.
-            mask: (batch, seq_len) boolean mask.
+            statement_embeddings: (batch, N, S, H) or (batch, S, H) for N=1.
+            statement_mask: (batch, N, S) or (batch, S) for N=1.
 
         Returns:
             (batch, output_dim) message vector.
         """
-        # Masked mean pool
-        mask_f = mask.unsqueeze(-1).float()
-        pooled = (embeddings * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
-        return self.pool_proj(pooled)
+        if statement_embeddings.dim() == 3:
+            # Single statement — backward compat: (B, S, H) → (B, 1, S, H)
+            statement_embeddings = statement_embeddings.unsqueeze(1)
+            statement_mask = statement_mask.unsqueeze(1)
+
+        b, n, s, h = statement_embeddings.shape
+
+        # 1. Mean-pool each statement independently
+        mask_f = statement_mask.unsqueeze(-1).float()  # (B, N, S, 1)
+        pooled = (
+            (statement_embeddings * mask_f).sum(dim=2)
+            / mask_f.sum(dim=2).clamp(min=1)
+        )  # (B, N, H)
+
+        # 2. Project each statement
+        stmt_vecs = self.statement_proj(pooled)  # (B, N, output_dim)
+
+        # 3. Aggregate across statements
+        if n == 1 or self.agg_attn is None:
+            return stmt_vecs.squeeze(1)
+
+        query = self.agg_query.expand(b, -1, -1)  # (B, 1, output_dim)
+        agg, _ = self.agg_attn(query, stmt_vecs, stmt_vecs)
+        return agg.squeeze(1)  # (B, output_dim)
 
 
 class Receiver(nn.Module):
@@ -120,6 +156,8 @@ def main(
     vq_codebook_path: str | None = None,
     vq_residual_alpha: float = 1.0,
     length_cost: float = 0.0,
+    num_statements: int = 1,
+    max_output_len: int = 96,
 ) -> dict[str, float]:
     """Run the REINFORCE referential game.
 
@@ -146,7 +184,8 @@ def main(
             pretrained_decoder_path=decoder_path,
             spm_model_path=spm_path,
             freeze_decoder=True,
-            max_output_len=96,
+            max_output_len=max_output_len,
+            num_statements=num_statements,
             vq_codebook_path=vq_codebook_path,
             vq_residual_alpha=vq_residual_alpha,
         ),
@@ -165,7 +204,9 @@ def main(
 
     # Message encoder: decoder_hidden_dim → embedding_dim
     decoder_hidden = faculty_config.generator.decoder_hidden_dim
-    msg_encoder = MessageEncoder(decoder_hidden, embedding_dim).to(torch_device)
+    msg_encoder = MessageEncoder(
+        decoder_hidden, embedding_dim, num_statements,
+    ).to(torch_device)
     receiver = Receiver(embedding_dim).to(torch_device)
 
     # Sender params (REINFORCE — only _input_proj)
@@ -253,8 +294,11 @@ def main(
             lfm_outputs = faculty(anchor)
 
         # Extract decoder hidden states and mask
-        gen_embeddings = lfm_outputs["generator.embeddings"]  # (B, S, H)
-        gen_mask = lfm_outputs["generator.mask"]  # (B, S)
+        gen_embeddings = lfm_outputs["generator.embeddings"]  # (B, N*S, H)
+        gen_mask = lfm_outputs["generator.mask"]  # (B, N*S)
+        # Statement-level data for multi-statement MessageEncoder
+        gen_stmt_emb = lfm_outputs.get("generator.statement_embeddings")  # (B, N, S, H)
+        gen_stmt_mask = lfm_outputs.get("generator.statement_mask")  # (B, N, S)
 
         # Also get the log probability of the generated sequence
         # from the generator's token_probs
@@ -269,7 +313,10 @@ def main(
         (log_probs_all * gen_mask.float()).sum(dim=1)  # (B,)
 
         # --- Receiver: score candidates ---
-        message = msg_encoder(gen_embeddings.detach(), gen_mask.detach())
+        if gen_stmt_emb is not None:
+            message = msg_encoder(gen_stmt_emb.detach(), gen_stmt_mask.detach())
+        else:
+            message = msg_encoder(gen_embeddings.detach(), gen_mask.detach())
 
         candidates = torch.cat(
             [anchor.unsqueeze(1), distractors], dim=1
@@ -312,6 +359,7 @@ def main(
 
         # Recompute z with gradients
         gen = faculty.generator
+        n_stmt = gen.config.num_statements
         gen._ensure_input_proj(anchor.size(-1))
         embeddings_in = anchor.unsqueeze(1)  # (B, 1, dim)
         mask_in = torch.ones(
@@ -319,13 +367,14 @@ def main(
         )
         pooled = gen._pool(embeddings_in, mask_in)
         h = gen._input_proj(pooled) + gen._input_refine(pooled)
-        mu, logvar = h.chunk(2, dim=-1)
+        h = h.view(batch_size, n_stmt, gen._latent_dim * 2)
+        mu, logvar = h.chunk(2, dim=-1)  # each (B, N, latent_dim)
 
-        # The "action" was the z that produced the tokens.
-        # Under the Gaussian policy N(mu, sigma), log_prob of z is:
-        # For REINFORCE we use the mu directly — the policy is deterministic
-        # so we use a surrogate: push mu toward z values that got high reward
-        sender_loss = -(advantage.detach() * mu.sum(dim=-1)).mean()
+        # Surrogate: push all N mu vectors toward z values that got high reward.
+        # Advantage (B,) broadcasts to all N statements for the same sample.
+        sender_loss = -(
+            advantage.detach().unsqueeze(-1).unsqueeze(-1) * mu
+        ).sum(dim=(-2, -1)).mean()
 
         sender_optimizer.zero_grad()
         sender_loss.backward()
@@ -335,15 +384,23 @@ def main(
         # --- Logging ---
         if step % log_every == 0:
             accuracy = reward.mean().item()
-            avg_len = gen_mask.float().sum(dim=1).mean().item()
+            total_len = gen_mask.float().sum(dim=1).mean().item()
+            # Per-statement length breakdown
+            stmt_lens_t = lfm_outputs.get("generator.statement_lengths")
+            if stmt_lens_t is not None:
+                avg_per = stmt_lens_t.float().mean(dim=0)  # (N,)
+                stmt_str = "/".join(f"{v:.0f}" for v in avg_per.tolist())
+                len_info = f"stmt_lens={stmt_str} total={total_len:.0f}"
+            else:
+                len_info = f"avg_msg_len={total_len:.1f}"
             logger.info(
                 "step=%d  recv_loss=%.3f  acc=%.1f%%  "
-                "avg_msg_len=%.1f  baseline=%.3f  hard=%.0f%%  "
+                "%s  baseline=%.3f  hard=%.0f%%  "
                 "(chance=%.1f%%)",
                 step,
                 receiver_loss.item(),
                 accuracy * 100,
-                avg_len,
+                len_info,
                 baseline,
                 hard_ratio * 100,
                 chance * 100,
@@ -397,11 +454,14 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--vq-codebook", default=None, help="Path to VQ codebook")
-    parser.add_argument("--vq-alpha", type=float, default=1.0, help="VQ residual alpha (0=discrete, 1=continuous)")
-    parser.add_argument("--length-cost", type=float, default=0.0, help="Length penalty in reward (0=none, 0.5=moderate)")
+    parser.add_argument("--vq-alpha", type=float, default=1.0, help="VQ residual alpha")
+    parser.add_argument("--length-cost", type=float, default=0.0, help="Length penalty")
+    parser.add_argument("--num-statements", type=int, default=1, help="Statements per input")
+    parser.add_argument("--max-output-len", type=int, default=96, help="Max tokens per statement")
     args = parser.parse_args()
     main(
         resume=args.resume, steps=args.steps, batch_size=args.batch_size,
         device=args.device, vq_codebook_path=args.vq_codebook,
         vq_residual_alpha=args.vq_alpha, length_cost=args.length_cost,
+        num_statements=args.num_statements, max_output_len=args.max_output_len,
     )
