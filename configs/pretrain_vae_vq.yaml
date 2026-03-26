@@ -30,7 +30,7 @@ use_vq: true
 vq_mode: grouped                 # "grouped" (product VQ) or "residual" (sequential)
 vq_num_groups: 32                # number of independent codebook groups
 vq_num_levels: 4                 # for residual mode (unused in grouped)
-vq_codebook_size: 32             # entries per codebook (32^32 ≈ 10^48 combinations)
+vq_codebook_size: 256            # entries per codebook (256^32 combinations)
 vq_commitment_weight: 0.1        # ||z_e - sg(e)||² (lower — qe is already near zero)
 vq_entropy_weight: 0.02          # maximize codebook usage entropy (scaled for 32 groups)
 vq_balance_weight: 0.05          # equalize variance-explained across groups
