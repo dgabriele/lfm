@@ -1,5 +1,5 @@
 # VQ-VAE decoder pretraining config (v3)
-# Residual VQ with 1 level initially (standard VQ-VAE), scalable to 4.
+# Grouped product quantization with entropy/balance/orthogonality regularizers.
 
 dataset_path: data/datasets/leipzig
 corpus_loader: leipzig
@@ -25,17 +25,18 @@ share_decoder_layers: true
 max_seq_len: 96
 encoder_pooling: mean
 
-# Vector Quantization — grouped mode (product quantization)
-# 8 groups × 64 codes × 32 dims = 64^8 ≈ 2.8×10^14 combinations
+# Vector Quantization
 use_vq: true
-vq_mode: grouped
-vq_num_groups: 8
-vq_codebook_size: 64
-vq_commitment_weight: 0.25
-vq_entropy_weight: 0.1
-vq_balance_weight: 0.1
-vq_ema_update: true
-vq_decay: 0.99
+vq_mode: grouped                 # "grouped" (product VQ) or "residual" (sequential)
+vq_num_groups: 8                 # number of independent codebook groups
+vq_num_levels: 4                 # for residual mode (unused in grouped)
+vq_codebook_size: 64             # entries per codebook
+vq_commitment_weight: 0.25       # ||z_e - sg(e)||²
+vq_entropy_weight: 0.1           # maximize codebook usage entropy
+vq_balance_weight: 0.1           # equalize variance-explained across groups
+vq_orthogonality_weight: 0.01    # maximize angular separation between codes
+vq_ema_update: true              # EMA codebook updates (vs gradient)
+vq_decay: 0.99                   # EMA decay rate
 
 # KL/contrastive/phonetic — all disabled in VQ mode
 kl_weight: 0.0

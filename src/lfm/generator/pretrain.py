@@ -222,6 +222,7 @@ class VAEPretrainConfig(LFMBaseConfig):
     vq_commitment_weight: float = 0.25
     vq_entropy_weight: float = 0.1
     vq_balance_weight: float = 0.1
+    vq_orthogonality_weight: float = 0.01
     vq_ema_update: bool = True
     vq_decay: float = 0.99
 
@@ -2185,6 +2186,7 @@ class VAEPretrainer:
                     commitment_weight=cfg.vq_commitment_weight,
                     entropy_weight=cfg.vq_entropy_weight,
                     balance_weight=cfg.vq_balance_weight,
+                    orthogonality_weight=cfg.vq_orthogonality_weight,
                     ema_update=cfg.vq_ema_update,
                     ema_decay=cfg.vq_decay,
                 ).to(device)

@@ -478,6 +478,7 @@ class GroupedVQ(nn.Module):
         commitment_weight: float = 0.25,
         entropy_weight: float = 0.1,
         balance_weight: float = 0.1,
+        orthogonality_weight: float = 0.0,
         ema_update: bool = True,
         ema_decay: float = 0.99,
     ) -> None:
@@ -501,6 +502,7 @@ class GroupedVQ(nn.Module):
                 embedding_dim=self.group_dim,
                 commitment_weight=commitment_weight,
                 entropy_weight=entropy_weight,
+                orthogonality_weight=orthogonality_weight,
                 ema_update=ema_update,
                 ema_decay=ema_decay,
             )
