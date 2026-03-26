@@ -25,10 +25,12 @@ share_decoder_layers: true
 max_seq_len: 96
 encoder_pooling: mean
 
-# Vector Quantization — start with 1 level (standard VQ-VAE)
+# Vector Quantization — grouped mode (product quantization)
+# 8 groups × 64 codes × 32 dims = 64^8 ≈ 2.8×10^14 combinations
 use_vq: true
-vq_num_levels: 1
-vq_codebook_size: 1024
+vq_mode: grouped
+vq_num_groups: 8
+vq_codebook_size: 64
 vq_commitment_weight: 0.25
 vq_ema_update: true
 vq_decay: 0.99

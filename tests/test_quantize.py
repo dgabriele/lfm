@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from lfm.generator.quantize import ResidualVQ, VectorQuantizer
+from lfm.generator.quantize import GroupedVQ, ResidualVQ, VectorQuantizer
 
 
 class TestVectorQuantizer:
@@ -151,6 +151,82 @@ class TestResidualVQ:
     def test_total_codebook_size(self):
         rvq = self._make(num_levels=4, codebook_size=512)
         assert rvq.total_codebook_size == 512 ** 4
+
+
+class TestGroupedVQ:
+    def _make(self, **kw):
+        defaults = dict(num_groups=4, codebook_size=16, embedding_dim=16)
+        defaults.update(kw)
+        return GroupedVQ(**defaults)
+
+    def test_output_shape(self):
+        gvq = self._make()
+        z = torch.randn(4, 16)
+        quantized, loss, all_indices = gvq(z)
+        assert quantized.shape == (4, 16)
+        assert loss.shape == ()
+        assert len(all_indices) == 4
+        for idx in all_indices:
+            assert idx.shape == (4,)
+
+    def test_group_dim(self):
+        gvq = self._make(num_groups=8, embedding_dim=32)
+        assert gvq.group_dim == 4
+
+    def test_indivisible_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="divisible"):
+            GroupedVQ(num_groups=3, codebook_size=8, embedding_dim=10)
+
+    def test_gradient_flows(self):
+        gvq = self._make()
+        z = torch.randn(4, 16, requires_grad=True)
+        quantized, loss, _ = gvq(z)
+        (quantized.sum() + loss).backward()
+        assert z.grad is not None
+        assert z.grad.abs().sum() > 0
+
+    def test_encode_decode_deterministic(self):
+        gvq = self._make()
+        z = torch.randn(4, 16)
+        idx1 = gvq.encode(z)
+        idx2 = gvq.encode(z)
+        for i1, i2 in zip(idx1, idx2):
+            assert torch.equal(i1, i2)
+
+    def test_decode_shape(self):
+        gvq = self._make()
+        z = torch.randn(4, 16)
+        indices = gvq.encode(z)
+        decoded = gvq.decode(indices)
+        assert decoded.shape == (4, 16)
+
+    def test_utilization(self):
+        gvq = self._make()
+        gvq.train()
+        z = torch.randn(64, 16)
+        gvq(z)
+        util = gvq.utilization
+        assert len(util) == 4
+        assert all(0.0 <= u <= 1.0 for u in util)
+
+    def test_total_codebook_size(self):
+        gvq = self._make(num_groups=8, codebook_size=64)
+        assert gvq.total_codebook_size == 64 ** 8
+
+    def test_combinatorial_diversity(self):
+        """Grouped VQ should produce more unique codes than single VQ."""
+        gvq = self._make(num_groups=4, codebook_size=16, embedding_dim=16)
+        z = torch.randn(100, 16)
+        indices = gvq.encode(z)
+        # Combine group indices into tuples for uniqueness counting
+        combined = set()
+        for j in range(100):
+            code = tuple(idx[j].item() for idx in indices)
+            combined.add(code)
+        # With 4 groups × 16 codes, should see high diversity
+        # even 100 random inputs should give many unique combinations
+        assert len(combined) > 50
 
 
 class TestDeadCodeReset:

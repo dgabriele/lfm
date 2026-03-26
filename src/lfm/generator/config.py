@@ -79,7 +79,9 @@ class GeneratorConfig(LFMBaseConfig):
 
     # Vector Quantization (VQ-VAE mode)
     use_vq: bool = False
-    vq_num_levels: int = 4
+    vq_mode: str = "grouped"  # "residual" or "grouped"
+    vq_num_levels: int = 4    # for residual mode
+    vq_num_groups: int = 8    # for grouped mode
     vq_codebook_size: int = 512
     vq_commitment_weight: float = 0.25
     vq_ema_update: bool = True

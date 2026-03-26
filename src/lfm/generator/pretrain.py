@@ -215,7 +215,9 @@ class VAEPretrainConfig(LFMBaseConfig):
     # Vector Quantization (VQ-VAE mode).
     # Replaces continuous Gaussian latent with discrete codebook.
     use_vq: bool = False
-    vq_num_levels: int = 4
+    vq_mode: str = "grouped"  # "residual" or "grouped"
+    vq_num_levels: int = 4    # for residual mode
+    vq_num_groups: int = 8    # for grouped mode
     vq_codebook_size: int = 512
     vq_commitment_weight: float = 0.25
     vq_ema_update: bool = True
@@ -2169,16 +2171,28 @@ class VAEPretrainer:
         if cfg.use_vq:
             enc_to_latent = nn.Linear(hidden, cfg.latent_dim).to(device)
 
-            from lfm.generator.quantize import ResidualVQ
+            if cfg.vq_mode == "grouped":
+                from lfm.generator.quantize import GroupedVQ
 
-            residual_vq: nn.Module | None = ResidualVQ(
-                num_levels=cfg.vq_num_levels,
-                codebook_size=cfg.vq_codebook_size,
-                embedding_dim=cfg.latent_dim,
-                commitment_weight=cfg.vq_commitment_weight,
-                ema_update=cfg.vq_ema_update,
-                ema_decay=cfg.vq_decay,
-            ).to(device)
+                residual_vq: nn.Module | None = GroupedVQ(
+                    num_groups=cfg.vq_num_groups,
+                    codebook_size=cfg.vq_codebook_size,
+                    embedding_dim=cfg.latent_dim,
+                    commitment_weight=cfg.vq_commitment_weight,
+                    ema_update=cfg.vq_ema_update,
+                    ema_decay=cfg.vq_decay,
+                ).to(device)
+            else:
+                from lfm.generator.quantize import ResidualVQ
+
+                residual_vq = ResidualVQ(
+                    num_levels=cfg.vq_num_levels,
+                    codebook_size=cfg.vq_codebook_size,
+                    embedding_dim=cfg.latent_dim,
+                    commitment_weight=cfg.vq_commitment_weight,
+                    ema_update=cfg.vq_ema_update,
+                    ema_decay=cfg.vq_decay,
+                ).to(device)
         else:
             enc_to_latent = nn.Linear(hidden, cfg.latent_dim * 2).to(device)
             residual_vq = None

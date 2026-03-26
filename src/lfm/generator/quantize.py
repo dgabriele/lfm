@@ -388,3 +388,157 @@ class ResidualVQ(nn.Module):
     def total_codebook_size(self) -> int:
         """Total number of possible code combinations."""
         return self.codebook_size ** self.num_levels
+
+
+class GroupedVQ(nn.Module):
+    """Product-quantized VQ with independent codebooks per latent group.
+
+    Splits the latent vector into ``num_groups`` contiguous slices, each
+    quantized independently by its own codebook.  The quantized output
+    is the concatenation of all group outputs, preserving the original
+    dimensionality.
+
+    Diversity is **multiplicative**: with G groups of K codes each,
+    the combinatorial space is K^G.  Even modest per-group utilization
+    yields enormous effective diversity.
+
+    Example: 8 groups × 64 codes × 32 dims each = 256-dim latent
+    with 64^8 ≈ 2.8 × 10^14 possible code combinations from only
+    512 total codebook vectors.
+
+    Args:
+        num_groups: Number of independent groups (G).
+        codebook_size: Entries per group codebook (K).
+        embedding_dim: Total latent dimension (must be divisible by num_groups).
+        commitment_weight: Per-group commitment loss weight.
+        ema_update: Use EMA codebook updates.
+        ema_decay: EMA decay rate.
+    """
+
+    def __init__(
+        self,
+        num_groups: int = 8,
+        codebook_size: int = 64,
+        embedding_dim: int = 256,
+        commitment_weight: float = 0.25,
+        ema_update: bool = True,
+        ema_decay: float = 0.99,
+    ) -> None:
+        super().__init__()
+
+        if embedding_dim % num_groups != 0:
+            raise ValueError(
+                f"embedding_dim ({embedding_dim}) must be divisible by "
+                f"num_groups ({num_groups})"
+            )
+
+        self.num_groups = num_groups
+        self.codebook_size = codebook_size
+        self.embedding_dim = embedding_dim
+        self.group_dim = embedding_dim // num_groups
+
+        self.groups = nn.ModuleList([
+            VectorQuantizer(
+                codebook_size=codebook_size,
+                embedding_dim=self.group_dim,
+                commitment_weight=commitment_weight,
+                ema_update=ema_update,
+                ema_decay=ema_decay,
+            )
+            for _ in range(num_groups)
+        ])
+
+        # Utilization tracking
+        self.register_buffer(
+            "_usage_counts",
+            torch.zeros(num_groups, codebook_size),
+            persistent=False,
+        )
+        self._usage_total = 0
+
+    def forward(self, z: Tensor) -> tuple[Tensor, Tensor, list[Tensor]]:
+        """Quantize each group independently and concatenate.
+
+        Args:
+            z: Continuous input ``(batch, embedding_dim)``.
+
+        Returns:
+            Tuple of ``(quantized, total_loss, all_indices)``:
+              - quantized: ``(batch, embedding_dim)`` concatenation of groups.
+              - total_loss: Scalar sum of per-group commitment losses.
+              - all_indices: List of G ``(batch,)`` index tensors.
+        """
+        chunks = z.split(self.group_dim, dim=-1)  # G tensors of (B, group_dim)
+        quantized_parts: list[Tensor] = []
+        total_loss = torch.tensor(0.0, device=z.device, dtype=z.dtype)
+        all_indices: list[Tensor] = []
+
+        for i, (group, chunk) in enumerate(zip(self.groups, chunks)):
+            quantized_g, loss_g, indices_g = group(chunk)
+            quantized_parts.append(quantized_g)
+            total_loss = total_loss + loss_g
+            all_indices.append(indices_g)
+
+            if self.training:
+                with torch.no_grad():
+                    self._usage_counts[i].scatter_add_(
+                        0, indices_g,
+                        torch.ones_like(indices_g, dtype=torch.float),
+                    )
+                    self._usage_total += indices_g.size(0)
+
+        quantized = torch.cat(quantized_parts, dim=-1)  # (B, embedding_dim)
+        return quantized, total_loss, all_indices
+
+    def encode(self, z: Tensor) -> list[Tensor]:
+        """Encode to per-group codebook indices (inference).
+
+        Args:
+            z: ``(batch, embedding_dim)``.
+
+        Returns:
+            List of G ``(batch,)`` index tensors.
+        """
+        chunks = z.split(self.group_dim, dim=-1)
+        return [group.encode(chunk) for group, chunk in zip(self.groups, chunks)]
+
+    def decode(self, all_indices: list[Tensor]) -> Tensor:
+        """Reconstruct from per-group codebook indices.
+
+        Args:
+            all_indices: List of G ``(batch,)`` index tensors.
+
+        Returns:
+            ``(batch, embedding_dim)`` concatenation of group decodings.
+        """
+        parts = [
+            group.decode(indices)
+            for group, indices in zip(self.groups, all_indices)
+        ]
+        return torch.cat(parts, dim=-1)
+
+    @property
+    def utilization(self) -> list[float]:
+        """Fraction of codebook entries used per group."""
+        if self._usage_total == 0:
+            return [0.0] * self.num_groups
+        return [
+            (self._usage_counts[i] > 0).float().mean().item()
+            for i in range(self.num_groups)
+        ]
+
+    def reset_usage(self) -> None:
+        """Reset utilization counters."""
+        self._usage_counts.zero_()
+        self._usage_total = 0
+
+    def reset_dead_codes(
+        self, threshold: float = 1.0, epsilon: float = 0.01,
+    ) -> list[int]:
+        """Reset dead codes in all groups."""
+        return [g.reset_dead_codes(threshold, epsilon) for g in self.groups]
+
+    @property
+    def total_codebook_size(self) -> int:
+        """Total combinatorial space across all groups."""
+        return self.codebook_size ** self.num_groups
