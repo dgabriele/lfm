@@ -79,8 +79,8 @@ def test_generator_forward_basic():
     assert out["generator.embeddings"].shape == (2, 8, 64)  # decoder_hidden_dim
     assert out["generator.lengths"].shape == (2,)
     assert out["generator.mask"].shape == (2, 8)
-    assert out["generator.mu"].shape == (2, 32)  # latent_dim
-    assert out["generator.logvar"].shape == (2, 32)
+    assert out["generator.mu"].shape == (2, 1, 32)  # (batch, num_statements, latent_dim)
+    assert out["generator.logvar"].shape == (2, 1, 32)
 
 
 def test_generator_forward_agent_state():

@@ -49,6 +49,9 @@ class GeneratorConfig(LFMBaseConfig):
     latent_dim: int = 256
     vocab_size: int = 8000
     max_output_len: int = 96
+    num_statements: int = 1
+    """Number of independent statements per input.  Each gets its own z
+    and decode.  Default 1 preserves backward compatibility."""
     decoder_hidden_dim: int = 512
     decoder_num_layers: int = 4
     decoder_num_heads: int = 8

@@ -225,7 +225,8 @@ class MultilingualVAEGenerator(GeneratorModule):
             return
 
         device = next(self.decoder.parameters()).device
-        out_dim = self._latent_dim * 2
+        n_stmt = self.config.num_statements
+        out_dim = n_stmt * self._latent_dim * 2
         self._input_proj = nn.Linear(input_dim, out_dim).to(device)
         self._input_refine = nn.Sequential(
             nn.Linear(input_dim, out_dim),
@@ -250,7 +251,7 @@ class MultilingualVAEGenerator(GeneratorModule):
                 scale = target_std / max(current_std, 1e-6)
                 self._input_proj.weight.data.mul_(scale)
                 self._input_proj.bias.data.copy_(
-                    target_mean.repeat(2)  # mu and logvar both centered
+                    target_mean.repeat(2 * n_stmt)  # mu and logvar for each statement
                 )
                 self._input_refine[0].weight.data.mul_(scale)
                 logger.info(
@@ -503,7 +504,7 @@ class MultilingualVAEGenerator(GeneratorModule):
             kv_cache.advance()
 
             for t in range(max_len):
-                last_hidden = out  # (B, 1, H)
+                last_hidden = out  # (B, 1, hdim)
                 logits_t = self.output_head(last_hidden).squeeze(1)
 
                 all_states.append(last_hidden)
@@ -609,59 +610,69 @@ class MultilingualVAEGenerator(GeneratorModule):
         self._ensure_input_proj(embeddings.size(-1))
         assert self._input_proj is not None
 
+        n_stmt = self.config.num_statements
+
         # 1. Pool
         pooled = self._pool(embeddings, mask)  # (B, input_dim)
 
-        # 2. Residual projection to mu, logvar
-        h = self._input_proj(pooled) + self._input_refine(pooled)
-        mu, logvar = h.chunk(2, dim=-1)  # each (B, latent_dim)
+        # 2. Residual projection to N × (mu, logvar)
+        h = self._input_proj(pooled) + self._input_refine(pooled)  # (b, n_stmt*latent*2)
+        h = h.view(h.size(0), n_stmt, self._latent_dim * 2)  # (b, n_stmt, 2*latent)
+        mu, logvar = h.chunk(2, dim=-1)  # each (b, n_stmt, latent_dim)
 
-        # 3. Reparameterize
-        z = self._reparameterize(mu, logvar, self.training)
+        # 3. Reparameterize each statement's z independently
+        z = self._reparameterize(mu, logvar, self.training)  # (b, n_stmt, latent)
 
-        # 4. Cache for extra_losses
-        self._cached_mu = mu
-        self._cached_logvar = logvar
+        # 4. Cache for extra_losses (flatten for KL computation)
+        self._cached_mu = mu.reshape(-1, self._latent_dim)
+        self._cached_logvar = logvar.reshape(-1, self._latent_dim)
 
-        # 5. Decode or use latent directly
-        # When the decoder is frozen and we're training, skip the expensive
-        # AR decode loop — use the latent-to-decoder projection directly.
-        # This gives clean gradient flow to _input_proj without vanishing
-        # through 64 frozen AR steps.  Full AR decode is used at eval time.
+        b = z.size(0)
+
+        # 5. Frozen training shortcut — use z directly as message
         if self.config.freeze_decoder and self.training:
-            # Latent bottleneck path: use z directly as the message
-            # representation. The decoder is for generating readable text
-            # at eval time — the information bottleneck IS the latent
-            # space itself (256-dim z), not the decoded token sequence.
-            # The game's MLP decoder reconstructs directly from z.
-            batch = z.size(0)
             return {
-                "tokens": torch.zeros(
-                    batch, 1, dtype=torch.long, device=z.device
-                ),
+                "tokens": torch.zeros(b, n_stmt, dtype=torch.long, device=z.device),
                 "token_probs": torch.zeros(
-                    batch, 1, self._full_vocab, device=z.device
+                    b, n_stmt, self._full_vocab, device=z.device
                 ),
-                "embeddings": z.unsqueeze(1),  # (B, 1, latent_dim)
-                "lengths": torch.ones(batch, device=z.device),
-                "mask": torch.ones(
-                    batch, 1, dtype=torch.bool, device=z.device
-                ),
+                "embeddings": z,  # (b, n_stmt, latent_dim)
+                "lengths": torch.full((b,), n_stmt, device=z.device),
+                "mask": torch.ones(b, n_stmt, dtype=torch.bool, device=z.device),
                 "mu": mu,
                 "logvar": logvar,
+                "num_statements": n_stmt,
             }
 
-        # Full AR decode (eval time or unfrozen training)
-        token_ids, token_probs, decoder_states, lengths, output_mask = self._decode(z)
+        # 6. Full AR decode: flatten (b, n_stmt, latent) → (B*N, latent),
+        #    decode all statements in one batched call, then reshape.
+        z_flat = z.reshape(b * n_stmt, self._latent_dim)
+        (token_ids, token_probs, decoder_states,
+         lengths, output_mask) = self._decode(z_flat)
 
+        seq = token_ids.size(1)  # max_output_len
+        hdim = decoder_states.size(-1)
+
+        # Reshape to (b, n_stmt, seq, ...) then concatenate statements
+        token_ids = token_ids.view(b, n_stmt, seq)
+        token_probs = token_probs.view(b, n_stmt, seq, -1)
+        decoder_states = decoder_states.view(b, n_stmt, seq, hdim)
+        lengths_per_stmt = lengths.view(b, n_stmt)
+        output_mask = output_mask.view(b, n_stmt, seq)
+
+        # Concatenate along sequence dim for backward-compatible flat output
         return {
-            "tokens": token_ids,
-            "token_probs": token_probs,
-            "embeddings": decoder_states,
-            "lengths": lengths,
-            "mask": output_mask,
+            "tokens": token_ids.reshape(b, n_stmt * seq),
+            "token_probs": token_probs.reshape(b, n_stmt * seq, -1),
+            "embeddings": decoder_states.reshape(b, n_stmt * seq, hdim),
+            "lengths": lengths_per_stmt.sum(dim=1),
+            "mask": output_mask.reshape(b, n_stmt * seq),
             "mu": mu,
             "logvar": logvar,
+            "num_statements": n_stmt,
+            "statement_lengths": lengths_per_stmt,
+            "statement_mask": output_mask,
+            "statement_embeddings": decoder_states,
         }
 
     # ------------------------------------------------------------------
