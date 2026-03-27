@@ -37,6 +37,11 @@ src/lfm/
   _types.py             # Tensor type aliases
   config/               # LFMBaseConfig, ExperimentConfig
   core/                 # LFMModule (ABC), LFMLoss, CompositeLoss
+  expression/           # Learnable tree-structured expression generation
+    expression.py       # Expression dataclass (topology + decoded output)
+    generator.py        # ExpressionGenerator (topology + continuous z-switching decode)
+    encoder.py          # ExpressionEncoder (segment pooling + bottom-up Merge)
+    config.py           # ExpressionConfig
   faculty/              # FacultyConfig + LanguageFaculty compositor
   generator/            # VAE generator, linguistic decoder, pretraining, discriminator
     layers.py           # LinguisticDecoderLayer (RoPE + multi-scale attention + capture_attention)

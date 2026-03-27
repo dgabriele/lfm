@@ -1,6 +1,6 @@
 # Data Guide
 
-This document describes the data layout, checkpoint structure, and acquisition process for LFM.
+This document describes the data layout, checkpoint structure, dataset generation pipeline, and acquisition process for LFM.
 
 ## System Dependencies
 
@@ -24,6 +24,16 @@ data/
   leipzig/                       # Source corpus (Leipzig Corpora Collection)
     {lang}_{source}_{year}_{size}/
       {lang}_{source}_{year}_{size}-sentences.txt
+  datasets/                      # Pre-generated HDF5 datasets
+    leipzig/                     # Base dataset (full sentences only)
+      manifest.yaml
+      samples.h5
+      rejected.h5
+    leipzig-constituents/        # Constituency-augmented dataset (~5.75M samples)
+      manifest.yaml
+      samples.h5
+      rejected.h5
+      _constituency_checkpoint.jsonl  # Resumable parsing checkpoint
   embeddings/                    # Agent game embeddings (sentence-transformers)
     embeddings.npy               # (N, 384) float32 sentence embeddings
     cluster_labels.npy           # (N,) int32 k-means cluster assignments
@@ -38,7 +48,7 @@ data/
       preprocessed_cache.pt      # Tokenized corpus cache
       training_history.json      # Per-session config + epoch history
       config.yaml                # Frozen config snapshot
-    v2/                          # Next model version
+    v4/                          # Constituency-augmented model (latent_dim=384)
       ...
   archived/                      # Old checkpoints, not actively used
 ```
@@ -51,12 +61,14 @@ Saved when validation CE improves. Used by the agent game and visualizations. Co
 
 | Key | Description |
 |-----|-------------|
-| `latent_dim` | Latent space dimensionality (e.g. 256) |
+| `latent_dim` | Latent space dimensionality (256 for v1, 384 for v4) |
 | `vocab_size` | Sentencepiece vocabulary size (8000) |
 | `decoder_hidden_dim` | Decoder model dimension (512) |
 | `decoder_num_layers` | Number of decoder layers (4) |
 | `decoder_num_heads` | Number of attention heads (8) |
 | `max_seq_len` | Maximum sequence length (96) |
+| `encoder_num_layers` | Number of encoder layers (1 for v1, 3 for v4) |
+| `encoder_pooling` | Pooling strategy (`mean` or `attention`) |
 | `latent_to_decoder` | State dict: z → decoder memory projection |
 | `token_embedding` | State dict: token embedding table |
 | `pos_embedding` | State dict: positional embedding (Identity if RoPE) |
@@ -80,7 +92,7 @@ Saved every epoch for resumable training. Contains everything in the decoder che
 | `spm_hash` | SPM hash for consistency check on resume |
 | `modules` | Dict of state dicts for all encoder + decoder modules |
 | `optimizer` | AdamW optimizer state (momentum buffers, etc.) |
-| `scheduler` | CosineAnnealingLR scheduler state |
+| `scheduler` | CosineAnnealingLR scheduler state (per-step cosine) |
 | `scaler` | AMP GradScaler state |
 
 ### `preprocessed_cache.pt` — Tokenized corpus
@@ -106,7 +118,7 @@ Append-only JSON recording each training session (start/resume to completion/kil
       "end_epoch": 40,
       "started_at": "2026-03-24T14:46:08+00:00",
       "ended_at": "2026-03-25T02:30:00+00:00",
-      "config": { ... full config snapshot ... },
+      "config": { "...full config snapshot..." },
       "best_val_loss": 0.68,
       "spm_hash": "8867185a9ad69a96"
     }
@@ -131,15 +143,85 @@ data/datasets/<name>/
 
 ### HDF5 Schema (`samples.h5`)
 
-| Dataset | Type | Description |
-|---------|------|-------------|
-| `seq` | int64 | Global sequence number |
-| `language` | string | ISO 639-3 code |
-| `source` | string | Corpus source name |
-| `source_file` | string | Original filename |
-| `raw` | string | Original text |
-| `ipa` | string | IPA transcription |
-| `ipa_length` | int32 | Character length of IPA |
+| Dataset | Type | Compression | Description |
+|---------|------|-------------|-------------|
+| `seq` | int64 | gzip | Global sequence number |
+| `language` | string | lzf | ISO 639-3 code |
+| `source` | string | lzf | Corpus source name |
+| `source_file` | string | lzf | Original filename |
+| `raw` | string | lzf | Original text |
+| `ipa` | string | lzf | IPA transcription |
+| `ipa_length` | int32 | gzip | Character length of IPA |
+
+### Generation Pipeline
+
+The `DatasetGenerator` runs a multi-stage pipeline:
+
+```
+1. Load        — CorpusLoader.load_detailed() → list[RawSample]
+2. Sanitize    — Rule-based filters (SanitizeConfig), multiprocessing
+3. LLM Gate    — Optional small LM quality filter (accept/fix/reject)
+4. Constituents — Optional constituency parsing (augments with sub-phrases)
+5. IPA Convert — epitran (non-English) + CMU dict (English), multiprocessing
+6. Balance     — Per-language min/max sample caps
+7. Write       — HDF5 (samples.h5 + rejected.h5) + manifest.yaml
+```
+
+### Constituency Augmentation
+
+The `--extract-constituents` flag enables phrase-level dataset augmentation via
+Stanza constituency parsing. Each sentence is parsed into a tree, and
+sub-phrases (NP, VP, PP, ADJP, ADVP, clauses) are extracted as separate
+training samples alongside the full sentence.
+
+**Purpose**: Teach the decoder to produce variable-length output — from short
+noun phrases (10 tokens) to full sentences (96 tokens). Without this, decoders
+trained on full sentences only never learn to produce EOS at short lengths.
+
+**Supported languages** (those with Stanza constituency models):
+
+| ISO 639-3 | Language | Stanza code |
+|-----------|----------|-------------|
+| deu | German | de |
+| eng | English | en |
+| spa | Spanish | es |
+| ind | Indonesian | id |
+| por | Portuguese | pt |
+| tur | Turkish | tr |
+| vie | Vietnamese | vi |
+
+Unsupported languages (ara, ces, est, fin, hin, hun, kor, pol, rus) pass
+through with full sentences only — no constituents are extracted.
+
+**Extracted labels** (Penn Treebank / universal):
+
+| Label | Description |
+|-------|-------------|
+| S, SBAR, SBARQ, SQ, SINV | Clauses |
+| NP, NP-TMP | Noun phrases |
+| VP | Verb phrases |
+| PP | Prepositional phrases |
+| ADJP, ADVP | Modifier phrases |
+
+**Checkpointing**: Constituency extraction is expensive (hours for 1M+
+sentences). The generator saves a JSONL checkpoint
+(`_constituency_checkpoint.jsonl`) after extraction. On restart, if the
+checkpoint exists, it is loaded directly — skipping re-parsing.
+
+**Parallelism**: Each supported language runs in a separate worker process with
+its own Stanza pipeline. GPU is used if available (2 workers to fit ~8GB VRAM),
+otherwise parallel CPU workers. Signal handlers (SIGTERM/SIGINT) ensure clean
+subprocess shutdown.
+
+**Leipzig-constituents dataset stats** (current):
+
+| Metric | Value |
+|--------|-------|
+| Total samples | 5,750,822 |
+| Languages | 16 |
+| Rejected | 499,761 |
+| Largest | Portuguese (1.17M), English (1.03M) |
+| Smallest | Korean (51.8K) |
 
 ### Generating Datasets
 
@@ -147,8 +229,14 @@ data/datasets/<name>/
 # Install dataset dependencies
 poetry install --with datasets
 
-# Generate from Leipzig corpus (default settings)
+# Generate base dataset (full sentences only)
 lfm dataset generate --source leipzig
+
+# Generate constituency-augmented dataset
+lfm dataset generate --source leipzig \
+  --output data/datasets/leipzig-constituents \
+  --extract-constituents \
+  --max-samples 5000000
 
 # Custom: specific languages, spell out numbers
 lfm dataset generate --source leipzig \
@@ -164,6 +252,11 @@ lfm dataset generate --source leipzig \
 # Skip LLM quality gate (faster)
 lfm dataset generate --source leipzig --no-llm-gate
 
+# Constituency with custom minimum phrase length
+lfm dataset generate --source leipzig \
+  --extract-constituents \
+  --min-constituent-length 15
+
 # List installed datasets
 lfm dataset list
 lfm dataset list --detail
@@ -171,40 +264,69 @@ lfm dataset list --detail
 
 ### Using in Pretraining
 
-Set `dataset_path` in the pretraining config to skip inline preprocessing:
+Set `dataset_path` in the pretraining config to use a pre-generated dataset:
 
 ```yaml
-# configs/pretrain_vae.yaml
-dataset_path: data/datasets/leipzig
+# configs/pretrain_vae_v4.yaml
+dataset_path: data/datasets/leipzig-constituents
 ```
 
 Or via Python:
 
 ```python
 config = VAEPretrainConfig(
-    dataset_path="data/datasets/leipzig",
+    dataset_path="data/datasets/leipzig-constituents",
 )
 ```
 
+When `dataset_path` is set, the pretraining pipeline loads IPA directly from
+the HDF5 file via `DatasetReader` — skipping inline corpus loading,
+sanitization, and IPA conversion.
+
 ### Sanitization Pipeline
 
-The dataset generator applies configurable rule-based filters:
+The dataset generator applies configurable rule-based filters (`SanitizeConfig`):
 
 | Filter | Default | Description |
 |--------|---------|-------------|
 | `number_policy` | `spell_out` | `reject`/`strip`/`keep`/`spell_out` |
 | `symbol_policy` | `spell_out` | Greek/math symbols: `reject`/`strip`/`keep`/`spell_out` |
 | `alpha_ratio_min` | 0.7 | Min ratio of alphabetic characters |
+| `max_digit_ratio` | 0.0 | Max digit ratio (0.0 = reject any digits) |
 | `max_foreign_script_ratio` | 0.3 | Max ratio of foreign-script words |
 | `max_word_repetition_ratio` | 0.5 | Reject degenerate repetitive text |
+| `max_bigram_repetition_ratio` | 0.4 | Reject repetitive bigrams |
 | `require_terminal_punctuation` | true | Require sentence-final punctuation |
+| `min_line_length` | 20 | Minimum character length |
+| `max_line_length` | 500 | Maximum character length |
+| `min_word_count` | 3 | Minimum word count |
+| `strip_urls` | true | Remove URLs |
+| `strip_emails` | true | Remove email addresses |
+| `strip_phone_numbers` | true | Remove phone numbers |
+
+### IPA Conversion
+
+Multilingual text-to-IPA using `epitran` (rule-based G2P for non-English) and
+the CMU Pronouncing Dictionary (English). Language-specific processing:
+
+| Language | Pre-filter | Post-process |
+|----------|-----------|--------------|
+| Hindi | Strip Latin loanwords, reject >50% code-mixed | Strip leaked Devanagari, word-final schwa deletion |
+| Arabic | Strip Latin loanwords, reject >50% code-mixed | Strip leaked Arabic script |
+| Others | — | General IPA cleanup (strip non-IPA characters) |
+
+Conversion runs in parallel via `multiprocessing.Pool` (90% of CPU cores).
 
 ### LLM Quality Gate
 
 An optional stage that uses a small LM (Qwen2.5-0.5B) to validate sanitized
-text quality. Each sample receives an accept/fix/reject verdict. Rejected
-samples are saved to `rejected.h5` for inspection.
+text quality. Each sample receives an accept/fix/reject verdict:
 
+- **Accept**: Sample passes quality check
+- **Fix**: Minor issues correctable by the LLM (returns corrected text)
+- **Reject**: Unfixable quality issues (garbled text, wrong language)
+
+Rejected samples are saved to `rejected.h5` for inspection.
 Disable with `--no-llm-gate` for faster generation.
 
 ## Corpus Acquisition

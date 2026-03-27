@@ -983,7 +983,7 @@ class VAEPretrainer:
                 train_dataset,
                 batch_size=cfg.batch_size,
                 shuffle=True,
-                drop_last=False,
+                drop_last=True,
             )
         val_loader = DataLoader(
             val_dataset,
@@ -1035,8 +1035,15 @@ class VAEPretrainer:
             all_params.extend(contrastive_proj.parameters())
 
         optimizer = torch.optim.AdamW(all_params, lr=cfg.lr)
+        # Per-step cosine decay: T_max = total optimizer steps across all epochs.
+        # Stepped every batch (or every accum batches if gradient accumulation).
+        # This ensures the LR schedule scales correctly regardless of dataset size.
+        _total_steps = (
+            len(train_dataset) // cfg.batch_size * cfg.num_epochs
+            // cfg.gradient_accumulation_steps
+        )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=cfg.num_epochs, eta_min=cfg.lr_min,
+            optimizer, T_max=_total_steps, eta_min=cfg.lr_min,
         )
         # Fixed-scale GradScaler: init at 256, effectively never grow.
         # The scaler exists only to prevent fp16 gradient underflow.
@@ -1107,7 +1114,21 @@ class VAEPretrainer:
             # to avoid fp16 overflow from high saved scales.
             # scaler.load_state_dict(ckpt["scaler"])
             if "scheduler" in ckpt:
-                scheduler.load_state_dict(ckpt["scheduler"])
+                # Only restore if T_max matches (per-step vs per-epoch change)
+                saved_T = ckpt["scheduler"].get("T_max", 0)
+                if saved_T == scheduler.T_max:
+                    scheduler.load_state_dict(ckpt["scheduler"])
+                else:
+                    # T_max changed (e.g. per-epoch → per-step migration).
+                    # Set scheduler.last_epoch to the saved global_step so
+                    # cosine position is correct without looping.
+                    resume_step = ckpt.get("global_step", 0)
+                    scheduler.last_epoch = resume_step
+                    logger.info(
+                        "Scheduler T_max mismatch (saved=%s, current=%s) "
+                        "— set cosine position to step %d/%d",
+                        saved_T, scheduler.T_max, resume_step, scheduler.T_max,
+                    )
             if modules.get("_residual_vq") is not None and "residual_vq" in ckpt:
                 modules["_residual_vq"].load_state_dict(ckpt["residual_vq"])
                 logger.info("Restored ResidualVQ codebooks from checkpoint")
@@ -1235,6 +1256,12 @@ class VAEPretrainer:
             train_acc_total = 0
             train_count = 0
             last_grad_norm = 0.0
+            # Length-bucketed CE: [short(<20), medium(20-50), long(>50)]
+            _BUCKET_NAMES = ["short(<20)", "med(20-50)", "long(>50)"]
+            _bucket_ce_sum = [0.0, 0.0, 0.0]
+            _bucket_ce_count = [0, 0, 0]
+            _batch_bucket_ce_sum = [0.0, 0.0, 0.0]
+            _batch_bucket_ce_count = [0, 0, 0]
             optimizer.zero_grad()
             epoch_start = time.time()
             batch_start = time.time()
@@ -1474,6 +1501,7 @@ class VAEPretrainer:
                                         state["max_exp_avg_sq"].zero_()
                     scaler.update()
                     optimizer.zero_grad()
+                    scheduler.step()
                     global_step += 1
 
                 # Token accuracy (loss-invariant reconstruction quality metric)
@@ -1487,6 +1515,30 @@ class VAEPretrainer:
                     _correct = ((_preds == batch_tokens) & _src_mask).sum().item()
                     _total = _src_mask.sum().item()
                     _batch_acc = _correct / max(_total, 1)
+
+                    # Per-sample CE for length-bucketed tracking
+                    _flat_logits = _logits.reshape(-1, full_vocab)
+                    _flat_targets = batch_tokens.reshape(-1)
+                    _per_tok_ce = F.cross_entropy(
+                        _flat_logits, _flat_targets, reduction="none",
+                    ).reshape(b, -1)
+                    _per_sample_ce = (
+                        (_per_tok_ce * _src_mask.float()).sum(dim=1)
+                        / batch_lengths.float().clamp(min=1)
+                    )
+                    # Bucket: short <20, medium 20-50, long >50
+                    for _s_idx in range(b):
+                        _slen = batch_lengths[_s_idx].item()
+                        if _slen < 20:
+                            _bkt = 0
+                        elif _slen <= 50:
+                            _bkt = 1
+                        else:
+                            _bkt = 2
+                        _bucket_ce_sum[_bkt] += _per_sample_ce[_s_idx].item()
+                        _bucket_ce_count[_bkt] += 1
+                        _batch_bucket_ce_sum[_bkt] += _per_sample_ce[_s_idx].item()
+                        _batch_bucket_ce_count[_bkt] += 1
 
                 train_ce_sum += ce_loss.item() * b
                 train_kl_sum += kl_loss.item() * b
@@ -1568,6 +1620,18 @@ class VAEPretrainer:
                     )
                     if cfg.use_vq:
                         logger.info("    util: %s", _vq_util_str)
+                    # Per-batch bucketed CE
+                    _bkt_parts = []
+                    for _bi in range(3):
+                        if _batch_bucket_ce_count[_bi] > 0:
+                            _bkt_ce = _batch_bucket_ce_sum[_bi] / _batch_bucket_ce_count[_bi]
+                            _bkt_parts.append(
+                                f"{_BUCKET_NAMES[_bi]}={_bkt_ce:.2f}({_batch_bucket_ce_count[_bi]})"
+                            )
+                    if _bkt_parts:
+                        logger.info("    CE by len: %s", " | ".join(_bkt_parts))
+                    _batch_bucket_ce_sum = [0.0, 0.0, 0.0]
+                    _batch_bucket_ce_count = [0, 0, 0]
                     batch_start = time.time()
 
             train_ce = train_ce_sum / max(train_count, 1)
@@ -1592,6 +1656,8 @@ class VAEPretrainer:
             val_kl_sum = 0.0
             val_count = 0
             all_kl_per_dim: list[Tensor] = []
+            _val_bucket_ce_sum = [0.0, 0.0, 0.0]
+            _val_bucket_ce_count = [0, 0, 0]
 
             with torch.no_grad():
                 for batch_tokens, batch_lengths in val_loader:
@@ -1604,7 +1670,7 @@ class VAEPretrainer:
                     with torch.amp.autocast(
                         device_type=device.type, enabled=cfg.use_amp
                     ):
-                        ce_loss, kl_loss, kl_per_dim, _, _, _, _, _ = _vae_forward(
+                        ce_loss, kl_loss, kl_per_dim, _, dec_hidden_val, _, _, _ = _vae_forward(
                             batch_tokens,
                             batch_lengths,
                             bos_id=bos_id,
@@ -1618,6 +1684,27 @@ class VAEPretrainer:
                     val_kl_sum += kl_loss.item() * b
                     val_count += b
                     all_kl_per_dim.append(kl_per_dim.detach().cpu())
+
+                    # Bucketed val CE
+                    _v_logits = modules["output_head"](dec_hidden_val)
+                    _v_src_mask = (
+                        torch.arange(batch_tokens.size(1), device=device).unsqueeze(0)
+                        < batch_lengths.unsqueeze(1)
+                    )
+                    _v_per_tok = F.cross_entropy(
+                        _v_logits.reshape(-1, full_vocab),
+                        batch_tokens.reshape(-1),
+                        reduction="none",
+                    ).reshape(b, -1)
+                    _v_per_sample = (
+                        (_v_per_tok * _v_src_mask.float()).sum(dim=1)
+                        / batch_lengths.float().clamp(min=1)
+                    )
+                    for _vi in range(b):
+                        _vlen = batch_lengths[_vi].item()
+                        _vbkt = 0 if _vlen < 20 else (1 if _vlen <= 50 else 2)
+                        _val_bucket_ce_sum[_vbkt] += _v_per_sample[_vi].item()
+                        _val_bucket_ce_count[_vbkt] += 1
 
             val_ce = val_ce_sum / max(val_count, 1)
             val_kl = val_kl_sum / max(val_count, 1)
@@ -1661,7 +1748,8 @@ class VAEPretrainer:
             current_lr = scheduler.get_last_lr()[0]
             epoch_parts.append(
                 f"| z_std={z_running_std.mean():.4f}"
-                f" z_active={int((z_running_std > 0.01).sum())}/{cfg.latent_dim}"
+                f" z_active(>{z_running_std.mean().item() * 0.5:.4f})="
+                f"{int((z_running_std > z_running_std.mean() * 0.5).sum())}/{cfg.latent_dim}"
                 f" lr={current_lr:.6f}"
             )
             if ss_p > 0:
@@ -1675,6 +1763,28 @@ class VAEPretrainer:
                 epoch_parts.append(f"| active={active_dims}/{cfg.latent_dim}")
 
             logger.info("  ".join(epoch_parts))
+
+            # Epoch-level bucketed CE by sequence length
+            _epoch_bkt_parts = []
+            for _bi in range(3):
+                if _bucket_ce_count[_bi] > 0:
+                    _bkt_ce = _bucket_ce_sum[_bi] / _bucket_ce_count[_bi]
+                    _bkt_pct = _bucket_ce_count[_bi] / max(train_count, 1) * 100
+                    _epoch_bkt_parts.append(
+                        f"{_BUCKET_NAMES[_bi]}={_bkt_ce:.3f} (n={_bucket_ce_count[_bi]}, {_bkt_pct:.0f}%)"
+                    )
+            if _epoch_bkt_parts:
+                logger.info("  train CE by len: %s", " | ".join(_epoch_bkt_parts))
+            _val_bkt_parts = []
+            for _bi in range(3):
+                if _val_bucket_ce_count[_bi] > 0:
+                    _vbkt_ce = _val_bucket_ce_sum[_bi] / _val_bucket_ce_count[_bi]
+                    _vbkt_pct = _val_bucket_ce_count[_bi] / max(val_count, 1) * 100
+                    _val_bkt_parts.append(
+                        f"{_BUCKET_NAMES[_bi]}={_vbkt_ce:.3f} (n={_val_bucket_ce_count[_bi]}, {_vbkt_pct:.0f}%)"
+                    )
+            if _val_bkt_parts:
+                logger.info("  val CE by len:   %s", " | ".join(_val_bkt_parts))
 
             # -- Contrastive alignment diagnostic --
             # Measure Spearman correlation between z-cosine and embedding-cosine
@@ -2100,18 +2210,24 @@ class VAEPretrainer:
                 )
                 break
 
-            # 2. Latent collapse: z_std drops below absolute floor
+            # 2. Latent collapse: z_std drops *and* val CE stops improving
+            # With KL=0 the encoder naturally has small z_std (0.004-0.04);
+            # this is not collapse if the model is still learning.
             z_std_mean = z_running_std.mean().item()
-            if epoch > 5 and z_std_mean < 0.02:
+            z_std_declining = (
+                epoch > 5
+                and z_std_mean < 0.001  # extreme collapse, not normal KL=0 range
+                and val_loss >= best_val_loss  # and not improving
+            )
+            if z_std_declining:
                 logger.warning(
-                    "EARLY STOP: z_std=%.4f below 0.02 — latent space "
-                    "collapse. Best checkpoint preserved.",
+                    "EARLY STOP: z_std=%.6f below 0.001 with no val improvement — "
+                    "latent space collapse. Best checkpoint preserved.",
                     z_std_mean,
                 )
                 break
 
-            # Step LR scheduler
-            scheduler.step()
+            # LR scheduler is stepped per-batch (inside training loop)
 
             # Update training history
             _shutdown_state["epoch"] = epoch + 1

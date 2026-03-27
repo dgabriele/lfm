@@ -12,15 +12,16 @@ LFM gives agents the ability to express internal representations as linguistical
 2. [The Problem](#the-problem)
 3. [How It Works](#how-it-works)
 4. [Architecture](#architecture)
-5. [Pretraining Results](#pretraining-results)
-6. [Structural Analysis](#structural-analysis)
-7. [Agent Game Results](#agent-game-results)
-8. [Dataset Generation](#dataset-generation)
-9. [Visualization CLI](#visualization-cli)
-10. [Quick Start](#quick-start)
-11. [Design](#design)
-12. [Status](#status)
-13. [Further Reading](#further-reading)
+5. [Expression System](#expression-system)
+6. [Pretraining Results](#pretraining-results)
+7. [Structural Analysis](#structural-analysis)
+8. [Agent Game Results](#agent-game-results)
+9. [Dataset Generation](#dataset-generation)
+10. [Visualization CLI](#visualization-cli)
+11. [Quick Start](#quick-start)
+12. [Design](#design)
+13. [Status](#status)
+14. [Further Reading](#further-reading)
 
 ---
 
@@ -144,6 +145,47 @@ src/lfm/
   training/             # TrainingLoop, TrainingPhase, Callbacks
   utils/                # Tensor helpers, sampling utilities
 ```
+
+## Expression System
+
+LFM includes a learnable **expression system** for tree-structured communication through the linguistic bottleneck. Instead of mapping one embedding to one flat utterance, an agent produces a binary constituency tree where the topology is learned and each leaf carries a latent z vector. The leaves are decoded as **one continuous autoregressive sequence** with z-switching at segment boundaries — the KV cache persists across transitions, producing phonotactically coherent output with natural coarticulation.
+
+```
+    Tree:        ○ (root — learned topology)
+                / \
+               ○   z₃ (leaf)
+              / \
+            z₁   z₂ (leaves)
+
+    Decode:  [BOS ðʌ kwɪk braʊn | fɑks dʒʌmpt | oʊvɝ ðʌ leɪzi dɑɡ EOS]
+                  memory=z₁       memory=z₂     memory=z₃
+                  (continuous KV cache — no breaks)
+```
+
+**Components** (`lfm.expression`):
+
+| Module | Role |
+|--------|------|
+| `ExpressionGenerator` | Learn tree topology + continuous z-switching decode through frozen decoder |
+| `Expression` | Data structure: topology, leaf z vectors, decoded tokens, segment boundaries |
+| `ExpressionEncoder` | Segment pooling + bottom-up Merge composition → fixed-size message vector |
+| `ExpressionConfig` | Configuration for all expression system parameters |
+
+**Plug-and-play integration** — works with any agent that produces fixed-size embeddings:
+
+```python
+from lfm.expression import ExpressionGenerator, ExpressionEncoder
+
+expr_gen = ExpressionGenerator(generator=frozen_decoder, input_dim=384, ...)
+expr_enc = ExpressionEncoder(hidden_dim=512, output_dim=384)
+
+expression = expr_gen(agent_embedding)   # topology + continuous decode
+message = expr_enc(expression)           # fixed-size message vector
+```
+
+No decoder retraining needed. The z-switching mechanism exploits properties the decoder already has from pretraining on natural language.
+
+See [docs/expression-system.md](docs/expression-system.md) for the full design document covering motivation, architecture details, continuous z-switching decode, integration guide, and downstream applications.
 
 ## Pretraining Results
 

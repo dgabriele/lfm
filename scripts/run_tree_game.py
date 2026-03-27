@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Referential game with tree-structured communication.
+"""Referential game with tree-structured expression generation.
 
-The sender produces a tree of z vectors — each decoded through the frozen
-decoder into a variable-length IPA statement.  The tree topology (depth,
-branching) is learned alongside the z content via REINFORCE.
+The sender produces a constituency tree of z vectors decoded through the
+frozen LFM decoder as one continuous autoregressive sequence with z-switching
+at segment boundaries.  Tree topology (depth, branching) is learned alongside
+leaf content via REINFORCE.
 
 Usage::
 
     python scripts/run_tree_game.py
     python scripts/run_tree_game.py \
-        --max-depth 3 --max-children 3 \
+        --max-depth 3 \
         --vq-codebook data/models/v1/vq_codebook.pt
 """
 
@@ -23,8 +24,8 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
-from lfm.communication.tree import TreeMessageEncoder, TreeSender
 from lfm.embeddings.store import EmbeddingStore
+from lfm.expression import ExpressionEncoder, ExpressionGenerator
 from lfm.faculty.config import FacultyConfig
 from lfm.faculty.model import LanguageFaculty
 from lfm.generator.config import GeneratorConfig
@@ -79,8 +80,8 @@ def main(
     target_length: int = 96,
     tree_complexity_cost: float = 0.05,
     max_depth: int = 3,
-    max_children: int = 3,
     min_depth: int = 1,
+    max_tokens_per_leaf: int = 96,
     max_output_len: int = 96,
 ) -> dict[str, float]:
     """Run the tree-structured referential game."""
@@ -113,39 +114,39 @@ def main(
 
     decoder_hidden = gen_config.decoder_hidden_dim
 
-    # Tree sender + receiver
-    tree_sender = TreeSender(
+    # Expression generator (topology + continuous z-switching decode)
+    expr_gen = ExpressionGenerator(
         generator=faculty.generator,
         input_dim=embedding_dim,
         latent_dim=gen_config.latent_dim,
         hidden_dim=decoder_hidden,
         max_depth=max_depth,
-        max_children=max_children,
         min_depth=min_depth,
+        max_tokens_per_leaf=max_tokens_per_leaf,
     ).to(torch_device)
 
-    tree_encoder = TreeMessageEncoder(
+    # Expression encoder (segment pooling + bottom-up Merge)
+    expr_enc = ExpressionEncoder(
         hidden_dim=decoder_hidden,
         output_dim=embedding_dim,
-        max_nodes=tree_sender.max_nodes,
         max_depth=max_depth,
     ).to(torch_device)
 
     receiver = Receiver(embedding_dim).to(torch_device)
 
     # Sender params (REINFORCE)
-    sender_params = list(tree_sender.parameters())
+    sender_params = list(expr_gen.parameters())
     sender_optimizer = torch.optim.Adam(sender_params, lr=sender_lr)
 
     # Receiver params (backprop)
-    receiver_params = list(tree_encoder.parameters()) + list(receiver.parameters())
+    receiver_params = list(expr_enc.parameters()) + list(receiver.parameters())
     receiver_optimizer = torch.optim.Adam(receiver_params, lr=receiver_lr)
 
     logger.info(
-        "Tree sender: %d params, Receiver: %d params, max_nodes=%d",
+        "Expression generator: %d params, Receiver: %d params, max_nodes=%d",
         sum(p.numel() for p in sender_params),
         sum(p.numel() for p in receiver_params),
-        tree_sender.max_nodes,
+        expr_gen.max_nodes,
     )
 
     embeddings_np = store._embeddings
@@ -162,17 +163,17 @@ def main(
     start_step = 0
     if resume is not None:
         ckpt = torch.load(resume, map_location=torch_device, weights_only=False)
-        tree_sender.load_state_dict(ckpt["tree_sender"])
-        tree_encoder.load_state_dict(ckpt["tree_encoder"])
+        expr_gen.load_state_dict(ckpt["expr_gen"])
+        expr_enc.load_state_dict(ckpt["expr_enc"])
         receiver.load_state_dict(ckpt["receiver"])
         start_step = ckpt.get("step", 0)
         depth_baselines = ckpt.get("depth_baselines", depth_baselines)
         logger.info("Resumed from step %d", start_step)
 
     logger.info(
-        "Tree referential game: %d distractors, chance=%.1f%%, "
-        "max_depth=%d, max_children=%d, curriculum=%d steps",
-        num_distractors, chance * 100, max_depth, max_children, curriculum_warmup,
+        "Expression referential game: %d distractors, chance=%.1f%%, "
+        "max_depth=%d, curriculum=%d steps",
+        num_distractors, chance * 100, max_depth, curriculum_warmup,
     )
 
     for step in range(start_step, steps):
@@ -206,11 +207,11 @@ def main(
             embeddings_np[dist_indices], dtype=torch.float32,
         ).to(torch_device)
 
-        # --- Sender: generate tree ---
-        tree = tree_sender(anchor)
+        # --- Sender: generate expression (topology + continuous decode) ---
+        expr = expr_gen(anchor)
 
-        # --- Receiver: encode tree → score candidates ---
-        message = tree_encoder(tree)
+        # --- Receiver: encode expression → score candidates ---
+        message = expr_enc(expr)
 
         candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
         perm = torch.stack(
@@ -235,19 +236,19 @@ def main(
             preds = logits.argmax(dim=1)
             correct = (preds == target_idx).float()
 
-            # Length cost: total tokens across leaf nodes
-            total_tokens = (tree.leaf_lengths * tree.is_leaf.long()).sum(dim=1).float()
+            # Length cost: total tokens in the continuous decode
+            total_tokens = expr.lengths.float()
             length_penalty = length_cost * total_tokens / target_length
 
             # Tree complexity cost: penalize more active nodes
-            num_active = tree.num_active_nodes.float()
-            complexity_penalty = tree_complexity_cost * num_active / tree_sender.max_nodes
+            num_active = expr.num_active_nodes.float()
+            complexity_penalty = tree_complexity_cost * num_active / expr_gen.max_nodes
 
             reward = correct * (1.0 - length_penalty - complexity_penalty).clamp(min=0)
 
             # Per-depth baselines
             for d in range(max_depth):
-                depth_mask = tree.depth == d
+                depth_mask = expr.depth == d
                 if depth_mask.any():
                     depth_baselines[d] = (
                         baseline_decay * depth_baselines[d]
@@ -257,8 +258,8 @@ def main(
             global_baseline = sum(depth_baselines) / max(len(depth_baselines), 1)
             advantage = reward - global_baseline
 
-        # REINFORCE: push leaf mu vectors toward high-reward trees
-        active_mu = tree.leaf_mu * tree.is_leaf.unsqueeze(-1).float()
+        # REINFORCE: push leaf mu vectors toward high-reward expressions
+        active_mu = expr.leaf_mu * expr.is_leaf.unsqueeze(-1).float()
         sender_loss = -(
             advantage.unsqueeze(-1).unsqueeze(-1) * active_mu
         ).sum(dim=(-2, -1)).mean()
@@ -270,10 +271,10 @@ def main(
 
         # --- Logging ---
         if step % log_every == 0:
-            acc = reward.mean().item()
+            acc = correct.mean().item()
             total_len = total_tokens.mean().item()
             avg_nodes = num_active.mean().item()
-            avg_leaves = tree.num_leaves.float().mean().item()
+            avg_leaves = expr.num_leaves.float().mean().item()
             logger.info(
                 "step=%d  loss=%.3f  acc=%.1f%%  "
                 "nodes=%.1f  leaves=%.1f  tokens=%.0f  "
@@ -286,8 +287,8 @@ def main(
         # --- Checkpoint ---
         if step > 0 and step % checkpoint_every == 0:
             ckpt = {
-                "tree_sender": tree_sender.state_dict(),
-                "tree_encoder": tree_encoder.state_dict(),
+                "expr_gen": expr_gen.state_dict(),
+                "expr_enc": expr_enc.state_dict(),
                 "receiver": receiver.state_dict(),
                 "step": step,
                 "depth_baselines": depth_baselines,
@@ -297,8 +298,8 @@ def main(
 
     # Final checkpoint
     torch.save({
-        "tree_sender": tree_sender.state_dict(),
-        "tree_encoder": tree_encoder.state_dict(),
+        "expr_gen": expr_gen.state_dict(),
+        "expr_enc": expr_enc.state_dict(),
         "receiver": receiver.state_dict(),
         "step": steps,
         "depth_baselines": depth_baselines,
@@ -306,7 +307,7 @@ def main(
     logger.info("Saved final checkpoint to data/tree_game.pt")
 
     return {
-        "final_accuracy": reward.mean().item(),
+        "final_accuracy": correct.mean().item(),
         "final_receiver_loss": receiver_loss.item(),
         "chance": chance,
     }
@@ -315,7 +316,7 @@ def main(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Tree referential game")
+    parser = argparse.ArgumentParser(description="Expression referential game")
     parser.add_argument("--resume", default=None)
     parser.add_argument("--steps", type=int, default=3000)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -323,8 +324,8 @@ if __name__ == "__main__":
     parser.add_argument("--vq-codebook", default=None)
     parser.add_argument("--vq-alpha", type=float, default=1.0)
     parser.add_argument("--max-depth", type=int, default=3)
-    parser.add_argument("--max-children", type=int, default=3)
     parser.add_argument("--min-depth", type=int, default=1)
+    parser.add_argument("--max-tokens-per-leaf", type=int, default=96)
     parser.add_argument("--max-output-len", type=int, default=96)
     parser.add_argument("--length-cost", type=float, default=0.3)
     parser.add_argument("--target-length", type=int, default=96)
@@ -335,7 +336,7 @@ if __name__ == "__main__":
         resume=args.resume, steps=args.steps, batch_size=args.batch_size,
         device=args.device, vq_codebook_path=args.vq_codebook,
         vq_residual_alpha=args.vq_alpha, max_depth=args.max_depth,
-        max_children=args.max_children, min_depth=args.min_depth,
+        min_depth=args.min_depth, max_tokens_per_leaf=args.max_tokens_per_leaf,
         max_output_len=args.max_output_len, length_cost=args.length_cost,
         target_length=args.target_length,
         tree_complexity_cost=args.tree_complexity_cost,
