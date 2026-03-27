@@ -306,34 +306,39 @@ class DatasetGenerator:
             pairs, num_workers=self.config.num_workers,
         )
 
-        # Align IPA results back with metadata
-        # convert_corpus_to_ipa_labeled drops failed samples, so we need
-        # to track which succeeded
+        # Align IPA results with metadata by index.
+        # convert_corpus_to_ipa_labeled uses ordered imap, so results
+        # align with input order. Failed samples are dropped, so we
+        # track via index matching (successful results are a subset
+        # of inputs in order).
         processed: list[ProcessedSample] = []
+        cfg = self.config.sanitize
         ipa_idx = 0
 
-        for (raw, text), (lang, _) in zip(sanitized, pairs):
-            if ipa_idx < len(ipa_results) and ipa_results[ipa_idx][0] == lang:
-                _, ipa = ipa_results[ipa_idx]
-                ipa_idx += 1
+        for raw, text in sanitized:
+            if ipa_idx >= len(ipa_results):
+                break
+            ipa_lang, ipa = ipa_results[ipa_idx]
+            # Skip if this sample failed IPA conversion (not in results)
+            if ipa_lang != raw.language:
+                continue
+            ipa_idx += 1
 
-                # IPA quality check
-                cfg = self.config.sanitize
-                if len(ipa) < cfg.min_ipa_length:
-                    continue
-                non_alpha = sum(1 for c in ipa if not c.isalpha() and not c.isspace())
-                if len(ipa) > 0 and non_alpha / len(ipa) > cfg.max_ipa_non_alpha_ratio:
-                    continue
+            if len(ipa) < cfg.min_ipa_length:
+                continue
+            non_alpha = sum(1 for c in ipa if not c.isalpha() and not c.isspace())
+            if len(ipa) > 0 and non_alpha / len(ipa) > cfg.max_ipa_non_alpha_ratio:
+                continue
 
-                processed.append(ProcessedSample(
-                    seq=len(processed),
-                    language=raw.language,
-                    source=raw.source,
-                    source_file=raw.source_file,
-                    raw=raw.text,
-                    ipa=ipa,
-                    ipa_length=len(ipa),
-                ))
+            processed.append(ProcessedSample(
+                seq=len(processed),
+                language=raw.language,
+                source=raw.source,
+                source_file=raw.source_file,
+                raw=raw.text,
+                ipa=ipa,
+                ipa_length=len(ipa),
+            ))
 
         return processed
 

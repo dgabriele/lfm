@@ -433,8 +433,8 @@ def convert_corpus_to_ipa_labeled(
         num_workers,
     )
 
-    # Use imap_unordered for large datasets — streams items to workers
-    # without pickling the entire input list upfront.
+    # Use imap (ordered) for streaming without pre-pickling the full list.
+    # Ordered so results align with input indices for metadata matching.
     chunksize = max(500, len(samples) // (num_workers * 20))
     succeeded: list[tuple[str, str]] = []
     failed = 0
@@ -442,7 +442,7 @@ def convert_corpus_to_ipa_labeled(
 
     with mp.Pool(num_workers) as pool:
         for i, result in enumerate(
-            pool.imap_unordered(_convert_one_labeled, samples, chunksize=chunksize)
+            pool.imap(_convert_one_labeled, samples, chunksize=chunksize)
         ):
             if result is not None:
                 succeeded.append(result)
