@@ -73,11 +73,29 @@ class DatasetGenerator:
 
         # 3b. Constituency extraction (optional — augments with sub-phrases)
         if cfg.extract_constituents:
-            sanitized = self._extract_constituents(sanitized)
-            logger.info(
-                "After constituency extraction: %d samples",
-                len(sanitized),
-            )
+            checkpoint_path = self._output_dir / "_constituency_checkpoint.pt"
+            if checkpoint_path.exists():
+                logger.info("Resuming from constituency checkpoint: %s", checkpoint_path)
+                import torch as _torch
+
+                _ckpt = _torch.load(checkpoint_path, weights_only=False)
+                sanitized = _ckpt["sanitized"]
+                rejected_sanitize = _ckpt.get("rejected", rejected_sanitize)
+            else:
+                sanitized = self._extract_constituents(sanitized)
+                logger.info(
+                    "After constituency extraction: %d samples",
+                    len(sanitized),
+                )
+                # Checkpoint so IPA conversion can resume without re-parsing
+                import torch as _torch
+
+                self._output_dir.mkdir(parents=True, exist_ok=True)
+                _torch.save(
+                    {"sanitized": sanitized, "rejected": rejected_sanitize},
+                    checkpoint_path,
+                )
+                logger.info("Saved constituency checkpoint: %s", checkpoint_path)
 
         # 4. IPA conversion
         processed = self._convert_ipa(sanitized, raw_samples)
