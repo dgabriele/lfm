@@ -73,28 +73,18 @@ class DatasetGenerator:
 
         # 3b. Constituency extraction (optional — augments with sub-phrases)
         if cfg.extract_constituents:
-            checkpoint_path = self._output_dir / "_constituency_checkpoint.pt"
+            checkpoint_path = self._output_dir / "_constituency_checkpoint.jsonl"
             if checkpoint_path.exists():
                 logger.info("Resuming from constituency checkpoint: %s", checkpoint_path)
-                import torch as _torch
-
-                _ckpt = _torch.load(checkpoint_path, weights_only=False)
-                sanitized = _ckpt["sanitized"]
-                rejected_sanitize = _ckpt.get("rejected", rejected_sanitize)
+                sanitized = self._load_checkpoint(checkpoint_path)
             else:
                 sanitized = self._extract_constituents(sanitized)
                 logger.info(
                     "After constituency extraction: %d samples",
                     len(sanitized),
                 )
-                # Checkpoint so IPA conversion can resume without re-parsing
-                import torch as _torch
-
                 self._output_dir.mkdir(parents=True, exist_ok=True)
-                _torch.save(
-                    {"sanitized": sanitized, "rejected": rejected_sanitize},
-                    checkpoint_path,
-                )
+                self._save_checkpoint(sanitized, checkpoint_path)
                 logger.info("Saved constituency checkpoint: %s", checkpoint_path)
 
         # 4. IPA conversion
@@ -200,6 +190,36 @@ class DatasetGenerator:
                 augmented.append((aug_raw, text))
 
         return augmented
+
+    @staticmethod
+    def _save_checkpoint(
+        sanitized: list[tuple[RawSample, str]],
+        path: Path,
+    ) -> None:
+        """Save augmented samples as JSONL (streaming, no pickle)."""
+        import json
+
+        with open(path, "w", encoding="utf-8") as f:
+            for raw, text in sanitized:
+                f.write(json.dumps({
+                    "lang": raw.language, "text": text,
+                    "src": raw.source, "file": raw.source_file,
+                    "raw": raw.text,
+                }, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _load_checkpoint(path: Path) -> list[tuple[RawSample, str]]:
+        """Load augmented samples from JSONL checkpoint."""
+        import json
+
+        sanitized: list[tuple[RawSample, str]] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                d = json.loads(line)
+                raw = RawSample(d["lang"], d["raw"], d["src"], d["file"])
+                sanitized.append((raw, d["text"]))
+        logger.info("Loaded %d samples from checkpoint", len(sanitized))
+        return sanitized
 
     def _sanitize(
         self, samples: list[RawSample],
