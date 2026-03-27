@@ -11,17 +11,16 @@ LFM gives agents the ability to express internal representations as linguistical
 1. [Vision](#vision)
 2. [The Problem](#the-problem)
 3. [How It Works](#how-it-works)
-4. [Architecture](#architecture)
-5. [Expression System](#expression-system)
-6. [Pretraining Results](#pretraining-results)
+4. [The Frozen Decoder](#the-frozen-decoder) — architecture, pretraining, results
+5. [Expression Generation](#expression-generation) — tree-structured generation through the decoder
+6. [Agent Game Results](#agent-game-results) — REINFORCE referential game
 7. [Structural Analysis](#structural-analysis)
-8. [Agent Game Results](#agent-game-results)
-9. [Dataset Generation](#dataset-generation)
-10. [Visualization CLI](#visualization-cli)
-11. [Quick Start](#quick-start)
-12. [Design](#design)
-13. [Status](#status)
-14. [Further Reading](#further-reading)
+8. [Dataset Generation](#dataset-generation)
+9. [Visualization CLI](#visualization-cli)
+10. [Quick Start](#quick-start)
+11. [Design](#design)
+12. [Status](#status)
+13. [Further Reading](#further-reading)
 
 ---
 
@@ -98,55 +97,43 @@ Only the input projection learns. The decoder's linguistic structure is preserve
 
 Message length scales with input complexity via z-norm: higher-norm z vectors produce longer utterances (more information to express), lower-norm vectors produce shorter ones. This means complex agent observations generate detailed linguistic descriptions while simple ones produce brief expressions.
 
-## Architecture
+## The Frozen Decoder
+
+The core of LFM is a **pretrained multilingual VAE decoder** that produces linguistically structured IPA from a latent vector. After pretraining, it is frozen and becomes a fixed linguistic bottleneck for downstream use.
+
+### Decoder architecture
 
 ```
-Agent Embedding (384-dim)
-  -> _input_proj (LEARNED: 384 -> 512, split to mu,sigma of 256-dim z)
-  -> sample z ~ N(mu, sigma)
-  -> frozen LinguisticDecoder
+z (384-dim latent vector)
+  → latent_to_decoder projection
+  → frozen LinguisticDecoder
       |-- RoPE (translation-invariant positions)
-      |-- Multi-scale attention (3/7/15/full window per head)
-      +-- Weight-shared layers (recursive application)
-  -> variable-length IPA tokens (max_seq_len=96)
-  -> MessageEncoder (pool + project to fixed dim)
-  -> Receiver scores candidates via dot-product
+      |-- Multi-scale attention heads (3/7/15/full token windows)
+      +-- Weight-shared layers (2 unique × 4 applications = recursion)
+  → variable-length IPA tokens (max_seq_len=96)
 ```
 
-### Training safety features
+The **LinguisticDecoder** has architectural biases for natural language:
+- **Rotary Positional Embeddings (RoPE)**: a morpheme works the same way regardless of position
+- **Multi-scale attention heads**: window sizes of 3 (phonotactic), 7 (morpheme), 15 (word), and full (clause) — a multi-resolution linguistic filter bank
+- **Weight-shared layers**: 2 unique layers applied 4 times = literal recursion, mirroring syntactic Merge
 
-- **Cosine LR decay** with configurable minimum LR
-- **DIP-VAE covariance regularization**: off-diagonal penalty on the latent covariance matrix, encouraging statistically independent z dimensions
-- **Variance floor** (`z_var_floor=0.01`): prevents posterior collapse by penalizing when aggregate z variance drops below the floor
-- **Gradient clipping** with inf/nan skip: clips gradient norms and skips optimizer steps entirely when gradients contain inf or nan values
-- **Full resume support**: complete training state (model, optimizer, scheduler, epoch, metrics) saved per epoch
+### Pretraining
 
-### Package structure
+The decoder is trained on IPA-transcribed text from 16 typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay, DIP-VAE covariance regularization, gradient clipping with inf/nan skip, and full resume support.
 
-```
-src/lfm/
-  cli/                  # CLI framework (lfm command)
-    dataset.py          # lfm dataset {generate,list}
-    visualize/          # lfm visualize subcommand group (11 subcommands)
-  visualize/            # Visualization computation + rendering
-  faculty/              # LanguageFaculty compositor
-  generator/            # VAE generator, linguistic decoder, pretraining
-    layers.py           # LinguisticDecoderLayer (RoPE + multi-scale attention)
-    multilingual_vae.py # MultilingualVAEGenerator
-    pretrain.py         # Full pretraining pipeline
-    discriminator.py    # StructuralDiscriminator (diagnostic)
-    tokenizer.py        # SubwordTokenizer (sentencepiece)
-  data/                 # Corpus datasets, loaders, collation
-    sanitize.py         # Configurable text sanitization (SanitizeConfig)
-    dataset/            # HDF5 dataset generation + reader
-    loaders/            # Leipzig loader, IPA converter, phonetic distance
-  embeddings/           # LLM embedding games, sampler, prefetcher
-  core/                 # LFMModule (ABC), LFMLoss
-  training/             # TrainingLoop, TrainingPhase, Callbacks
-  utils/                # Tensor helpers, sampling utilities
-```
+**v4 (current)**: constituency-augmented dataset (~5.75M samples — full sentences + extracted NP/VP/PP phrases), latent_dim=384, encoder_num_layers=3, 20 epochs. The constituency augmentation teaches the decoder to produce variable-length output at all scales.
 
-## Expression System
+### Pretraining results (v1)
+
+42 epochs on 560K IPA sentences from 16 languages:
+- **Val CE: 0.52** (PPL ≈ 1.7)
+- **Reconstruction**: near-perfect through 256-dim latent bottleneck, word order largely preserved
+- **Interpolation**: smooth typological transitions (English ↔ Polish)
+- **σ=0.5 perturbation**: paraphrastic variation within language
+- **TTR: 0.958**, rep_rate: 0.00, mean word length: 4.7, active z dims: 256/256
+
+## Expression Generation
 
 LFM includes a learnable **expression system** for tree-structured communication through the linguistic bottleneck. Instead of mapping one embedding to one flat utterance, an agent produces a binary constituency tree where the topology is learned and each leaf carries a latent z vector. The leaves are decoded as **one continuous autoregressive sequence** with z-switching at segment boundaries — the KV cache persists across transitions, producing phonotactically coherent output with natural coarticulation.
 
@@ -187,83 +174,55 @@ No decoder retraining needed. The z-switching mechanism exploits properties the 
 
 See [docs/expression-system.md](docs/expression-system.md) for the full design document covering motivation, architecture details, continuous z-switching decode, integration guide, and downstream applications.
 
-## Pretraining Results
+### Sample outputs (v1)
 
-42 epochs on 560K IPA-transcribed sentences from 16 languages (`max_seq_len=96`, cosine LR decay, DIP-VAE covariance regularization, variance floor, 256/256 active latent dims):
-
-| Metric | Value |
-|--------|-------|
-| Val CE | **0.52** (PPL ≈ 1.7) |
-| TTR | 0.958 |
-| Repetition rate | 0.000 |
-| EOS rate | 1.00 |
-| Mean word length | 4.7 IPA chars |
-| Active z dims | 256/256 |
-
-<p align="center">
-  <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
-  <img src="docs/static/images/tsne_by_type.png" width="48%" alt="t-SNE of latent space colored by morphological type" />
-</p>
-<p align="center"><em>Left: hierarchical clustering recovers linguistically sensible language groupings from the latent space. Right: t-SNE projection colored by morphological type (fusional, agglutinative, isolating, introflexive). Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
-
-### Reconstruction
-
-The latent bottleneck preserves specific lexical content. English:
-
+**Reconstruction** (English — all content words recovered, minor word order shuffle):
 ```
 orig: mækswɛl sɛd hi meɪd fɹɛndz fɔɹ laɪf ɑn ðʌ ʃoʊ wɪtʃ ɪnkludʌd ðʌ ʌðɝ ækts
 dec:  mækswɛl sɛd hi meɪd fɔɹ fɹɛndz laɪf ɑn ðʌ ʃoʊ wɪtʃ ɪnklud ðʌ ʌðɝ ækts
 ```
 
-All content words recovered. Word order slightly shuffled (`fɔɹ fɹɛndz` vs `fɹɛndz fɔɹ`) — content preserved, sequencing approximate.
-
-Portuguese (fusional):
-
-```
-orig: ɛʃtowu mujto fɛliz dɛ ɾɛtomɐɾ os sows dɛpowis dɛ dɛʃsɛs dowis ɐnos ɛ tɐntɐs mudɐnsɐs
-dec:  ɛʃtowu mujto fɛliz dɛ ɾɛtomɐɾ os dowis sows dɛpowis dɛ ɐnos dɛʃsɛs ɛ mudɐnsɐs tɐntɐs
-```
-
-All content words preserved. Minor reorderings (`dowis sows` vs `sows ... dowis`, `mudɐnsɐs tɐntɐs` vs `tɐntɐs mudɐnsɐs`) — the bottleneck faithfully preserves vocabulary through the 256-dim latent space.
-
-### Interpolation (English → Portuguese)
-
-Smooth typological transition through the latent space:
-
+**Interpolation** (English → Portuguese — smooth typological transition):
 ```
 0.00: mækswɛl sɛd hi meɪd fɔɹ fɹɛndz laɪf ɑn ðʌ ʃoʊ wɪtʃ ɪnkludʌd ðʌ ʌðɝ ækts
-0.25: mækswɛl sɛd hi meɪd fɔɹ ʌðɝ dɛz ɐnos tɑp ɡɪv ðʌ kjuɾiɐ sɛɡʃʌnɪst ɑn kæʃnos
 0.50: ɛʃtowu fɛksʌz dɛliz sɛd ðæt hi meɪd ðʌ jɪɹ fɹʌm ðʌ swʌŋ fɹeɪnz laɪf aʊtmæs wɑz viʃɪŋ
-0.75: ɛʃtowu mujto fɛliz dɛ ɾɛtomɐɾ sows dɛpowis dɛ dowis ɐnos ɐpɔs os ɐtiɾɐɾɛlɔvɛjs klazy
 1.00: ɛʃtowu mujto fɛliz dɛ ɾɛtomɐɾ os sows dɛpowis dɛ dowis ɐnos dɛʃsɛs mudɐnsɐs ɛ tɐntɐs
 ```
 
-English phonology at t=0, mixed English-Portuguese phonotactics at t=0.50, clean Portuguese at t=1.
-
-### Perturbation
-
-Adding noise to a latent code produces paraphrastic variation scaled to the encoder's actual z distribution (σ=1.0 means one encoder standard deviation):
-
+**Perturbation** (σ=0.5 — sentence frame holds, content words shift):
 ```
 σ=0.0: mækswɛl sɛd hi meɪd fɔɹ fɹɛndz ʃoʊ ɑn ðʌ laɪf wɪtʃ ɪnkludʌd ðʌ ækts ʌðɝ
-σ=0.1: mækswɛl sɛd hi meɪd fɔɹ fɹɛndz ʃoʊ ɑn ðʌ laɪf wɪtʃ ɪnkludʌd ðʌ ækts ʌðɝ
 σ=0.5: mækswɛl hi meɪd sɛd laɪf fɹɛndz ɑn ðʌ menlis wɪtʃ fɔɹ ðʌ æstɪʃoʊz klɑpd
-σ=1.0: mækskswɛnd vlad ɔranfilt͡ɕɛ r sɛd aɪ meɪd ðætrne carne ɔ fɔɹmɝ fɹɪtel buktɨ ʌðɝ hetwʌzʔau sɔ̃ tʂɛx pjɛsɪt͡ʂnɨ pɔɦleli re
+σ=1.0: mækskswɛnd vlad ɔranfilt͡ɕɛ r sɛd aɪ meɪd ðætrne carne ɔ fɔɹmɝ fɹɪtel buktɨ ʌðɝ hetwʌzʔau ...
 ```
 
-Small noise preserves language and sentence structure (English throughout). At σ=0.5, the sentence frame holds but content words shift. At σ=1.0, phonotactics diverge into mixed typology (Slavic consonant clusters, Portuguese nasalization).
+<p align="center">
+  <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
+  <img src="docs/static/images/tsne_by_type.png" width="48%" alt="t-SNE of latent space colored by morphological type" />
+</p>
+<p align="center"><em>Left: hierarchical clustering recovers language groupings from latent space. Right: t-SNE colored by morphological type. Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
 
-### Random z sampling
-
-Sampled from the encoder's tracked distribution, the decoder produces diverse, coherent output across typologies:
+### Package structure
 
 ```
-random[0]: ɐɡlɔstivanɨ xɛjinin kamjɛɲajnɨ ne pʂɨznautsja v kompjɛtɲu vipklja pɔjatkji pɔjalami fojkɛk fajrkejkænd naprav
-random[1]: krɨːmanalæːpːlinkjuːɑtːi jɑ jɪɹz vɤrxtɛnspːænjit hanɯn supt͡sialj fjeonofolʔinsaviɐ o kteri rihʌn
-random[2]: wollʌ on t͡ɕɛkaʋwat ani ʌnt͡ɕe tɛsto estjswaʐɛɲɛ nonfmain suls kɑmuljɑ sʌm alɑme phlok ʌnsust bisa
+src/lfm/
+  expression/           # Tree-structured expression generation (this section)
+    generator.py        # ExpressionGenerator (topology + continuous z-switching decode)
+    encoder.py          # ExpressionEncoder (segment pooling + Merge composition)
+    expression.py       # Expression dataclass
+  faculty/              # LanguageFaculty compositor
+  generator/            # VAE generator, linguistic decoder, pretraining
+    layers.py           # LinguisticDecoder (RoPE + multi-scale attention)
+    multilingual_vae.py # MultilingualVAEGenerator
+    pretrain.py         # Full pretraining pipeline
+  data/                 # Corpus datasets, loaders, IPA conversion
+    sanitize.py         # Configurable text sanitization
+    dataset/            # HDF5 dataset generation + reader
+    loaders/            # Leipzig loader, IPA converter
+  cli/                  # CLI framework (lfm dataset, visualize, translate, publish)
+  embeddings/           # LLM embedding games, sampler, prefetcher
+  visualize/            # Visualization suite (t-SNE, clustering, attention, etc.)
 ```
-
-Each sample exhibits different phonotactic patterns — Russian-like, mixed Uralic/Germanic, Indonesian-like — reflecting the typological diversity of the training data.
 
 ## Structural Analysis
 
