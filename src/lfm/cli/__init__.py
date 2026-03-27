@@ -6,6 +6,7 @@ Provides the ``lfm`` entry point with subcommand dispatch.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 
@@ -63,6 +64,15 @@ def create_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """CLI entry point."""
+    # Force line-buffered stderr so log output appears immediately in pipes
+    sys.stderr = open(sys.stderr.fileno(), "w", buffering=1, closefd=False)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(message)s",
+        stream=sys.stderr,
+    )
+
     parser = create_parser()
     args = parser.parse_args()
 
