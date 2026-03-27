@@ -160,24 +160,22 @@ class ConstituencyExtractor:
 
 
 def _parse_language_worker(
-    args: tuple[str, list[str], int, object | None],
+    args: tuple[str, list[str], int, str | None],
 ) -> list[tuple[str, str, str]]:
     """Worker: parse all sentences for one language, extract constituents.
 
     Runs in a separate process with its own Stanza pipeline.
-    Processes sentences in batches for throughput.
-    Progress is reported via an mp.Queue if provided.
+    Progress written directly to a shared log file (no queues).
     """
     import stanza
 
-    lang, texts, min_length, progress_queue = args
+    lang, texts, min_length, progress_file = args
     iso2 = CONSTITUENCY_LANGS[lang]
-    use_gpu = not _is_multiprocess_mode()
 
     stanza.download(iso2, processors="tokenize,pos,constituency", verbose=False)
     nlp = stanza.Pipeline(
         iso2, processors="tokenize,pos,constituency",
-        use_gpu=use_gpu, verbose=False,
+        use_gpu=True, verbose=False,
     )
 
     labels = EXTRACT_LABELS
@@ -197,20 +195,24 @@ def _parse_language_worker(
             )
 
         processed += len(batch)
-        if processed % 500 == 0 and progress_queue is not None:
-            progress_queue.put((lang, processed, len(texts), len(results)))
+        if processed % 500 == 0 and progress_file:
+            _write_progress(progress_file, lang, processed, len(texts), len(results))
 
-    if progress_queue is not None:
-        progress_queue.put((lang, processed, len(texts), len(results)))
+    if progress_file:
+        _write_progress(progress_file, lang, processed, len(texts), len(results))
 
     return results
 
 
-def _is_multiprocess_mode() -> bool:
-    """Check if we're running in a multiprocessing worker."""
-    import multiprocessing
+def _write_progress(path: str, lang: str, done: int, total: int, n_const: int) -> None:
+    """Append progress line to shared file (atomic write via append mode)."""
+    import time
 
-    return multiprocessing.current_process().name != "MainProcess"
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{ts}   [{lang}] {done}/{total} sentences → {n_const} constituents\n"
+    with open(path, "a") as f:
+        f.write(line)
+        f.flush()
 
 
 def _extract_from_tree(
@@ -315,45 +317,53 @@ def extract_constituents_parallel(
         "GPU" if use_gpu else "CPU", total_sents,
     )
 
-    # Progress queue: workers report (lang, processed, total, constituents)
-    # Use manager queue for spawn context compatibility
-    manager = mp.Manager()
-    progress_queue = manager.Queue()
+    # Progress file: workers append lines, main process tails.
+    # Reliable across all mp contexts (no queues, no threading).
+    import tempfile
 
-    # Add queue to work items
-    work_with_queue = [
-        (lang, texts, ml, progress_queue) for lang, texts, ml in work_items
+    progress_file = tempfile.mktemp(prefix="lfm_constituency_", suffix=".log")
+
+    work_with_progress = [
+        (lang, texts, ml, progress_file) for lang, texts, ml in work_items
     ]
 
-    # Progress printer thread
-    def _progress_printer() -> None:
-        while True:
-            try:
-                msg = progress_queue.get(timeout=1.0)
-                if msg is None:
-                    break
-                lang, done, total, n_const = msg
-                logger.info(
-                    "  [%s] %d/%d sentences → %d constituents",
-                    lang, done, total, n_const,
-                )
-            except Exception:
-                continue
+    # Live progress: tail the progress file in a daemon thread
+    import os
+    import time
 
-    printer = threading.Thread(target=_progress_printer, daemon=True)
-    printer.start()
+    _stop_tail = threading.Event()
+
+    def _tail_progress() -> None:
+        """Tail the progress file and log lines as they appear."""
+        last_pos = 0
+        while not _stop_tail.is_set():
+            try:
+                if os.path.exists(progress_file):
+                    with open(progress_file) as f:
+                        f.seek(last_pos)
+                        for line in f:
+                            logger.info(line.rstrip())
+                        last_pos = f.tell()
+            except Exception:
+                pass
+            time.sleep(2.0)
+
+    tail_thread = threading.Thread(target=_tail_progress, daemon=True)
+    tail_thread.start()
 
     if actual_workers == 1:
-        lang_results = [_parse_language_worker(item) for item in work_with_queue]
+        lang_results = [_parse_language_worker(item) for item in work_with_progress]
     else:
-        # Use spawn context for GPU safety (fork + CUDA = crashes)
         ctx = mp.get_context("spawn")
         with ctx.Pool(actual_workers) as pool:
-            lang_results = pool.map(_parse_language_worker, work_with_queue)
+            lang_results = pool.map(_parse_language_worker, work_with_progress)
 
-    # Signal printer to stop
-    progress_queue.put(None)
-    printer.join(timeout=5.0)
+    _stop_tail.set()
+    tail_thread.join(timeout=5.0)
+
+    # Cleanup
+    if os.path.exists(progress_file):
+        os.unlink(progress_file)
 
     # Merge results
     constituent_count = 0
