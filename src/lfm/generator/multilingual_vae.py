@@ -460,7 +460,13 @@ class MultilingualVAEGenerator(GeneratorModule):
 
         batch = z.size(0)
         device = z.device
-        max_len = self._max_output_len
+        # Clamp to RoPE length — beyond this, positional encodings
+        # and causal mask produce invalid positions / garbage output.
+        rope_limit = (
+            self._rope_freqs.size(0) if self._rope_freqs is not None
+            else self._max_output_len
+        )
+        max_len = min(self._max_output_len, rope_limit - 1)  # -1 for BOS
 
         # Hybrid VQ: decompose into discrete anchor + continuous residual.
         # This replaces calibrate_z when a codebook is available — the VQ
