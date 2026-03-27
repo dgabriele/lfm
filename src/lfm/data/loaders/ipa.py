@@ -433,11 +433,28 @@ def convert_corpus_to_ipa_labeled(
         num_workers,
     )
 
-    with mp.Pool(num_workers) as pool:
-        results = pool.map(_convert_one_labeled, samples, chunksize=500)
+    # Use imap_unordered for large datasets — streams items to workers
+    # without pickling the entire input list upfront.
+    chunksize = max(500, len(samples) // (num_workers * 20))
+    succeeded: list[tuple[str, str]] = []
+    failed = 0
+    log_interval = max(len(samples) // 10, 10000)
 
-    succeeded = [r for r in results if r is not None]
-    failed = len(results) - len(succeeded)
+    with mp.Pool(num_workers) as pool:
+        for i, result in enumerate(
+            pool.imap_unordered(_convert_one_labeled, samples, chunksize=chunksize)
+        ):
+            if result is not None:
+                succeeded.append(result)
+            else:
+                failed += 1
+
+            if (i + 1) % log_interval == 0:
+                logger.info(
+                    "  IPA progress: %d/%d (%.0f%%), %d succeeded, %d failed",
+                    i + 1, len(samples), (i + 1) / len(samples) * 100,
+                    len(succeeded), failed,
+                )
 
     logger.info(
         "IPA conversion (labeled): %d succeeded, %d failed/dropped",
