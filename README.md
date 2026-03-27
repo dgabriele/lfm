@@ -8,19 +8,19 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 
 **Contents**
 
-1. [Vision](#vision)
-2. [The Problem](#the-problem)
-3. [How It Works](#how-it-works)
-4. [The Frozen Decoder](#the-frozen-decoder) — architecture, pretraining, results
+1. [Vision](#vision) — why encode structured data as natural language
+2. [The Problem](#the-problem) — limitations of existing encoding approaches
+3. [How It Works](#how-it-works) — three-step pipeline overview
+4. [The Frozen Decoder](#the-frozen-decoder) — architecture, pretraining, sample outputs
 5. [Expression Generation](#expression-generation) — tree-structured generation through the decoder
-6. [Agent Game Results](#agent-game-results) — REINFORCE referential game
-7. [Structural Analysis](#structural-analysis)
-8. [Dataset Generation](#dataset-generation)
-9. [Visualization CLI](#visualization-cli)
-10. [Quick Start](#quick-start)
-11. [Design](#design)
-12. [Status](#status)
-13. [Further Reading](#further-reading)
+6. [Agent Game Results](#agent-game-results) — REINFORCE referential game validation
+7. [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
+8. [Dataset Generation](#dataset-generation) — HDF5 pipeline with constituency augmentation
+9. [Visualization CLI](#visualization-cli) — t-SNE, clustering, attention, Zipf, and more
+10. [Quick Start](#quick-start) — install, pretrain, run
+11. [Design](#design) — principles and trade-offs
+12. [Status](#status) — current capabilities and roadmap
+13. [Further Reading](#further-reading) — related docs and background
 
 ---
 
