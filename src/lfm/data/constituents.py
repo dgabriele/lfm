@@ -313,8 +313,11 @@ def extract_constituents_parallel(
     import torch
 
     use_gpu = torch.cuda.is_available()
-    # Sequential on GPU (fastest per-sentence), parallel on CPU
-    actual_workers = 1 if use_gpu else min(num_workers, len(work_items))
+    # 2 GPU workers (~2 GB each, fits 8 GB) or parallel CPU
+    if use_gpu:
+        actual_workers = min(2, len(work_items))
+    else:
+        actual_workers = min(num_workers, len(work_items))
 
     total_sents = sum(len(t) for _, t, _ in work_items)
     logger.info(
