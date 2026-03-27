@@ -30,7 +30,7 @@ attention_global_every: 7
 use_rope: true
 share_decoder_layers: true
 max_seq_len: 96
-encoder_pooling: attention
+encoder_pooling: mean
 
 # KL — disabled
 kl_weight: 0.0
