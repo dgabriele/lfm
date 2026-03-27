@@ -71,7 +71,7 @@ A multilingual VAE is trained on IPA-transcribed text from 16 typologically dive
 | Isolating | Vietnamese, Indonesian |
 | Mixed | Arabic, Hindi, Korean |
 
-560K IPA sentences, tokenized with sentencepiece BPE (`max_seq_len=96`, reducing truncation from 19% to 6%). Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), sanitized of all non-IPA characters.
+The training corpus is constituency-augmented: full sentences are parsed into phrase constituents (NP, VP, PP, clauses) via Stanza, and each constituent becomes a separate training sample alongside the full sentence (~5.75M samples total). This teaches the decoder to produce well-formed output at all lengths — from short noun phrases to full sentences — rather than always generating fixed-length sequences. Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), tokenized with sentencepiece BPE (`max_seq_len=96`).
 
 The decoder uses a **LinguisticDecoder** with architectural biases for natural language:
 - **Rotary Positional Embeddings (RoPE)**: translation-invariant pattern learning — a morpheme works the same way regardless of position
