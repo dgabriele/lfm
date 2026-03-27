@@ -78,7 +78,7 @@ The decoder uses a **LinguisticDecoder** with architectural biases for natural l
 - **Multi-scale attention heads**: window sizes of 3 (phonotactic), 7 (morpheme), 15 (word), and full (clause) — a multi-resolution linguistic filter bank
 - **Weight-shared layers**: 2 unique layers applied 4 times = literal recursion, mirroring syntactic Merge
 
-Training uses cosine LR decay, DIP-VAE covariance regularization (off-diagonal penalty to encourage dimension independence), a variance floor to prevent latent collapse, and gradient clipping with inf/nan skip to maintain training stability.
+Training uses cosine LR decay, DIP-VAE covariance regularization (off-diagonal penalty to encourage dimension independence), and a variance floor to prevent latent collapse.
 
 After pretraining, the decoder is **frozen**. It becomes a fixed linguistic bottleneck.
 
