@@ -182,7 +182,7 @@ def _parse_language_worker(
 
     labels = EXTRACT_LABELS
     results: list[tuple[str, str, str]] = []
-    batch_size = 256 if use_gpu else 64
+    batch_size = 64
     processed = 0
 
     for i in range(0, len(texts), batch_size):
@@ -303,7 +303,8 @@ def extract_constituents_parallel(
 
     use_gpu = torch.cuda.is_available()
     if use_gpu:
-        actual_workers = 1
+        # 2 GPU parsers in parallel (~2 GB VRAM each, fits in 8 GB)
+        actual_workers = min(2, len(work_items))
     else:
         actual_workers = min(num_workers, len(work_items))
 
@@ -343,7 +344,9 @@ def extract_constituents_parallel(
     if actual_workers == 1:
         lang_results = [_parse_language_worker(item) for item in work_with_queue]
     else:
-        with mp.Pool(actual_workers) as pool:
+        # Use spawn context for GPU safety (fork + CUDA = crashes)
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(actual_workers) as pool:
             lang_results = pool.map(_parse_language_worker, work_with_queue)
 
     # Signal printer to stop
