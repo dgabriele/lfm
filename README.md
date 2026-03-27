@@ -1,8 +1,8 @@
 # LFM — Language Faculty Model
 
-A framework for giving neural agents a natural language faculty.
+A framework for encoding structured data as natural language.
 
-LFM gives agents the ability to express internal representations as linguistically structured, pronounceable IPA (International Phonetic Alphabet) utterances — without encoding predefined semantics. It models the *faculty* of language, not any particular human language.
+LFM encodes arbitrary continuous representations — agent embeddings, protein features, mathematical structures, any high-dimensional vector — as linguistically structured, pronounceable IPA (International Phonetic Alphabet) utterances. The output is compositional, variable-length, and phonotactically valid: not a cipher or a learned code, but output that shares the structural properties of natural language because it is generated through a decoder pretrained on 16 human languages. This makes it interpretable by any multilingual LLM.
 
 ---
 
@@ -26,26 +26,29 @@ LFM gives agents the ability to express internal representations as linguistical
 
 ## Vision
 
-Agents embedded in complex physical systems — fluid dynamics, biological networks, markets, high-dimensional parameter spaces — develop internal representations that encode perspectives no human scientist has access to. These representations are empirical, grounded in real dynamics, but they are also subjective: shaped by the agent's particular vantage point, attention, and history within the system.
+Neural systems — agents, encoders, scientific models — produce continuous representations that capture structure no human formalism was designed to express. A protein encoder's embedding of a novel fold, an RL agent's observation of a dynamical system, a GNN's representation of a molecular graph — these are empirically grounded, information-rich, and completely opaque.
 
-LFM gives those agents a language. Not English, not mathematics — a new language with its own morphology and phonology, whose structure is inherited from a pretrained multilingual decoder and shaped by the pressure to communicate about what the agent has observed. The language is alien but *structurally natural* — it shares the same inductive biases as human languages (compositionality, variable-length encoding, phonotactic regularity), which means a pretrained multilingual LLM can learn to translate it the same way it would learn any unfamiliar natural language.
+LFM makes them speakable. It encodes any continuous representation as a new natural language — not English, not mathematics, but an emergent language with its own morphology and phonology, whose structure is inherited from a pretrained multilingual decoder. The language is alien but *structurally natural*: it shares the inductive biases of human languages (compositionality, variable-length encoding, phonotactic regularity), which means a pretrained multilingual LLM can learn to translate it the same way it would learn any unfamiliar natural language.
 
-The key mechanism is a **frozen linguistic bottleneck**: a VAE decoder pretrained on 16 typologically diverse languages, then frozen. Agents don't learn a communication protocol from scratch — they learn to project their representations into the decoder's latent space, and the decoder's structure constrains their output to be linguistically well-formed. This is analogous to Universal Grammar in the Chomskyan sense: a fixed structural prior that constrains the space of possible languages, where only the mapping from meaning to form is learned — much like a child setting parameters within an innate grammar rather than learning language structure from scratch. This avoids the known failure modes of end-to-end emergent communication (anti-Zipfian codes, degenerate protocols, non-compositional signals).
+The key mechanism is a **frozen linguistic bottleneck**: a VAE decoder pretrained on 16 typologically diverse languages, then frozen. Downstream systems don't learn a communication protocol from scratch — they learn to project their representations into the decoder's latent space, and the decoder's structure constrains the output to be linguistically well-formed. This is analogous to Universal Grammar in the Chomskyan sense: a fixed structural prior that constrains the space of possible languages, where only the mapping from meaning to form is learned. This avoids the known failure modes of end-to-end emergent communication (anti-Zipfian codes, degenerate protocols, non-compositional signals).
 
-The goal is to synthesize consistent, structured, non-human natural language corpora — the output of agents reasoning over dynamical systems in their own terms — and then translate those corpora into human language. Listen to what agents have to say about systems we study, from perspectives grounded in the dynamics but fundamentally outside our own scientific trajectory. Perspectives that might see structure where we see noise, or draw distinctions where we see uniformity.
+The pipeline is concrete: an input embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for a receiver to identify what was encoded (95% accuracy, 15x above chance in a referential game). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
 
-This is not metaphorical. The pipeline is concrete: an agent's internal embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for another agent to identify what was communicated (89% accuracy, 14x above chance). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
+**Applications**: multi-agent communication, scientific observation encoding (proteins, particles, gene expression), mathematical expression as natural language, structured data serialization with linguistic compositionality, any setting where you need interpretable, compositional, variable-length encoding of continuous representations.
 
 ## The Problem
 
-Agents that operate over grounded, potentially non-human representations need to communicate. Existing approaches have problems:
+Any system that needs to express continuous representations as structured, interpretable sequences faces a choice:
 
 - **Natural language** imposes human ontology and semantic bias
-- **Latent vector communication** lacks structure and interpretability
-- **Emergent protocols** tend to collapse into degenerate, non-compositional codes
+- **Latent vector passing** lacks structure and interpretability
+- **Learned discrete codes** (VQ-VAE, emergent protocols) collapse into degenerate, non-compositional signals
 - **Symbolic systems** are rigid and not adaptive
+- **JSON / structured serialization** is not compositional and has no linguistic inductive bias
 
-LFM sits between the agent's internal world model and its communication channel, shaping messages to be compositional, structurally well-formed, pronounceable, and variable-length — while letting semantics emerge from interaction rather than being inherited from human language.
+LFM provides an alternative: a **frozen linguistic bottleneck** that constrains any input to be expressed as compositional, variable-length, phonotactically valid natural language — without inheriting the semantics of any human language. The structure comes from the decoder; the meaning comes from whatever is being encoded.
+
+This applies to multi-agent communication, but also to any setting where you want to encode structured data as interpretable natural language: scientific observation, mathematical expression, sensor fusion, latent space navigation.
 
 ### Translation, not alignment
 
