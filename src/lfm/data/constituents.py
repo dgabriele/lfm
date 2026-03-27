@@ -182,7 +182,7 @@ def _parse_language_worker(
 
     labels = EXTRACT_LABELS
     results: list[tuple[str, str, str]] = []
-    batch_size = 64
+    batch_size = 256 if use_gpu else 64
     processed = 0
 
     for i in range(0, len(texts), batch_size):
