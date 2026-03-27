@@ -78,24 +78,27 @@ class DatasetGenerator:
                 logger.info("Resuming from constituency checkpoint: %s", checkpoint_path)
                 sanitized = self._load_checkpoint(checkpoint_path)
             else:
+                self._output_dir.mkdir(parents=True, exist_ok=True)
                 sanitized = self._extract_constituents(sanitized)
                 logger.info(
-                    "After constituency extraction: %d samples",
+                    "After constituency extraction: %d samples, saving checkpoint...",
                     len(sanitized),
                 )
-                self._output_dir.mkdir(parents=True, exist_ok=True)
                 self._save_checkpoint(sanitized, checkpoint_path)
-                logger.info("Saved constituency checkpoint: %s", checkpoint_path)
+                logger.info("Saved checkpoint: %s", checkpoint_path)
 
         # 4. IPA conversion
+        logger.info("Starting IPA conversion of %d samples...", len(sanitized))
         processed = self._convert_ipa(sanitized, raw_samples)
         logger.info("IPA conversion: %d processed samples", len(processed))
 
         # 5. Balance
+        logger.info("Balancing per-language sample counts...")
         processed = self._balance(processed)
         logger.info("After balancing: %d samples", len(processed))
 
         # 6. Write
+        logger.info("Writing HDF5 output...")
         self._write_h5(processed, rejected_sanitize, rejected_gate)
 
         return self._output_dir
@@ -199,13 +202,20 @@ class DatasetGenerator:
         """Save augmented samples as JSONL (streaming, no pickle)."""
         import json
 
+        total = len(sanitized)
+        log_every = max(total // 10, 10000)
         with open(path, "w", encoding="utf-8") as f:
-            for raw, text in sanitized:
+            for i, (raw, text) in enumerate(sanitized):
                 f.write(json.dumps({
                     "lang": raw.language, "text": text,
                     "src": raw.source, "file": raw.source_file,
                     "raw": raw.text,
                 }, ensure_ascii=False) + "\n")
+                if (i + 1) % log_every == 0:
+                    logger.info(
+                        "  Checkpoint: %d/%d (%.0f%%)",
+                        i + 1, total, (i + 1) / total * 100,
+                    )
 
     @staticmethod
     def _load_checkpoint(path: Path) -> list[tuple[RawSample, str]]:
