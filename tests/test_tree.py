@@ -195,6 +195,25 @@ class TestTreeMessageEncoder:
         msg.sum().backward()
         assert tree.leaf_states.grad is not None
 
+    def test_shape_embedding_differentiates_topologies(self):
+        """Same leaf content but different tree shapes → different messages."""
+        encoder = TreeMessageEncoder(
+            hidden_dim=32, output_dim=16, max_nodes=3, max_depth=2,
+        )
+        # Tree 1: root expands, both children are leaves
+        tree1 = self._make_tree(batch=1, max_nodes=3, hidden_dim=32)
+
+        # Tree 2: same leaf states but root is a leaf (no children)
+        tree2 = self._make_tree(batch=1, max_nodes=3, hidden_dim=32)
+        tree2.leaf_states = tree1.leaf_states.clone()  # same content
+        tree2.is_leaf = torch.tensor([[True, False, False]])  # root is leaf
+        tree2.active = torch.tensor([[True, False, False]])
+
+        msg1 = encoder(tree1)
+        msg2 = encoder(tree2)
+        # Different shapes → different messages despite same leaf content
+        assert not torch.allclose(msg1, msg2, atol=1e-3)
+
     def test_different_trees_different_messages(self):
         encoder = TreeMessageEncoder(
             hidden_dim=32, output_dim=16, max_nodes=3, max_depth=2,

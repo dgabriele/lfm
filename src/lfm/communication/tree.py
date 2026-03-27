@@ -327,6 +327,16 @@ class TreeMessageEncoder(nn.Module):
         # Depth embedding — different composition behavior at different levels
         self.depth_embed = nn.Embedding(max_depth, output_dim)
 
+        # Shape embedding — explicit encoding of tree topology.
+        # Each distinct tree shape (pattern of active/leaf nodes) gets
+        # a learned embedding, separating structural information from
+        # compositional content.  With max_depth=3, there are ~14 valid
+        # binary tree shapes; we allocate generously.
+        max_shapes = 2 ** max_nodes  # upper bound (most won't be used)
+        # Practical cap — Catalan numbers grow slowly
+        self.max_shape_ids = min(max_shapes, 256)
+        self.shape_embed = nn.Embedding(self.max_shape_ids, output_dim)
+
     def forward(self, tree: TreeMessage) -> Tensor:
         """Compose tree bottom-up into a root message vector.
 
@@ -377,5 +387,34 @@ class TreeMessageEncoder(nn.Module):
             merged = merged + self.depth_embed(depth)
             node_repr[:, i] = merged * is_internal.unsqueeze(-1).float()
 
-        # 3. Root representation is the message
-        return node_repr[:, 0]  # (B, output_dim)
+        # 3. Add explicit shape embedding to root
+        # Compute a topology signature per sample: hash the is_leaf pattern
+        # into a shape ID. This makes tree structure an independent,
+        # disentangled signal separate from compositional content.
+        shape_ids = self._compute_shape_ids(tree.is_leaf, tree.active)
+        root = node_repr[:, 0] + self.shape_embed(shape_ids)
+
+        return root  # (B, output_dim)
+
+    def _compute_shape_ids(self, is_leaf: Tensor, active: Tensor) -> Tensor:
+        """Hash tree topology into shape embedding indices.
+
+        Encodes the (is_leaf, active) pattern as a binary number modulo
+        max_shape_ids.  Deterministic for the same topology.
+
+        Args:
+            is_leaf: (batch, max_nodes) bool
+            active: (batch, max_nodes) bool
+
+        Returns:
+            (batch,) long tensor of shape IDs.
+        """
+        # Encode as 2-bit per node: active*2 + is_leaf
+        pattern = active.long() * 2 + is_leaf.long()  # (B, N) values in {0,1,2,3}
+        # Hash: weighted sum with prime multipliers
+        weights = torch.tensor(
+            [31 ** i for i in range(pattern.size(1))],
+            device=pattern.device, dtype=torch.long,
+        )
+        hashed = (pattern * weights.unsqueeze(0)).sum(dim=1)
+        return hashed.abs() % self.max_shape_ids
