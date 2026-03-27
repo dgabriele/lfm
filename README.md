@@ -54,7 +54,9 @@ The emergent language that LFM produces is not human language — but it is *lan
 
 Because the output is in IPA — a universal phonetic representation — it is directly compatible with any LLM that has seen phonetic or multilingual data. A small LLM can be fine-tuned on (IPA, English) pairs to translate the emergent language, the same way it would learn any new language from parallel text.
 
-Crucially, this is translation, not latent space alignment. The agent's ontology stays intact; the LLM does the interpretive work.
+Crucially, this is translation, not latent space alignment. The source ontology stays intact; the LLM does the interpretive work.
+
+Translation is inherently lossy — but language compensates for that. Unlike a fixed-size code, language can expound: use more words, more phrases, more compositional structure to progressively encapsulate meaning that a single utterance would lose. This is exactly what LFM's expression system exploits. The tree-structured output grows as needed — more leaves, deeper branching — to elaborate on complex inputs, trading efficiency for fidelity the same way natural language does.
 
 ## How It Works
 
