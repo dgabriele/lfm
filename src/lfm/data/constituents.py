@@ -160,22 +160,24 @@ class ConstituencyExtractor:
 
 
 def _parse_language_worker(
-    args: tuple[str, list[str], int],
+    args: tuple[str, list[str], int, object | None],
 ) -> list[tuple[str, str, str]]:
     """Worker: parse all sentences for one language, extract constituents.
 
-    Runs in a separate process with its own Stanza pipeline on CPU.
+    Runs in a separate process with its own Stanza pipeline.
     Processes sentences in batches for throughput.
+    Progress is reported via an mp.Queue if provided.
     """
     import stanza
 
-    lang, texts, min_length = args
+    lang, texts, min_length, progress_queue = args
     iso2 = CONSTITUENCY_LANGS[lang]
+    use_gpu = not _is_multiprocess_mode()
 
     stanza.download(iso2, processors="tokenize,pos,constituency", verbose=False)
     nlp = stanza.Pipeline(
         iso2, processors="tokenize,pos,constituency",
-        use_gpu=True, verbose=False,
+        use_gpu=use_gpu, verbose=False,
     )
 
     labels = EXTRACT_LABELS
@@ -185,7 +187,6 @@ def _parse_language_worker(
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        # Join with double newline so Stanza treats each as a separate sentence
         doc = nlp("\n\n".join(batch))
 
         for sentence in doc.sentences:
@@ -196,13 +197,20 @@ def _parse_language_worker(
             )
 
         processed += len(batch)
-        if processed % 1000 == 0:
-            logging.getLogger(__name__).info(
-                "  [%s] parsed %d/%d sentences, %d constituents so far",
-                lang, processed, len(texts), len(results),
-            )
+        if processed % 500 == 0 and progress_queue is not None:
+            progress_queue.put((lang, processed, len(texts), len(results)))
+
+    if progress_queue is not None:
+        progress_queue.put((lang, processed, len(texts), len(results)))
 
     return results
+
+
+def _is_multiprocess_mode() -> bool:
+    """Check if we're running in a multiprocessing worker."""
+    import multiprocessing
+
+    return multiprocessing.current_process().name != "MainProcess"
 
 
 def _extract_from_tree(
@@ -289,30 +297,58 @@ def extract_constituents_parallel(
         logger.info("No supported languages for constituency extraction")
         return results
 
+    import threading
+
     import torch
 
     use_gpu = torch.cuda.is_available()
     if use_gpu:
-        # GPU: process sequentially (one model on GPU at a time)
         actual_workers = 1
     else:
         actual_workers = min(num_workers, len(work_items))
 
+    total_sents = sum(len(t) for _, t, _ in work_items)
     logger.info(
         "Constituency extraction: %d languages, %d workers (%s), %d sentences",
-        len(work_items),
-        actual_workers,
-        "GPU" if use_gpu else "CPU",
-        sum(len(t) for _, t, _ in work_items),
+        len(work_items), actual_workers,
+        "GPU" if use_gpu else "CPU", total_sents,
     )
 
+    # Progress queue: workers report (lang, processed, total, constituents)
+    progress_queue: mp.Queue = mp.Queue()
+
+    # Add queue to work items
+    work_with_queue = [
+        (lang, texts, ml, progress_queue) for lang, texts, ml in work_items
+    ]
+
+    # Progress printer thread
+    def _progress_printer() -> None:
+        while True:
+            try:
+                msg = progress_queue.get(timeout=1.0)
+                if msg is None:
+                    break
+                lang, done, total, n_const = msg
+                logger.info(
+                    "  [%s] %d/%d sentences → %d constituents",
+                    lang, done, total, n_const,
+                )
+            except Exception:
+                continue
+
+    printer = threading.Thread(target=_progress_printer, daemon=True)
+    printer.start()
+
     if actual_workers == 1:
-        # Sequential (GPU or single-core)
-        lang_results = [_parse_language_worker(item) for item in work_items]
+        lang_results = [_parse_language_worker(item) for item in work_with_queue]
     else:
-        # Parallel CPU workers
         with mp.Pool(actual_workers) as pool:
-            lang_results = pool.map(_parse_language_worker, work_items)
+            lang_results = pool.map(_parse_language_worker, work_with_queue)
+
+    # Signal printer to stop
+    progress_queue.put(None)
+    printer.join(timeout=5.0)
 
     # Merge results
     constituent_count = 0
