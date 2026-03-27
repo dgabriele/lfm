@@ -1,15 +1,23 @@
-"""Tree-structured communication for agent games.
+"""Constituency-style tree communication for agent games.
 
-The agent produces a tree of z vectors, each decoded through the frozen
-decoder into a variable-length IPA statement.  The tree topology itself
-is part of the message — different inputs produce trees of different
-shapes, depths, and branching patterns.
+The agent produces a binary tree where only terminal (leaf) nodes carry
+IPA expressions decoded through the frozen decoder.  Internal nodes are
+compositional operators that combine their children's representations
+bottom-up.  The tree topology itself is part of the message — different
+structures compose the same leaf expressions into different meanings.
 
-Key design choices:
-- Variable branching: categorical over 0..K children per node
-- Sibling-aware generation: each child conditioned on parent + prior siblings
-- Top-down level-by-level expansion (batched per depth level)
-- The frozen decoder is called once per active node (unchanged)
+    ○ (root: composed representation → receiver)
+   / \\
+  ○   z₃ (leaf: decoded to IPA)
+ / \\
+z₁  z₂ (leaves: decoded to IPA)
+
+The sender makes two orthogonal decisions:
+1. Tree shape (topology via learned branching)
+2. Leaf content (z vectors → frozen decoder)
+
+The receiver composes bottom-up: decode leaves → compose internal
+nodes recursively → root representation → score candidates.
 """
 
 from __future__ import annotations
@@ -18,7 +26,6 @@ import logging
 from dataclasses import dataclass, field
 
 import torch
-import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 logger = logging.getLogger(__name__)
@@ -26,89 +33,53 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TreeMessage:
-    """A batch of tree-structured messages.
+    """A batch of constituency-style tree messages.
 
-    All tensors are pre-allocated to max_nodes and masked by ``active``.
-    Nodes are indexed in BFS order within each depth level.
-
-    For a tree with max_depth=D and max_children=K, max_nodes is
-    computed as (K^D - 1) / (K - 1) for K > 1, or D for K = 1.
+    Nodes indexed in BFS order.  Only leaf nodes have decoded content.
+    Internal nodes have composed representations (filled by the encoder).
     """
 
-    z: Tensor                    # (batch, max_nodes, latent_dim)
-    mu: Tensor                   # (batch, max_nodes, latent_dim)
-    logvar: Tensor               # (batch, max_nodes, latent_dim)
-    active: Tensor               # (batch, max_nodes) bool
-    depth: Tensor                # (max_nodes,) int — depth of each slot
-    parent_idx: Tensor           # (max_nodes,) int — parent index (-1 for root)
-    num_children: Tensor         # (batch, max_nodes) int — children chosen per node
-    # Filled after decoding:
-    decoder_states: Tensor = field(default_factory=lambda: torch.empty(0))
-    token_ids: Tensor = field(default_factory=lambda: torch.empty(0))
-    node_lengths: Tensor = field(default_factory=lambda: torch.empty(0))
-    node_masks: Tensor = field(default_factory=lambda: torch.empty(0))
+    # Tree topology
+    is_leaf: Tensor          # (batch, max_nodes) bool
+    active: Tensor           # (batch, max_nodes) bool
+    depth: Tensor            # (max_nodes,) int
+    parent_idx: Tensor       # (max_nodes,) int — -1 for root
+    left_child: Tensor       # (max_nodes,) int — -1 if leaf/absent
+    right_child: Tensor      # (max_nodes,) int — -1 if leaf/absent
+    num_active_nodes: Tensor # (batch,) int
+    num_leaves: Tensor       # (batch,) int
+
+    # Leaf z vectors
+    leaf_z: Tensor           # (batch, max_nodes, latent_dim) — only leaves populated
+    leaf_mu: Tensor          # (batch, max_nodes, latent_dim)
+    leaf_logvar: Tensor      # (batch, max_nodes, latent_dim)
+
+    # Decoded leaf content (filled after decoding)
+    leaf_states: Tensor = field(default_factory=lambda: torch.empty(0))
+    leaf_token_ids: Tensor = field(default_factory=lambda: torch.empty(0))
+    leaf_lengths: Tensor = field(default_factory=lambda: torch.empty(0))
+    leaf_masks: Tensor = field(default_factory=lambda: torch.empty(0))
 
 
-def _compute_tree_layout(
-    max_depth: int, max_children: int,
-) -> tuple[int, Tensor, Tensor]:
-    """Precompute BFS node indices, depths, and parent pointers.
-
-    Returns:
-        (max_nodes, depth_per_slot, parent_per_slot)
-    """
-    # Build tree level by level
-    depths: list[int] = []
-    parents: list[int] = []
-    nodes_at_depth: list[list[int]] = []
-
-    idx = 0
-    current_level = [idx]
-    depths.append(0)
-    parents.append(-1)
-    nodes_at_depth.append([idx])
-    idx += 1
-
-    for d in range(1, max_depth):
-        next_level = []
-        level_nodes = []
-        for parent in current_level:
-            for _ in range(max_children):
-                depths.append(d)
-                parents.append(parent)
-                level_nodes.append(idx)
-                idx += 1
-            next_level.extend(level_nodes[-max_children:])
-        nodes_at_depth.append(level_nodes)
-        current_level = next_level
-
-    max_nodes = idx
-    return (
-        max_nodes,
-        torch.tensor(depths, dtype=torch.long),
-        torch.tensor(parents, dtype=torch.long),
-    )
+def _max_nodes_for_depth(max_depth: int) -> int:
+    """Max nodes in a complete binary tree of given depth."""
+    return 2 ** max_depth - 1
 
 
 class TreeSender(nn.Module):
-    """Produce a tree of z vectors from an input embedding.
+    """Produce a constituency tree: topology + leaf z vectors.
 
-    Each node's z is decoded through the frozen decoder.  Children are
-    conditioned on their parent's pooled decoder hidden states AND
-    previous siblings' hidden states (sibling-aware generation).
-
-    The branching decision at each node is a categorical over
-    0..max_children (0 = leaf, K = fully expand).  Trained via
-    REINFORCE alongside z selection.
+    Top-down generation: at each internal node, decide whether to
+    expand (create two children) or stop (make this a leaf).  Leaf
+    nodes get z vectors decoded through the frozen decoder.
 
     Args:
-        generator: Frozen MultilingualVAEGenerator (provides _decode).
-        input_dim: Input embedding dimension (e.g., 384).
-        latent_dim: Latent z dimension (e.g., 256).
-        hidden_dim: Decoder hidden dimension (e.g., 512).
-        max_depth: Maximum tree depth (root = depth 0).
-        max_children: Maximum children per node.
-        min_depth: Minimum forced depth before halt is allowed.
+        generator: Frozen generator (provides _decode).
+        input_dim: Input embedding dimension.
+        latent_dim: Latent z dimension.
+        hidden_dim: Decoder hidden dimension.
+        max_depth: Maximum tree depth (root = 0).
+        min_depth: Minimum forced depth before halting is allowed.
     """
 
     def __init__(
@@ -118,7 +89,6 @@ class TreeSender(nn.Module):
         latent_dim: int,
         hidden_dim: int,
         max_depth: int = 3,
-        max_children: int = 3,
         min_depth: int = 1,
     ) -> None:
         super().__init__()
@@ -126,221 +96,185 @@ class TreeSender(nn.Module):
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
         self.max_depth = max_depth
-        self.max_children = max_children
         self.min_depth = min_depth
+        self.max_nodes = _max_nodes_for_depth(max_depth)
 
-        # Precompute tree layout
-        self.max_nodes, depth_buf, parent_buf = _compute_tree_layout(
-            max_depth, max_children,
-        )
-        self.register_buffer("_depth", depth_buf, persistent=False)
-        self.register_buffer("_parent_idx", parent_buf, persistent=False)
+        # Precompute BFS binary tree layout
+        depths = [0] * self.max_nodes
+        parents = [-1] * self.max_nodes
+        left_children = [-1] * self.max_nodes
+        right_children = [-1] * self.max_nodes
+        for i in range(self.max_nodes):
+            if i > 0:
+                depths[i] = depths[(i - 1) // 2] + 1
+                parents[i] = (i - 1) // 2
+            lc = 2 * i + 1
+            rc = 2 * i + 2
+            if lc < self.max_nodes:
+                left_children[i] = lc
+            if rc < self.max_nodes:
+                right_children[i] = rc
 
-        # Root projection: input → (mu, logvar) for root z
-        self.root_proj = nn.Linear(input_dim, latent_dim * 2)
+        self.register_buffer("_depth", torch.tensor(depths), persistent=False)
+        self.register_buffer("_parent", torch.tensor(parents), persistent=False)
+        self.register_buffer("_left", torch.tensor(left_children), persistent=False)
+        self.register_buffer("_right", torch.tensor(right_children), persistent=False)
 
-        # Child projection: parent_hidden + sibling_context → child (mu, logvar)
-        # + branching logits (how many children: 0..max_children)
-        child_input_dim = hidden_dim * 2  # parent_pooled + sibling_context
-        child_output_dim = latent_dim * 2 + (max_children + 1)  # mu,logvar + branch logits
-        self.child_proj = nn.Sequential(
-            nn.Linear(child_input_dim, hidden_dim),
+        # Root context: input → hidden representation for tree decisions
+        self.root_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, child_output_dim),
-        )
-
-        # Sibling aggregator: running summary of siblings at each depth
-        self.sibling_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
 
-        # Initialize projections near zero for stable start
+        # Expand decision: hidden → (expand_logit, left_ctx, right_ctx)
+        # expand_logit: scalar — probability of expanding (vs being a leaf)
+        # left_ctx, right_ctx: hidden vectors passed to children
+        self.expand_head = nn.Linear(hidden_dim, 1 + hidden_dim * 2)
+
+        # Leaf z projection: hidden → (mu, logvar)
+        self.leaf_proj = nn.Linear(hidden_dim, latent_dim * 2)
+
+        # Initialize near-zero for stable start
         with torch.no_grad():
-            self.child_proj[-1].weight.mul_(0.01)
-            self.child_proj[-1].bias.zero_()
-
-    def _pool_decoder_states(self, states: Tensor, masks: Tensor) -> Tensor:
-        """Mean-pool decoder hidden states per node.
-
-        Args:
-            states: (N, seq_len, hidden_dim)
-            masks: (N, seq_len) bool
-
-        Returns:
-            (N, hidden_dim) pooled vectors.
-        """
-        mask_f = masks.unsqueeze(-1).float()
-        return (states * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
+            self.expand_head.weight.mul_(0.01)
+            self.expand_head.bias.zero_()
+            # Bias expand_logit toward expanding at start
+            self.expand_head.bias.data[0] = 1.0
 
     def forward(self, anchor: Tensor) -> TreeMessage:
-        """Generate a tree of z vectors and decode each node.
+        """Generate tree topology and leaf z vectors.
 
         Args:
             anchor: (batch, input_dim) input embeddings.
 
         Returns:
-            TreeMessage with all node z vectors, decoded states, and topology.
+            TreeMessage with topology and leaf z (not yet decoded).
         """
         b = anchor.size(0)
         device = anchor.device
-
-        # Allocate buffers
-        all_z = torch.zeros(b, self.max_nodes, self.latent_dim, device=device)
-        all_mu = torch.zeros_like(all_z)
-        all_logvar = torch.zeros_like(all_z)
-        all_active = torch.zeros(b, self.max_nodes, dtype=torch.bool, device=device)
-        all_num_children = torch.zeros(b, self.max_nodes, dtype=torch.long, device=device)
-
-        # Decoder output buffers (filled as we decode)
         max_seq = self.generator._max_output_len
-        all_dec_states = torch.zeros(b, self.max_nodes, max_seq, self.hidden_dim, device=device)
-        all_token_ids = torch.zeros(b, self.max_nodes, max_seq, dtype=torch.long, device=device)
-        all_node_lengths = torch.zeros(b, self.max_nodes, dtype=torch.long, device=device)
-        all_node_masks = torch.zeros(b, self.max_nodes, max_seq, dtype=torch.bool, device=device)
 
-        # --- Root node (always active) ---
-        h_root = self.root_proj(anchor)  # (B, latent_dim * 2)
-        mu_root, logvar_root = h_root.chunk(2, dim=-1)
-        z_root = self._reparameterize(mu_root, logvar_root)
+        # Buffers
+        active = torch.zeros(b, self.max_nodes, dtype=torch.bool, device=device)
+        is_leaf = torch.zeros(b, self.max_nodes, dtype=torch.bool, device=device)
+        leaf_z = torch.zeros(b, self.max_nodes, self.latent_dim, device=device)
+        leaf_mu = torch.zeros_like(leaf_z)
+        leaf_logvar = torch.zeros_like(leaf_z)
 
-        all_z[:, 0] = z_root
-        all_mu[:, 0] = mu_root
-        all_logvar[:, 0] = logvar_root
-        all_active[:, 0] = True
+        # Hidden context per node — stored as a dict to avoid in-place
+        # tensor modifications that break autograd.
+        node_ctx: dict[int, Tensor] = {}
 
-        # Decode root
-        self._decode_nodes(z_root, 0, all_dec_states, all_token_ids,
-                           all_node_lengths, all_node_masks)
+        # Root
+        active[:, 0] = True
+        node_ctx[0] = self.root_proj(anchor)
 
-        # --- Level-by-level expansion ---
-        # Track which node indices belong to each depth level
-        node_idx = 1  # next available slot (0 = root)
+        # Top-down: decide expand vs leaf at each active node
+        for i in range(self.max_nodes):
+            depth = self._depth[i].item()
+            lc = self._left[i].item()
+            rc = self._right[i].item()
 
-        for d in range(self.max_depth - 1):
-            # Find active parents at depth d
-            parent_slots = (self._depth == d).nonzero(as_tuple=True)[0]
-            active_parents = all_active[:, parent_slots]  # (B, num_parents_at_d)
+            node_active = active[:, i]  # (B,)
+            if not node_active.any():
+                continue
 
-            if not active_parents.any():
-                break
+            ctx = node_ctx.get(i, torch.zeros(b, self.hidden_dim, device=device))
 
-            # Pool each parent's decoder states
-            parent_states = all_dec_states[:, parent_slots]  # (B, P, S, H)
-            parent_masks = all_node_masks[:, parent_slots]   # (B, P, S)
+            # At max depth - 1 (last internal level) or if no children possible: leaf
+            if lc == -1 or depth >= self.max_depth - 1:
+                is_leaf[:, i] = node_active
+                h = self.leaf_proj(ctx)
+                mu, logvar = h.chunk(2, dim=-1)
+                z = self._reparameterize(mu, logvar)
+                leaf_z[:, i] = z * node_active.unsqueeze(-1).float()
+                leaf_mu[:, i] = mu * node_active.unsqueeze(-1).float()
+                leaf_logvar[:, i] = logvar * node_active.unsqueeze(-1).float()
+                continue
 
-            # Flatten for pooling: (B*P, S, H)
-            bp = b * parent_slots.size(0)
-            parent_pooled = self._pool_decoder_states(
-                parent_states.reshape(bp, max_seq, self.hidden_dim),
-                parent_masks.reshape(bp, max_seq),
-            ).reshape(b, parent_slots.size(0), self.hidden_dim)  # (B, P, H)
+            # Decide: expand or leaf?
+            head_out = self.expand_head(ctx)  # (B, 1 + 2H)
+            expand_logit = head_out[:, 0]     # (B,)
+            child_ctx = head_out[:, 1:]       # (B, 2H)
+            left_ctx = child_ctx[:, :self.hidden_dim]
+            right_ctx = child_ctx[:, self.hidden_dim:]
 
-            # For each parent, decide branching and generate children
-            for p_idx_local, p_slot in enumerate(parent_slots):
-                parent_h = parent_pooled[:, p_idx_local]  # (B, H)
-                parent_active = all_active[:, p_slot]      # (B,)
+            # Force expand at shallow depths
+            if depth < self.min_depth:
+                expand = node_active
+            elif self.training:
+                expand_prob = torch.sigmoid(expand_logit)
+                expand = (torch.rand_like(expand_prob) < expand_prob) & node_active
+            else:
+                expand = (expand_logit > 0) & node_active
 
-                # Sibling context starts as zeros (first child has no siblings)
-                sibling_ctx = torch.zeros(b, self.hidden_dim, device=device)
+            # Nodes that expand → activate children
+            if lc < self.max_nodes:
+                active[:, lc] = expand
+                node_ctx[lc] = left_ctx * expand.unsqueeze(-1).float()
+            if rc < self.max_nodes:
+                active[:, rc] = expand
+                node_ctx[rc] = right_ctx * expand.unsqueeze(-1).float()
 
-                # Determine branching (how many children)
-                child_input = torch.cat([parent_h, sibling_ctx], dim=-1)  # (B, 2H)
-                child_out = self.child_proj(child_input)  # (B, latent*2 + K+1)
+            # Nodes that don't expand → become leaves
+            not_expand = node_active & ~expand
+            is_leaf[:, i] = not_expand
+            if not_expand.any():
+                h = self.leaf_proj(ctx)
+                mu, logvar = h.chunk(2, dim=-1)
+                z = self._reparameterize(mu, logvar)
+                leaf_z[:, i] = z * not_expand.unsqueeze(-1).float()
+                leaf_mu[:, i] = mu * not_expand.unsqueeze(-1).float()
+                leaf_logvar[:, i] = logvar * not_expand.unsqueeze(-1).float()
 
-                branch_logits = child_out[:, -self.max_children - 1:]  # (B, K+1)
+        # Decode all leaves in one batched call
+        leaf_states = torch.zeros(b, self.max_nodes, max_seq, self.hidden_dim, device=device)
+        leaf_token_ids = torch.zeros(b, self.max_nodes, max_seq, dtype=torch.long, device=device)
+        leaf_lengths = torch.zeros(b, self.max_nodes, dtype=torch.long, device=device)
+        leaf_masks = torch.zeros(b, self.max_nodes, max_seq, dtype=torch.bool, device=device)
 
-                # Force expansion at shallow depths
-                if d < self.min_depth - 1:
-                    # Mask out 0-children option
-                    branch_logits[:, 0] = float("-inf")
+        # Gather all leaf z vectors into a flat batch
+        leaf_flat_mask = is_leaf.reshape(-1)  # (B*N,)
+        leaf_z_flat = leaf_z.reshape(-1, self.latent_dim)  # (B*N, D)
 
-                # Sample number of children (categorical)
-                if self.training:
-                    branch_probs = F.softmax(branch_logits, dim=-1)
-                    n_children = torch.multinomial(branch_probs, 1).squeeze(-1)
-                else:
-                    n_children = branch_logits.argmax(dim=-1)
+        if leaf_flat_mask.any():
+            active_leaf_z = leaf_z_flat[leaf_flat_mask]  # (num_leaves, D)
+            with torch.no_grad():
+                tids, _probs, states, lens, masks = self.generator._decode(active_leaf_z)
 
-                n_children = n_children * parent_active.long()  # inactive parents get 0
-                all_num_children[:, p_slot] = n_children
+            # Scatter back into buffers
+            leaf_idx = leaf_flat_mask.nonzero(as_tuple=True)[0]
+            batch_idx = leaf_idx // self.max_nodes
+            node_idx = leaf_idx % self.max_nodes
+            seq_len = tids.size(1)
 
-                # Generate each child
-                for c in range(self.max_children):
-                    if node_idx >= self.max_nodes:
-                        break
-
-                    child_active = parent_active & (n_children > c)
-
-                    if not child_active.any():
-                        node_idx += 1
-                        continue
-
-                    # Child z from child_proj (conditioned on parent + siblings)
-                    child_input = torch.cat([parent_h, sibling_ctx], dim=-1)
-                    child_out = self.child_proj(child_input)
-                    mu_c = child_out[:, :self.latent_dim]
-                    logvar_c = child_out[:, self.latent_dim:self.latent_dim * 2]
-                    z_c = self._reparameterize(mu_c, logvar_c)
-
-                    all_z[:, node_idx] = z_c
-                    all_mu[:, node_idx] = mu_c
-                    all_logvar[:, node_idx] = logvar_c
-                    all_active[:, node_idx] = child_active
-
-                    # Decode this child
-                    self._decode_nodes(
-                        z_c * child_active.unsqueeze(-1).float(),
-                        node_idx, all_dec_states, all_token_ids,
-                        all_node_lengths, all_node_masks,
-                    )
-
-                    # Update sibling context with this child's pooled states
-                    child_pooled = self._pool_decoder_states(
-                        all_dec_states[:, node_idx],
-                        all_node_masks[:, node_idx],
-                    )  # (B, H)
-                    sibling_ctx = self.sibling_proj(
-                        sibling_ctx + child_pooled * child_active.unsqueeze(-1).float()
-                    )
-
-                    node_idx += 1
+            for k in range(len(leaf_idx)):
+                bi, ni = batch_idx[k], node_idx[k]
+                leaf_states[bi, ni, :seq_len] = states[k]
+                leaf_token_ids[bi, ni, :seq_len] = tids[k]
+                leaf_lengths[bi, ni] = lens[k]
+                leaf_masks[bi, ni, :seq_len] = masks[k]
 
         return TreeMessage(
-            z=all_z,
-            mu=all_mu,
-            logvar=all_logvar,
-            active=all_active,
+            is_leaf=is_leaf,
+            active=active,
             depth=self._depth,
-            parent_idx=self._parent_idx,
-            num_children=all_num_children,
-            decoder_states=all_dec_states,
-            token_ids=all_token_ids,
-            node_lengths=all_node_lengths,
-            node_masks=all_node_masks,
+            parent_idx=self._parent,
+            left_child=self._left,
+            right_child=self._right,
+            num_active_nodes=active.sum(dim=1),
+            num_leaves=is_leaf.sum(dim=1),
+            leaf_z=leaf_z,
+            leaf_mu=leaf_mu,
+            leaf_logvar=leaf_logvar,
+            leaf_states=leaf_states,
+            leaf_token_ids=leaf_token_ids,
+            leaf_lengths=leaf_lengths,
+            leaf_masks=leaf_masks,
         )
 
-    def _decode_nodes(
-        self,
-        z: Tensor,
-        slot: int,
-        dec_states: Tensor,
-        token_ids: Tensor,
-        lengths: Tensor,
-        masks: Tensor,
-    ) -> None:
-        """Decode z through the frozen generator and store in buffers."""
-        with torch.no_grad():
-            tids, _probs, states, lens, omask = self.generator._decode(z)
-
-        dec_states[:, slot, :states.size(1), :] = states
-        token_ids[:, slot, :tids.size(1)] = tids
-        lengths[:, slot] = lens
-        masks[:, slot, :omask.size(1)] = omask
-
     def _reparameterize(self, mu: Tensor, logvar: Tensor) -> Tensor:
-        """Sample z via reparameterization trick."""
         if self.training:
             std = (0.5 * logvar).exp()
             return mu + std * torch.randn_like(std)
@@ -348,20 +282,20 @@ class TreeSender(nn.Module):
 
 
 class TreeMessageEncoder(nn.Module):
-    """Encode a tree of decoded node states into a single message vector.
+    """Bottom-up composition of a constituency tree into a message vector.
 
-    Uses tree-positional encoding (depth + BFS position) with a small
-    transformer for cross-node attention, plus edge features encoding
-    parent-child relationships.
+    Leaf nodes: pool decoder hidden states → leaf representation.
+    Internal nodes: compose children's representations via learned Merge.
+    Root representation → receiver scoring.
+
+    This mirrors syntactic Merge: the meaning of a phrase is a function
+    of the meanings of its constituents and how they combine.
 
     Args:
-        hidden_dim: Decoder hidden dimension.
+        hidden_dim: Decoder hidden dimension (for leaf pooling).
         output_dim: Output message vector dimension.
         max_nodes: Maximum nodes in the tree.
         max_depth: Maximum tree depth.
-        num_heads: Transformer attention heads.
-        num_layers: Transformer layers.
-        dropout: Dropout rate.
     """
 
     def __init__(
@@ -370,89 +304,78 @@ class TreeMessageEncoder(nn.Module):
         output_dim: int,
         max_nodes: int,
         max_depth: int,
-        num_heads: int = 4,
-        num_layers: int = 2,
-        dropout: float = 0.1,
     ) -> None:
         super().__init__()
         self.max_nodes = max_nodes
+        self.output_dim = output_dim
 
-        # Node projection
-        self.node_proj = nn.Linear(hidden_dim, output_dim)
+        # Leaf encoder: pool decoder states → representation
+        self.leaf_enc = nn.Sequential(
+            nn.Linear(hidden_dim, output_dim),
+            nn.GELU(),
+            nn.Linear(output_dim, output_dim),
+        )
 
-        # Tree-positional embeddings
-        self.depth_embed = nn.Embedding(max_depth, output_dim)
-        self.position_embed = nn.Embedding(max_nodes, output_dim)
-
-        # Edge features: encode parent-child relationship
-        self.edge_proj = nn.Sequential(
+        # Merge: compose two children → parent representation
+        # This is the core compositional operation.
+        self.merge = nn.Sequential(
             nn.Linear(output_dim * 2, output_dim),
             nn.GELU(),
             nn.Linear(output_dim, output_dim),
         )
 
-        # Transformer for cross-node attention
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=output_dim, nhead=num_heads,
-            batch_first=True, dropout=dropout,
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers,
-        )
-
-        # Aggregation via learned query
-        self.agg_query = nn.Parameter(torch.randn(1, 1, output_dim) * 0.02)
-        self.agg_attn = nn.MultiheadAttention(
-            output_dim, num_heads=num_heads, batch_first=True,
-        )
+        # Depth embedding — different composition behavior at different levels
+        self.depth_embed = nn.Embedding(max_depth, output_dim)
 
     def forward(self, tree: TreeMessage) -> Tensor:
-        """Encode tree into a single message vector.
+        """Compose tree bottom-up into a root message vector.
 
         Args:
-            tree: TreeMessage from TreeSender.
+            tree: TreeMessage from TreeSender (with decoded leaf states).
 
         Returns:
-            (batch, output_dim) message vector.
+            (batch, output_dim) message vector (root composition).
         """
         b = tree.active.size(0)
         device = tree.active.device
 
-        # 1. Pool each node's decoder states
-        states = tree.decoder_states  # (B, N, S, H)
-        masks = tree.node_masks       # (B, N, S)
-        mask_f = masks.unsqueeze(-1).float()
-        node_pooled = (
-            (states * mask_f).sum(dim=2) / mask_f.sum(dim=2).clamp(min=1)
-        )  # (B, N, H)
-
-        # 2. Project + tree positional encoding
-        node_repr = self.node_proj(node_pooled)  # (B, N, output_dim)
-        node_repr = node_repr + self.depth_embed(tree.depth).unsqueeze(0)
-        positions = torch.arange(self.max_nodes, device=device)
-        node_repr = node_repr + self.position_embed(positions).unsqueeze(0)
-
-        # 3. Add edge features (parent-child relationship encoding)
-        parent_idx = tree.parent_idx  # (N,)
-        for i in range(1, self.max_nodes):
-            p = parent_idx[i].item()
-            if p >= 0:
-                edge_input = torch.cat([
-                    node_repr[:, p, :], node_repr[:, i, :],
-                ], dim=-1)  # (B, 2*output_dim)
-                edge_feat = self.edge_proj(edge_input)  # (B, output_dim)
-                node_repr[:, i] = node_repr[:, i] + edge_feat
-
-        # 4. Transformer with inactive nodes masked
-        src_key_padding_mask = ~tree.active  # (B, N)
-        encoded = self.transformer(
-            node_repr, src_key_padding_mask=src_key_padding_mask,
+        # Node representations (filled bottom-up)
+        node_repr = torch.zeros(
+            b, self.max_nodes, self.output_dim, device=device,
         )
 
-        # 5. Aggregate via learned query
-        query = self.agg_query.expand(b, -1, -1)
-        agg, _ = self.agg_attn(
-            query, encoded, encoded,
-            key_padding_mask=src_key_padding_mask,
-        )
-        return agg.squeeze(1)  # (B, output_dim)
+        # 1. Encode leaves: pool decoder states → representation
+        for i in range(self.max_nodes):
+            leaf_mask = tree.is_leaf[:, i]  # (B,)
+            if not leaf_mask.any():
+                continue
+
+            states = tree.leaf_states[:, i]   # (B, S, H)
+            masks = tree.leaf_masks[:, i]     # (B, S)
+            mask_f = masks.unsqueeze(-1).float()
+            pooled = (states * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
+            encoded = self.leaf_enc(pooled)   # (B, output_dim)
+            depth = tree.depth[i]
+            encoded = encoded + self.depth_embed(depth)
+            node_repr[:, i] = encoded * leaf_mask.unsqueeze(-1).float()
+
+        # 2. Bottom-up composition: from deepest internal nodes to root
+        # Process nodes in reverse BFS order (leaves first, root last)
+        for i in range(self.max_nodes - 1, -1, -1):
+            lc = tree.left_child[i].item()
+            rc = tree.right_child[i].item()
+
+            # Skip leaves and inactive nodes
+            is_internal = tree.active[:, i] & ~tree.is_leaf[:, i]
+            if not is_internal.any() or lc == -1:
+                continue
+
+            left_repr = node_repr[:, lc]   # (B, output_dim)
+            right_repr = node_repr[:, rc]  # (B, output_dim)
+            merged = self.merge(torch.cat([left_repr, right_repr], dim=-1))
+            depth = tree.depth[i]
+            merged = merged + self.depth_embed(depth)
+            node_repr[:, i] = merged * is_internal.unsqueeze(-1).float()
+
+        # 3. Root representation is the message
+        return node_repr[:, 0]  # (B, output_dim)

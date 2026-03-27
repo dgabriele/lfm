@@ -235,12 +235,12 @@ def main(
             preds = logits.argmax(dim=1)
             correct = (preds == target_idx).float()
 
-            # Length cost: total tokens across active nodes
-            total_tokens = (tree.node_lengths * tree.active.long()).sum(dim=1).float()
+            # Length cost: total tokens across leaf nodes
+            total_tokens = (tree.leaf_lengths * tree.is_leaf.long()).sum(dim=1).float()
             length_penalty = length_cost * total_tokens / target_length
 
             # Tree complexity cost: penalize more active nodes
-            num_active = tree.active.float().sum(dim=1)
+            num_active = tree.num_active_nodes.float()
             complexity_penalty = tree_complexity_cost * num_active / tree_sender.max_nodes
 
             reward = correct * (1.0 - length_penalty - complexity_penalty).clamp(min=0)
@@ -257,8 +257,8 @@ def main(
             global_baseline = sum(depth_baselines) / max(len(depth_baselines), 1)
             advantage = reward - global_baseline
 
-        # REINFORCE: push all active node mu vectors toward high-reward trees
-        active_mu = tree.mu * tree.active.unsqueeze(-1).float()
+        # REINFORCE: push leaf mu vectors toward high-reward trees
+        active_mu = tree.leaf_mu * tree.is_leaf.unsqueeze(-1).float()
         sender_loss = -(
             advantage.unsqueeze(-1).unsqueeze(-1) * active_mu
         ).sum(dim=(-2, -1)).mean()
@@ -273,17 +273,13 @@ def main(
             acc = reward.mean().item()
             total_len = total_tokens.mean().item()
             avg_nodes = num_active.mean().item()
-            avg_depth = 0.0
-            if tree.active.any():
-                active_depths = tree.depth.unsqueeze(0).expand_as(tree.active)
-                avg_depth = (
-                    active_depths[tree.active].float().mean().item()
-                )
+            avg_leaves = tree.num_leaves.float().mean().item()
             logger.info(
-                "step=%d  loss=%.3f  acc=%.1f%%  nodes=%.1f  "
-                "depth=%.1f  tokens=%.0f  hard=%.0f%%  (chance=%.1f%%)",
+                "step=%d  loss=%.3f  acc=%.1f%%  "
+                "nodes=%.1f  leaves=%.1f  tokens=%.0f  "
+                "hard=%.0f%%  (chance=%.1f%%)",
                 step, receiver_loss.item(), acc * 100,
-                avg_nodes, avg_depth, total_len,
+                avg_nodes, avg_leaves, total_len,
                 hard_ratio * 100, chance * 100,
             )
 
