@@ -539,6 +539,7 @@ Each upload generates a YAML manifest in `releases/huggingface/` recording the a
 
 - **[Translation Guide](docs/translation-guide.md)** — Self-supervised IPA -> English translation: generate pairs, train, evaluate, and visualize the interpretability pipeline.
 - **[LFM vs LQM+LLM](docs/lfm-vs-lqm.md)** — How LFM's translation-based architecture compares to Large Quantitative Model + LLM pipelines for scientific discovery, and why the distinction between alignment and translation matters for finding genuinely novel structure in dynamical systems.
+- **[Roadmap](docs/roadmap.md)** — Planned improvements: unsupervised constituency induction, learned tree depth, bottom-up generation, multi-agent self-play, and more.
 
 ## License
 
