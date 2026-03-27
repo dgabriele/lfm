@@ -160,7 +160,7 @@ class ConstituencyExtractor:
 
 
 def _parse_language_worker(
-    args: tuple[str, list[str], int, str | None],
+    args: tuple[str, list[str], int, None],
 ) -> list[tuple[str, str, str]]:
     """Worker: parse all sentences for one language, extract constituents.
 
@@ -195,11 +195,20 @@ def _parse_language_worker(
             )
 
         processed += len(batch)
-        if processed % 500 == 0 and progress_file:
-            _write_progress(progress_file, lang, processed, len(texts), len(results))
+        if processed % 500 == 0:
+            import sys
 
-    if progress_file:
-        _write_progress(progress_file, lang, processed, len(texts), len(results))
+            sys.stderr.write(
+                f"  [{lang}] {processed}/{len(texts)} → {len(results)} constituents\n"
+            )
+            sys.stderr.flush()
+
+    import sys
+
+    sys.stderr.write(
+        f"  [{lang}] {processed}/{len(texts)} → {len(results)} constituents (done)\n"
+    )
+    sys.stderr.flush()
 
     return results
 
@@ -299,16 +308,13 @@ def extract_constituents_parallel(
         logger.info("No supported languages for constituency extraction")
         return results
 
-    import threading
+    import signal
 
     import torch
 
     use_gpu = torch.cuda.is_available()
-    if use_gpu:
-        # 2 GPU parsers in parallel (~2 GB VRAM each, fits in 8 GB)
-        actual_workers = min(2, len(work_items))
-    else:
-        actual_workers = min(num_workers, len(work_items))
+    # Sequential on GPU (fastest per-sentence), parallel on CPU
+    actual_workers = 1 if use_gpu else min(num_workers, len(work_items))
 
     total_sents = sum(len(t) for _, t, _ in work_items)
     logger.info(
@@ -317,53 +323,33 @@ def extract_constituents_parallel(
         "GPU" if use_gpu else "CPU", total_sents,
     )
 
-    # Progress file: workers append lines, main process tails.
-    # Reliable across all mp contexts (no queues, no threading).
-    import tempfile
-
-    progress_file = tempfile.mktemp(prefix="lfm_constituency_", suffix=".log")
-
-    work_with_progress = [
-        (lang, texts, ml, progress_file) for lang, texts, ml in work_items
+    # Workers write progress to stderr (captured by 2>&1 redirect).
+    work_items_final = [
+        (lang, texts, ml, None) for lang, texts, ml in work_items
     ]
 
-    # Live progress: tail the progress file in a daemon thread
-    import os
-    import time
-
-    _stop_tail = threading.Event()
-
-    def _tail_progress() -> None:
-        """Tail the progress file and log lines as they appear."""
-        last_pos = 0
-        while not _stop_tail.is_set():
-            try:
-                if os.path.exists(progress_file):
-                    with open(progress_file) as f:
-                        f.seek(last_pos)
-                        for line in f:
-                            logger.info(line.rstrip())
-                        last_pos = f.tell()
-            except Exception:
-                pass
-            time.sleep(2.0)
-
-    tail_thread = threading.Thread(target=_tail_progress, daemon=True)
-    tail_thread.start()
-
     if actual_workers == 1:
-        lang_results = [_parse_language_worker(item) for item in work_with_progress]
+        # Sequential — no subprocesses to orphan
+        lang_results = [_parse_language_worker(item) for item in work_items_final]
     else:
+        # Parallel CPU — use spawn, register cleanup on SIGTERM/SIGINT
         ctx = mp.get_context("spawn")
-        with ctx.Pool(actual_workers) as pool:
-            lang_results = pool.map(_parse_language_worker, work_with_progress)
+        pool = ctx.Pool(actual_workers)
 
-    _stop_tail.set()
-    tail_thread.join(timeout=5.0)
+        def _cleanup(signum: int, frame: object) -> None:
+            pool.terminate()
+            pool.join()
+            raise SystemExit(1)
 
-    # Cleanup
-    if os.path.exists(progress_file):
-        os.unlink(progress_file)
+        old_term = signal.signal(signal.SIGTERM, _cleanup)
+        old_int = signal.signal(signal.SIGINT, _cleanup)
+        try:
+            lang_results = pool.map(_parse_language_worker, work_items_final)
+        finally:
+            pool.close()
+            pool.join()
+            signal.signal(signal.SIGTERM, old_term)
+            signal.signal(signal.SIGINT, old_int)
 
     # Merge results
     constituent_count = 0
