@@ -175,20 +175,18 @@ class DatasetGenerator:
         for raw, text in sanitized:
             raw_by_lang_text[(raw.language, text)] = raw
 
+        # Pre-build per-language source metadata lookup (O(1) per constituent)
+        lang_source: dict[str, tuple[str, str]] = {}
+        for raw, _ in sanitized:
+            if raw.language not in lang_source:
+                lang_source[raw.language] = (raw.source, raw.source_file)
+
         for lang, text, label in all_results:
             existing = raw_by_lang_text.get((lang, text))
             if existing is not None:
                 augmented.append((existing, text))
             else:
-                # Constituent — create a new RawSample
-                # Find any RawSample for this language for source metadata
-                source = "unknown"
-                source_file = ""
-                for raw, _ in sanitized:
-                    if raw.language == lang:
-                        source = raw.source
-                        source_file = raw.source_file
-                        break
+                source, source_file = lang_source.get(lang, ("unknown", ""))
                 aug_raw = RawSample(lang, text, source, source_file)
                 augmented.append((aug_raw, text))
 
