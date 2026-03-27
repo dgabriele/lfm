@@ -175,7 +175,7 @@ def _parse_language_worker(
     stanza.download(iso2, processors="tokenize,pos,constituency", verbose=False)
     nlp = stanza.Pipeline(
         iso2, processors="tokenize,pos,constituency",
-        use_gpu=False, verbose=False,
+        use_gpu=True, verbose=False,
     )
 
     labels = EXTRACT_LABELS
@@ -289,19 +289,30 @@ def extract_constituents_parallel(
         logger.info("No supported languages for constituency extraction")
         return results
 
-    # Cap workers at number of languages (no benefit from more)
-    actual_workers = min(num_workers, len(work_items))
+    import torch
+
+    use_gpu = torch.cuda.is_available()
+    if use_gpu:
+        # GPU: process sequentially (one model on GPU at a time)
+        actual_workers = 1
+    else:
+        actual_workers = min(num_workers, len(work_items))
 
     logger.info(
-        "Constituency extraction: %d languages, %d workers, %d sentences",
+        "Constituency extraction: %d languages, %d workers (%s), %d sentences",
         len(work_items),
         actual_workers,
+        "GPU" if use_gpu else "CPU",
         sum(len(t) for _, t, _ in work_items),
     )
 
-    # Process languages in parallel
-    with mp.Pool(actual_workers) as pool:
-        lang_results = pool.map(_parse_language_worker, work_items)
+    if actual_workers == 1:
+        # Sequential (GPU or single-core)
+        lang_results = [_parse_language_worker(item) for item in work_items]
+    else:
+        # Parallel CPU workers
+        with mp.Pool(actual_workers) as pool:
+            lang_results = pool.map(_parse_language_worker, work_items)
 
     # Merge results
     constituent_count = 0
