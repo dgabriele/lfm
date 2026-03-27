@@ -11,7 +11,7 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 1. [Vision](#vision) — why encode structured data as natural language
 2. [The Problem](#the-problem) — limitations of existing encoding approaches
 3. [How It Works](#how-it-works) — three-step pipeline overview
-4. [The Frozen Decoder](#the-frozen-decoder) — architecture, pretraining, sample outputs
+4. [The Linguistic Decoder](#the-linguistic-decoder) — architecture, pretraining, sample outputs
 5. [Expression Generation](#expression-generation) — tree-structured generation through the decoder
 6. [Agent Game Results](#agent-game-results) — REINFORCE referential game validation
 7. [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
@@ -100,7 +100,7 @@ Only the input projection learns. The decoder's linguistic structure is preserve
 
 Message length scales with input complexity via z-norm: higher-norm z vectors produce longer utterances (more information to express), lower-norm vectors produce shorter ones. This means complex agent observations generate detailed linguistic descriptions while simple ones produce brief expressions.
 
-## The Frozen Decoder
+## The Linguistic Decoder
 
 The core of LFM is a **pretrained multilingual VAE decoder** that produces linguistically structured IPA from a latent vector. After pretraining, it is frozen and becomes a fixed linguistic bottleneck for downstream use.
 
