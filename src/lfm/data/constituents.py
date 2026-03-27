@@ -316,7 +316,9 @@ def extract_constituents_parallel(
     )
 
     # Progress queue: workers report (lang, processed, total, constituents)
-    progress_queue: mp.Queue = mp.Queue()
+    # Use manager queue for spawn context compatibility
+    manager = mp.Manager()
+    progress_queue = manager.Queue()
 
     # Add queue to work items
     work_with_queue = [
