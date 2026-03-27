@@ -50,5 +50,7 @@ class DatasetGenerateConfig(LFMBaseConfig):
     min_samples: int = 100              # Exclude languages below this
     sanitize: SanitizeConfig = SanitizeConfig()
     llm_gate: LLMGateConfig = LLMGateConfig()
+    extract_constituents: bool = False
+    min_constituent_length: int = 10
     num_workers: int | None = None
     seed: int = 42

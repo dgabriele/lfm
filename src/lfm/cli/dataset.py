@@ -66,6 +66,16 @@ class GenerateCommand(CLICommand):
             help="LLM gatekeeper model (default: Qwen/Qwen2.5-0.5B)",
         )
 
+        # Constituency extraction
+        parser.add_argument(
+            "--extract-constituents", action="store_true",
+            help="Augment with phrase constituents (NP, VP, PP, etc.)",
+        )
+        parser.add_argument(
+            "--min-constituent-length", type=int, default=10,
+            help="Min character length for extracted constituents (default: 10)",
+        )
+
         # Sanitize overrides (--sanitize-* prefix)
         san = parser.add_argument_group("sanitization", "Override sanitization settings")
         san.add_argument("--sanitize-number-policy", default="spell_out",
@@ -138,6 +148,8 @@ class GenerateCommand(CLICommand):
             min_samples=args.min_samples,
             sanitize=sanitize_cfg,
             llm_gate=llm_gate_cfg,
+            extract_constituents=args.extract_constituents,
+            min_constituent_length=args.min_constituent_length,
             num_workers=args.num_workers,
             seed=args.seed,
         )

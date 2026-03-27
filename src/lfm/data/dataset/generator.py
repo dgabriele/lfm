@@ -71,6 +71,14 @@ class DatasetGenerator:
                 len(sanitized), len(rejected_gate),
             )
 
+        # 3b. Constituency extraction (optional — augments with sub-phrases)
+        if cfg.extract_constituents:
+            sanitized = self._extract_constituents(sanitized)
+            logger.info(
+                "After constituency extraction: %d samples",
+                len(sanitized),
+            )
+
         # 4. IPA conversion
         processed = self._convert_ipa(sanitized, raw_samples)
         logger.info("IPA conversion: %d processed samples", len(processed))
@@ -123,6 +131,49 @@ class DatasetGenerator:
             RawSample(lang, text, cfg.source, "")
             for lang, text in loader.load()
         ]
+
+    def _extract_constituents(
+        self,
+        sanitized: list[tuple[RawSample, str]],
+    ) -> list[tuple[RawSample, str]]:
+        """Augment samples with phrase constituents via constituency parsing.
+
+        For languages with Stanza constituency parsers, extracts NP, VP,
+        PP, etc. and adds them as separate samples alongside the full
+        sentence.  Teaches the decoder to produce variable-length output.
+        """
+        from lfm.data.constituents import CONSTITUENCY_LANGS, ConstituencyExtractor
+
+        cfg = self.config
+        extractor = ConstituencyExtractor(min_length=cfg.min_constituent_length)
+        augmented: list[tuple[RawSample, str]] = []
+        constituent_count = 0
+
+        for raw, text in sanitized:
+            # Always keep the full sentence
+            augmented.append((raw, text))
+
+            if raw.language not in CONSTITUENCY_LANGS:
+                continue
+
+            constituents = extractor.extract(text, raw.language)
+            for c in constituents:
+                # Create a new RawSample for the constituent
+                aug_raw = RawSample(
+                    language=raw.language,
+                    text=c.text,
+                    source=raw.source,
+                    source_file=raw.source_file,
+                )
+                augmented.append((aug_raw, c.text))
+                constituent_count += 1
+
+        logger.info(
+            "Extracted %d constituents from %d supported samples",
+            constituent_count,
+            sum(1 for r, _ in sanitized if r.language in CONSTITUENCY_LANGS),
+        )
+        return augmented
 
     def _sanitize(
         self, samples: list[RawSample],
