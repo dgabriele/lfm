@@ -1630,7 +1630,7 @@ class VAEPretrainer:
 
                     # Build optional metric strings
                     extra_parts: list[str] = [
-                        f"PPL={ppl:.0f}",
+                        f"PPL={ppl:.2f}",
                         f"acc={_batch_acc:.1%}",
                         f"gnorm={last_grad_norm:.2f}",
                     ]
