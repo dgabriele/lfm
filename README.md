@@ -8,19 +8,19 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 
 **Contents**
 
-1. [Vision](#vision) — why encode structured data as natural language
-2. [The Problem](#the-problem) — limitations of existing encoding approaches
-3. [How It Works](#how-it-works) — three-step pipeline overview
-4. [The Linguistic Decoder](#the-linguistic-decoder) — architecture, pretraining, sample outputs
-5. [Expression Generation](#expression-generation) — tree-structured generation through the decoder
-6. [Agent Game Results](#agent-game-results) — REINFORCE referential game validation
-7. [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
-8. [Dataset Generation](#dataset-generation) — HDF5 pipeline with constituency augmentation
-9. [Visualization CLI](#visualization-cli) — t-SNE, clustering, attention, Zipf, and more
-10. [Quick Start](#quick-start) — install, pretrain, run
-11. [Design and Rationale](#design-and-rationale) — why IPA, not pretrained LM output; implementation principles
-12. [Status](#status) — current capabilities and roadmap
-13. [Further Reading](#further-reading) — related docs and background
+1. 🌐 [Vision](#vision) — why encode structured data as natural language
+2. 🔬 [The Problem](#the-problem) — limitations of existing encoding approaches
+3. ⚙️ [How It Works](#how-it-works) — three-step pipeline overview
+4. 🗣️ [The Linguistic Decoder](#the-linguistic-decoder) — architecture, pretraining, sample outputs
+5. 🌳 [Expression Generation](#expression-generation) — tree-structured generation through the decoder
+6. 🎯 [Agent Game Results](#agent-game-results) — REINFORCE referential game validation
+7. 📊 [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
+8. 💾 [Dataset Generation](#dataset-generation) — HDF5 pipeline with constituency augmentation
+9. 📈 [Visualization CLI](#visualization-cli) — t-SNE, clustering, attention, Zipf, and more
+10. 🚀 [Quick Start](#quick-start) — install, pretrain, run
+11. 🧬 [Design and Rationale](#design-and-rationale) — why IPA, not pretrained LM output; implementation principles
+12. 📋 [Status](#status) — current capabilities and roadmap
+13. 📖 [Further Reading](#further-reading) — related docs and background
 
 ---
 
