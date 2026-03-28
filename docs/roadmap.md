@@ -84,7 +84,23 @@ The existing `lfm translate` pipeline translates flat IPA sequences to English. 
 
 ---
 
-## 10. Phonetic feature-aware decoding
+## 10. Emotional tone and subjective state expression
+
+**Status:** Speculative research direction
+
+Train the decoder on emotionally valenced first-person corpora — angry, calm, kind, neutral variations of the same content. This would create a **tonal manifold** in z-space: regions whose phonological patterns correlate with emotional categories (prosodic structure, word choice, sentence length all differ across emotional registers).
+
+The scientifically interesting test: give agents persistent state across communication rounds, then observe whether their expressions drift into emotion-correlated z regions when internal state changes (high loss, adversarial pressure, prediction error) — *without* being trained on emotional labels. If agents express internal state through a linguistic channel that has emotion-correlated structure, without being told to, that's a genuine finding about the relationship between internal dynamics and linguistic expression.
+
+**Why it matters:** This is a controlled test of the embodied cognition hypothesis applied to language. Cognitive science claims emotional language is grounded in bodily states. LFM lets you test the inverse: if a system has linguistic structure with emotional dimensions (from training data) coupled to internal states (from task dynamics), does emotion-correlated language emerge *without* a body? The answer — yes or no — is an empirical contribution to a philosophical debate, with every variable controlled and measurable.
+
+**Prerequisites:** First-person narrative training data, persistent agent state across rounds, structural analysis tools for z-space tonal clustering.
+
+**Measurement:** Mutual information between agent persistent state and expression structural features (tree topology, z-vector distribution, phonotactic patterns), computed entirely in z-space with zero reference to English. Nonzero MI = something about the agent's internal state is being expressed. Translation to English is a separate interpretive step — the structural signatures exist independently in the alien IPA.
+
+---
+
+## 11. Phonetic feature-aware decoding
 
 **Status:** Panphon integration built, not yet used in decoding
 
