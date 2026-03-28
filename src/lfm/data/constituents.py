@@ -160,16 +160,25 @@ class ConstituencyExtractor:
 
 
 def _parse_language_worker(
-    args: tuple[str, list[str], int, None],
-) -> list[tuple[str, str, str]]:
+    args: tuple[str, list[str], int, None, list[int] | None],
+) -> list[tuple[str, str, str, int]]:
     """Worker: parse all sentences for one language, extract constituents.
 
     Runs in a separate process with its own Stanza pipeline.
     Progress written directly to a shared log file (no queues).
+
+    Args:
+        args: (language, texts, min_length, progress_file, sentence_indices)
+            sentence_indices maps position in `texts` to the global sample
+            index, so constituents can reference their parent sentence.
+
+    Returns:
+        List of (language, text, label, parent_seq) tuples.
+        parent_seq is the global index of the source sentence.
     """
     import stanza
 
-    lang, texts, min_length, progress_file = args
+    lang, texts, min_length, progress_file, sent_indices = args
     iso2 = CONSTITUENCY_LANGS[lang]
 
     stanza.download(iso2, processors="tokenize,pos,constituency", verbose=False)
@@ -179,20 +188,27 @@ def _parse_language_worker(
     )
 
     labels = EXTRACT_LABELS
-    results: list[tuple[str, str, str]] = []
+    results: list[tuple[str, str, str, int]] = []
     batch_size = 64
     processed = 0
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
+        batch_indices = sent_indices[i : i + batch_size] if sent_indices else list(range(i, i + len(batch)))
         doc = nlp("\n\n".join(batch))
 
+        # Map parsed sentences back to batch indices
+        sent_idx = 0
         for sentence in doc.sentences:
             if sentence.constituency is None:
+                sent_idx += 1
                 continue
+            parent_seq = batch_indices[min(sent_idx, len(batch_indices) - 1)]
             _extract_from_tree(
-                sentence.constituency, lang, labels, min_length, results, depth=0,
+                sentence.constituency, lang, labels, min_length,
+                results, depth=0, parent_seq=parent_seq,
             )
+            sent_idx += 1
 
         processed += len(batch)
         if processed % 500 == 0:
@@ -229,8 +245,9 @@ def _extract_from_tree(
     language: str,
     labels: set[str],
     min_length: int,
-    out: list[tuple[str, str, str]],
+    out: list[tuple[str, str, str, int]],
     depth: int,
+    parent_seq: int = -1,
 ) -> None:
     """Recursively extract constituents from a parse tree node."""
     label = getattr(node, "label", "")
@@ -239,11 +256,14 @@ def _extract_from_tree(
     if label in labels and depth > 0:
         text = _tree_text(node)
         if len(text) >= min_length:
-            out.append((language, text, label))
+            out.append((language, text, label, parent_seq))
 
     for child in children:
         if hasattr(child, "children") and child.children:
-            _extract_from_tree(child, language, labels, min_length, out, depth + 1)
+            _extract_from_tree(
+                child, language, labels, min_length, out, depth + 1,
+                parent_seq=parent_seq,
+            )
 
 
 def _tree_text(node: object) -> str:
@@ -268,7 +288,7 @@ def extract_constituents_parallel(
     samples: list[tuple[str, str]],
     min_length: int = MIN_CONSTITUENT_LENGTH,
     num_workers: int | None = None,
-) -> list[tuple[str, str, str]]:
+) -> list[tuple[str, str, str, int]]:
     """Extract constituents with per-language parallelism.
 
     Groups samples by language, then processes each supported language
@@ -281,7 +301,10 @@ def extract_constituents_parallel(
         num_workers: Max parallel workers. None = 90% of CPU cores.
 
     Returns:
-        List of (language, text, label) tuples.
+        List of (language, text, label, parent_seq) tuples.
+        For full sentences, parent_seq is -1.
+        For constituents, parent_seq is the index of the source sentence
+        in the output list (full sentences come first, preserving input order).
     """
     import multiprocessing as mp
     import os
@@ -290,19 +313,25 @@ def extract_constituents_parallel(
     if num_workers is None:
         num_workers = max(1, int(os.cpu_count() * 0.9))
 
-    # Group by language
+    # Group by language, tracking global indices
     by_lang: dict[str, list[str]] = defaultdict(list)
-    for lang, text in samples:
+    by_lang_indices: dict[str, list[int]] = defaultdict(list)
+    for idx, (lang, text) in enumerate(samples):
         by_lang[lang].append(text)
+        by_lang_indices[lang].append(idx)
 
-    # All samples start as full sentences
-    results: list[tuple[str, str, str]] = [(lang, text, "S") for lang, text in samples]
+    # All samples start as full sentences (parent_seq=-1 for full sentences)
+    results: list[tuple[str, str, str, int]] = [
+        (lang, text, "S", -1) for lang, text in samples
+    ]
 
     # Build work items for supported languages only
     work_items: list[tuple[str, list[str], int]] = []
+    work_indices: list[list[int]] = []
     for lang, texts in by_lang.items():
         if lang in CONSTITUENCY_LANGS:
             work_items.append((lang, texts, min_length))
+            work_indices.append(by_lang_indices[lang])
 
     if not work_items:
         logger.info("No supported languages for constituency extraction")
@@ -328,7 +357,8 @@ def extract_constituents_parallel(
 
     # Workers write progress to stderr (captured by 2>&1 redirect).
     work_items_final = [
-        (lang, texts, ml, None) for lang, texts, ml in work_items
+        (lang, texts, ml, None, indices)
+        for (lang, texts, ml), indices in zip(work_items, work_indices)
     ]
 
     if actual_workers == 1:

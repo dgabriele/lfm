@@ -8,9 +8,19 @@ from lfm.config.base import LFMBaseConfig
 from lfm.data.sanitize import SanitizeConfig
 
 
-class ProcessedSample(TypedDict):
-    """A fully processed sample ready for HDF5 storage."""
+class ProcessedSample(TypedDict, total=False):
+    """A fully processed sample ready for HDF5 storage.
 
+    Core fields (always present):
+        seq, language, source, source_file, raw, ipa, ipa_length
+
+    Constituent fields (present for phase 2 datasets):
+        parent_ipa: IPA of the full parent sentence (empty for full sentences)
+        parent_ipa_length: length of parent IPA
+        constituent_label: phrase label (NP, VP, PP, S, etc.)
+    """
+
+    # Required fields (always present)
     seq: int
     language: str
     source: str
@@ -18,6 +28,10 @@ class ProcessedSample(TypedDict):
     raw: str
     ipa: str
     ipa_length: int
+
+    # Phase 2 constituent fields (optional)
+    parent_seq: int          # seq number of parent sentence (-1 for full sentences)
+    constituent_label: str   # phrase label (NP, VP, PP, S, etc.)
 
 
 class LLMGateConfig(LFMBaseConfig):

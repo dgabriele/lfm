@@ -72,6 +72,8 @@ class DatasetGenerator:
             )
 
         # 3b. Constituency extraction (optional — augments with sub-phrases)
+        constituent_parent_seqs: list[int] | None = None
+        constituent_labels: list[str] | None = None
         if cfg.extract_constituents:
             checkpoint_path = self._output_dir / "_constituency_checkpoint.jsonl"
             if checkpoint_path.exists():
@@ -79,12 +81,18 @@ class DatasetGenerator:
                 sanitized = self._load_checkpoint(checkpoint_path)
             else:
                 self._output_dir.mkdir(parents=True, exist_ok=True)
-                sanitized = self._extract_constituents(sanitized)
+                sanitized, constituent_parent_seqs, constituent_labels = (
+                    self._extract_constituents(sanitized)
+                )
                 logger.info(
                     "After constituency extraction: %d samples, saving checkpoint...",
                     len(sanitized),
                 )
-                self._save_checkpoint(sanitized, checkpoint_path)
+                self._save_checkpoint(
+                    sanitized, checkpoint_path,
+                    parent_seqs=constituent_parent_seqs,
+                    labels=constituent_labels,
+                )
                 logger.info("Saved checkpoint: %s", checkpoint_path)
 
         # 4. IPA conversion
@@ -146,12 +154,18 @@ class DatasetGenerator:
     def _extract_constituents(
         self,
         sanitized: list[tuple[RawSample, str]],
-    ) -> list[tuple[RawSample, str]]:
+    ) -> tuple[list[tuple[RawSample, str]], list[int], list[str]]:
         """Augment samples with phrase constituents via constituency parsing.
 
         Runs per-language parsing in parallel (one Stanza pipeline per
         worker process on CPU).  Each constituent becomes a separate
         training sample alongside the full sentence.
+
+        Returns:
+            Tuple of:
+              - augmented: list of (RawSample, text) pairs
+              - parent_seqs: list of parent sentence indices (-1 for full sentences)
+              - labels: list of constituent labels ("S" for full sentences)
         """
         from lfm.data.constituents import extract_constituents_parallel
 
@@ -169,6 +183,8 @@ class DatasetGenerator:
         # The first len(sanitized) results are the original sentences (label="S").
         # Additional results are extracted constituents.
         augmented: list[tuple[RawSample, str]] = []
+        parent_seqs: list[int] = []
+        labels: list[str] = []
 
         # Build a lookup for original RawSamples
         raw_by_lang_text: dict[tuple[str, str], RawSample] = {}
@@ -181,7 +197,7 @@ class DatasetGenerator:
             if raw.language not in lang_source:
                 lang_source[raw.language] = (raw.source, raw.source_file)
 
-        for lang, text, label in all_results:
+        for lang, text, label, parent_seq in all_results:
             existing = raw_by_lang_text.get((lang, text))
             if existing is not None:
                 augmented.append((existing, text))
@@ -189,13 +205,17 @@ class DatasetGenerator:
                 source, source_file = lang_source.get(lang, ("unknown", ""))
                 aug_raw = RawSample(lang, text, source, source_file)
                 augmented.append((aug_raw, text))
+            parent_seqs.append(parent_seq)
+            labels.append(label)
 
-        return augmented
+        return augmented, parent_seqs, labels
 
     @staticmethod
     def _save_checkpoint(
         sanitized: list[tuple[RawSample, str]],
         path: Path,
+        parent_seqs: list[int] | None = None,
+        labels: list[str] | None = None,
     ) -> None:
         """Save augmented samples as JSONL (streaming, no pickle)."""
         import json
@@ -204,11 +224,16 @@ class DatasetGenerator:
         log_every = max(total // 10, 10000)
         with open(path, "w", encoding="utf-8") as f:
             for i, (raw, text) in enumerate(sanitized):
-                f.write(json.dumps({
+                record: dict = {
                     "lang": raw.language, "text": text,
                     "src": raw.source, "file": raw.source_file,
                     "raw": raw.text,
-                }, ensure_ascii=False) + "\n")
+                }
+                if parent_seqs is not None:
+                    record["parent_seq"] = parent_seqs[i]
+                if labels is not None:
+                    record["label"] = labels[i]
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 if (i + 1) % log_every == 0:
                     logger.info(
                         "  Checkpoint: %d/%d (%.0f%%)",

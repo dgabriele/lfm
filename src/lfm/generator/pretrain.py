@@ -177,7 +177,7 @@ class VAEPretrainConfig(LFMBaseConfig):
     topo_sample_pairs: int = 32
 
     # Adversarial structural discriminator
-    use_adversarial: bool = True
+    use_adversarial: bool = False
     adv_weight: float = 0.1
     adv_lr: float = 1e-4
     adv_disc_hidden: int = 256
@@ -1035,15 +1035,9 @@ class VAEPretrainer:
             all_params.extend(contrastive_proj.parameters())
 
         optimizer = torch.optim.AdamW(all_params, lr=cfg.lr)
-        # Per-step cosine decay: T_max = total optimizer steps across all epochs.
-        # Stepped every batch (or every accum batches if gradient accumulation).
-        # This ensures the LR schedule scales correctly regardless of dataset size.
-        _total_steps = (
-            len(train_dataset) // cfg.batch_size * cfg.num_epochs
-            // cfg.gradient_accumulation_steps
-        )
+        # Per-epoch cosine decay — proven stable with AMP across 42+ epochs.
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=_total_steps, eta_min=cfg.lr_min,
+            optimizer, T_max=cfg.num_epochs, eta_min=cfg.lr_min,
         )
         # Fixed-scale GradScaler: init at 256, effectively never grow.
         # The scaler exists only to prevent fp16 gradient underflow.
@@ -1109,26 +1103,37 @@ class VAEPretrainer:
             if contrastive_proj is not None and "contrastive_proj" in ckpt:
                 contrastive_proj.load_state_dict(ckpt["contrastive_proj"])
                 logger.info("Restored contrastive projection from checkpoint")
-            optimizer.load_state_dict(ckpt["optimizer"])
+            # Check for gradient explosion in saved optimizer state.
+            # If the last gnorm was extreme, skip optimizer restore
+            # and start with fresh Adam momentum (model weights are fine).
+            _saved_gnorm_ok = True
+            if "last_grad_norm" in ckpt and not math.isfinite(ckpt["last_grad_norm"]):
+                _saved_gnorm_ok = False
+            # Also detect via NaN in optimizer state tensors
+            if _saved_gnorm_ok:
+                for group in ckpt["optimizer"]["state"].values():
+                    for v in group.values():
+                        if isinstance(v, torch.Tensor) and torch.isnan(v).any():
+                            _saved_gnorm_ok = False
+                            break
+                    if not _saved_gnorm_ok:
+                        break
+
+            if _saved_gnorm_ok:
+                optimizer.load_state_dict(ckpt["optimizer"])
+            else:
+                logger.warning(
+                    "Contaminated optimizer state detected — "
+                    "using fresh optimizer (model weights preserved)"
+                )
             # Skip restoring scaler state — use fresh low-scale init
             # to avoid fp16 overflow from high saved scales.
             # scaler.load_state_dict(ckpt["scaler"])
             if "scheduler" in ckpt:
-                # Only restore if T_max matches (per-step vs per-epoch change)
-                saved_T = ckpt["scheduler"].get("T_max", 0)
-                if saved_T == scheduler.T_max:
+                try:
                     scheduler.load_state_dict(ckpt["scheduler"])
-                else:
-                    # T_max changed (e.g. per-epoch → per-step migration).
-                    # Set scheduler.last_epoch to the saved global_step so
-                    # cosine position is correct without looping.
-                    resume_step = ckpt.get("global_step", 0)
-                    scheduler.last_epoch = resume_step
-                    logger.info(
-                        "Scheduler T_max mismatch (saved=%s, current=%s) "
-                        "— set cosine position to step %d/%d",
-                        saved_T, scheduler.T_max, resume_step, scheduler.T_max,
-                    )
+                except Exception:
+                    logger.warning("Could not restore scheduler state — reinitializing")
             if modules.get("_residual_vq") is not None and "residual_vq" in ckpt:
                 modules["_residual_vq"].load_state_dict(ckpt["residual_vq"])
                 logger.info("Restored ResidualVQ codebooks from checkpoint")
@@ -1429,7 +1434,10 @@ class VAEPretrainer:
                     disc_optimizer.zero_grad()
                     scaler.scale(disc_loss).backward()
                     scaler.step(disc_optimizer)
-                    scaler.update()
+                    # NOTE: do NOT call scaler.update() here — it's called
+                    # once after the main optimizer step. Calling it here
+                    # would change the scale between disc backward and main
+                    # unscale, causing 2x gradient spikes in the main model.
 
                     # Log discriminator scores as diagnostics only.
                     # Generator adversarial gradient is disabled during
@@ -1448,60 +1456,11 @@ class VAEPretrainer:
                     last_grad_norm = nn.utils.clip_grad_norm_(
                         all_params, max_norm=5.0
                     ).item()
-                    # Skip step on inf/nan gradients and reset Adam momentum
-                    # to prevent contamination from the unscaled inf values.
-                    if math.isfinite(last_grad_norm):
-                        scaler.step(optimizer)
-                    else:
-                        # Detailed diagnostics on first bad gnorm per epoch
-                        if not getattr(self, "_gnorm_diagnosed", False):
-                            self._gnorm_diagnosed = True
-                            with torch.no_grad():
-                                _h = modules["enc_to_latent"](
-                                    torch.zeros(1, cfg.decoder_hidden_dim, device=device)
-                                )
-                                _mu_dbg, _lv_dbg = _h.chunk(2, dim=-1)
-                                _has_nan_params = any(
-                                    torch.isnan(p).any().item()
-                                    for m in modules.values()
-                                    if isinstance(m, nn.Module)
-                                    for p in m.parameters()
-                                )
-                            logger.warning(
-                                "GNORM DIAGNOSTIC step=%d: "
-                                "ce=%.4f z_var_loss=%.6f dip=%.6f loss=%.4f "
-                                "logvar_range=[%.2f, %.2f] logvar_mean=%.2f "
-                                "z_std_running=%.4f z_batch_std=%.4f "
-                                "scaler_scale=%.1f nan_in_params=%s",
-                                global_step,
-                                ce_loss.item(), z_var_loss.item(),
-                                dip_loss.item(), loss.item() * accum,
-                                kl_per_dim_train.min().item() if _do_kl else -999,
-                                kl_per_dim_train.max().item() if _do_kl else -999,
-                                kl_per_dim_train.mean().item() if _do_kl else -999,
-                                z_running_std.mean().item(),
-                                z_batch.std(dim=0).mean().item(),
-                                scaler.get_scale(),
-                                _has_nan_params,
-                            )
-                        logger.warning(
-                            "Skipping optimizer step: gnorm=%s at step %d "
-                            "— resetting momentum",
-                            last_grad_norm,
-                            global_step,
-                        )
-                        # Reset Adam momentum buffers to prevent cascade
-                        for group in optimizer.param_groups:
-                            for p in group["params"]:
-                                state = optimizer.state.get(p)
-                                if state:
-                                    state["exp_avg"].zero_()
-                                    state["exp_avg_sq"].zero_()
-                                    if "max_exp_avg_sq" in state:
-                                        state["max_exp_avg_sq"].zero_()
+                    # Clip and step. No skipping, no momentum reset.
+                    # Grad clipping bounds the update; Adam handles the rest.
+                    scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
-                    scheduler.step()
                     global_step += 1
 
                 # Token accuracy (loss-invariant reconstruction quality metric)
@@ -2227,7 +2186,8 @@ class VAEPretrainer:
                 )
                 break
 
-            # LR scheduler is stepped per-batch (inside training loop)
+            # Step LR scheduler (per-epoch cosine)
+            scheduler.step()
 
             # Update training history
             _shutdown_state["epoch"] = epoch + 1
