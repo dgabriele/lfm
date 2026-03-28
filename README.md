@@ -18,7 +18,7 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 8. [Dataset Generation](#dataset-generation) — HDF5 pipeline with constituency augmentation
 9. [Visualization CLI](#visualization-cli) — t-SNE, clustering, attention, Zipf, and more
 10. [Quick Start](#quick-start) — install, pretrain, run
-11. [Design](#design) — principles and trade-offs
+11. [Design and Rationale](#design-and-rationale) — why IPA, not pretrained LM output; implementation principles
 12. [Status](#status) — current capabilities and roadmap
 13. [Further Reading](#further-reading) — related docs and background
 
@@ -477,7 +477,25 @@ outputs = faculty(agent_embedding)  # (batch, dim)
 # outputs["generator.mask"] -- variable-length mask
 ```
 
-## Design
+## Design and Rationale
+
+### Why IPA, not orthographic LM output?
+
+An obvious alternative: skip training a decoder from scratch and use a pretrained multilingual LM (e.g., BLOOM-560M) as the frozen decoder. This would give excellent generation quality immediately. But it produces the wrong kind of output.
+
+**Emergent structure vs. inherited structure.** In LFM, the decoder is trained on raw phonetic sequences. Morpheme-like patterns emerge because phonotactic constraints *produce* morphological regularity — the same way they do in real languages. Recurring sound clusters stabilize into proto-morphemes not because a tokenizer carved them out, but because they fit the phonotactic grammar. The hierarchy builds up naturally: valid phoneme sequences → recurring clusters → compositional phrases via the expression tree. Every level is grounded in the level below.
+
+A pretrained LM has morphological knowledge handed to it as tokenizer artifacts — "un", "ing", "tion" are byte-pair subwords, not emergent phonological units. The structure is top-down (imposed by orthographic convention) rather than bottom-up (emerging from sound-level constraints). The output would develop regularities — optimization pressure ensures that — but they'd be inherited regularities, not emergent ones.
+
+**Semantic contamination.** Orthographic tokens carry pretrained associations. "dog" activates dog-related representations in any LLM that reads the output, even if the emergent language uses it to mean something unrelated. A translator LLM must *unlearn* these associations before learning the actual emergent semantics. IPA symbols have no pretrained meaning — the translator learns the mapping cleanly.
+
+**Pronounceability.** IPA output maps directly to speech. You can listen to what agents say, do phonological analysis, synthesize audio. The output is grounded in physical acoustics, not arbitrary orthographic convention.
+
+**Uniform cross-linguistic representation.** IPA is a universal phonetic interlingua by design — `tʃ` means the same articulatory gesture whether the source is English "ch" or Turkish "ç". An LLM learning to translate LFM output sees one consistent symbol system. Orthographic output would mix writing conventions from dozens of languages — learnable, but unnecessarily noisy.
+
+**In short:** IPA gives you genuinely emergent phonomorphological structure, no semantic contamination, pronounceability, and cross-linguistic uniformity. The pretrained LM approach would be faster to train but would produce structure that is inherited rather than emergent — and for the science, that distinction matters.
+
+### Implementation
 
 - **Registry/factory** pattern — components pluggable via `@register` / `create()`
 - **Pydantic configs** — frozen, validated, composable
