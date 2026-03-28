@@ -24,7 +24,7 @@ decoder_num_heads: 8
 decoder_dropout: 0.1
 
 # Linguistic structure
-attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_head_windows: [3, 7, 15, 15, 0, 0, 0, 0]
 attention_global_every: 7
 use_rope: true
 share_decoder_layers: true
@@ -54,7 +54,7 @@ gradient_accumulation_steps: 1
 use_amp: true
 lr: 0.0005
 lr_min: 0.0001
-num_epochs: 50
+num_epochs: 75
 
 # Latent regularization
 z_var_weight: 0.0
