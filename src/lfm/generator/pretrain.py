@@ -2165,7 +2165,10 @@ class VAEPretrainer:
                 )
 
                 # --- 6. Structural health metrics ---
-                all_eval_texts = recon_texts + interp_texts + perturb_texts + random_texts
+                all_eval_texts = (
+                    recon_texts + interp_texts + perturb_texts
+                    + random_texts + length_texts
+                )
 
                 def _struct_metrics(texts: list[str]) -> dict[str, float]:
                     ttrs, rep_rates, word_lens = [], [], []
