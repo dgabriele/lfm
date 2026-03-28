@@ -84,21 +84,21 @@ Training uses cosine LR decay, DIP-VAE covariance regularization (off-diagonal p
 
 After pretraining, the decoder is **frozen**. It becomes a fixed linguistic bottleneck.
 
-### Step 2: Agent training
+### Step 2: Expression generation
 
-The frozen decoder is integrated into a `LanguageFaculty`. During agent training:
+The frozen decoder is wrapped by an `ExpressionGenerator` that learns to produce tree-structured expressions. During training:
 
-1. Agent embedding (e.g., 384-dim from sentence-transformer) enters the faculty
-2. A **learned input projection** maps it to the VAE latent space (mu, sigma -> z)
-3. The **frozen decoder** generates variable-length IPA tokens from z
-4. A **receiver** (in the referential game) must identify the original embedding from among distractors based on the generated message
-5. **REINFORCE** trains the input projection: reward = receiver success
+1. An input embedding (e.g., 384-dim from any encoder) enters the expression generator
+2. The generator learns a **binary tree topology** — deciding where to expand and where to stop (via REINFORCE)
+3. Each leaf gets a **latent z vector** projected from the tree's hidden context
+4. One **continuous autoregressive decode** runs through all leaves in order, switching z at segment boundaries while the KV cache persists — producing phonotactically coherent output
+5. An `ExpressionEncoder` composes the decoded segments bottom-up via learned Merge into a fixed-size message vector
 
-Only the input projection learns. The decoder's linguistic structure is preserved.
+Only the expression generator and encoder learn. The decoder's linguistic structure is preserved.
 
-### Step 3: Variable-length messages
+### Step 3: Variable-length, variable-structure messages
 
-Message length scales with input complexity via z-norm: higher-norm z vectors produce longer utterances (more information to express), lower-norm vectors produce shorter ones. This means complex agent observations generate detailed linguistic descriptions while simple ones produce brief expressions.
+Expression complexity scales with input complexity. The tree can grow deeper and wider — more leaves, more segments — to elaborate on complex inputs. Short, simple inputs produce shallow trees with brief output. This is the same mechanism natural language uses: say more when there's more to say.
 
 ## The Linguistic Decoder
 
