@@ -99,6 +99,69 @@ class DatasetReader:
         )
         return result
 
+    def has_constituents(self) -> bool:
+        """Check if this dataset has phase 2 constituent fields."""
+        import h5py
+
+        with h5py.File(self._dir / "samples.h5", "r") as f:
+            return "parent_seq" in f["samples"]
+
+    def load_constituent_tuples(
+        self,
+        languages: list[str] | None = None,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str, int, str]]]:
+        """Load phase 2 constituent data: full sentences + paired constituents.
+
+        Returns two lists:
+          - sentences: list of (lang, ipa) for all full sentences (label="S")
+          - constituents: list of (lang, ipa, parent_seq, label) for
+            all extracted constituents. parent_seq indexes into the
+            sentences list.
+
+        The HDF5 file is read once; parent_seq provides O(1) lookup
+        of the parent sentence's IPA at training time.
+        """
+        import h5py
+
+        h5_path = self._dir / "samples.h5"
+        lang_filter = set(languages) if languages else None
+
+        with h5py.File(h5_path, "r") as f:
+            grp = f["samples"]
+            langs = [_decode(x) for x in grp["language"][:]]
+            ipas = [_decode(x) for x in grp["ipa"][:]]
+            parent_seqs = grp["parent_seq"][:].tolist()
+            labels = [_decode(x) for x in grp["constituent_label"][:]]
+
+        sentences: list[tuple[str, str]] = []
+        constituents: list[tuple[str, str, int, str]] = []
+        # Map from original seq → position in sentences list
+        seq_to_sent_idx: dict[int, int] = {}
+
+        for i, (lang, ipa, pseq, label) in enumerate(
+            zip(langs, ipas, parent_seqs, labels),
+        ):
+            if lang_filter is not None and lang not in lang_filter:
+                continue
+            if label == "S" or pseq == -1:
+                seq_to_sent_idx[i] = len(sentences)
+                sentences.append((lang, ipa))
+            else:
+                constituents.append((lang, ipa, pseq, label))
+
+        # Remap parent_seq from global index to sentences list index
+        remapped: list[tuple[str, str, int, str]] = []
+        for lang, ipa, pseq, label in constituents:
+            sent_idx = seq_to_sent_idx.get(pseq, -1)
+            if sent_idx >= 0:
+                remapped.append((lang, ipa, sent_idx, label))
+
+        logger.info(
+            "Loaded %d sentences + %d constituents from %s",
+            len(sentences), len(remapped), self._dir.name,
+        )
+        return sentences, remapped
+
     def iter_samples(self) -> Iterator[ProcessedSample]:
         """Streaming iterator over all samples.
 

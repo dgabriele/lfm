@@ -227,6 +227,15 @@ class VAEPretrainConfig(LFMBaseConfig):
     vq_ema_update: bool = True
     vq_decay: float = 0.99
 
+    # Phase 2: sentence-context constituent training.
+    # When enabled, the encoder sees the full parent sentence while the
+    # decoder is supervised only on the constituent span.  Requires a
+    # constituency dataset with parent_seq fields (generated with
+    # --extract-constituents).
+    phase2_constituent: bool = False
+    phase2_dataset_path: str = ""        # Path to constituency HDF5
+    phase2_mix_ratio: float = 0.5        # Fraction of full sentences to mix in
+
 
 # ---------------------------------------------------------------------------
 # Corpus loading
@@ -493,6 +502,8 @@ def _vae_forward(
     _phonetic_sim: Tensor | None = None,
     _phonetic_smoothing: float = 0.0,
     _residual_vq: nn.Module | None = None,
+    encoder_tokens: Tensor | None = None,
+    encoder_lengths: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None]:
     """Run one VAE forward pass with optional scheduled sampling.
 
@@ -510,16 +521,29 @@ def _vae_forward(
     from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
 
     device = batch_tokens.device
-    b, seq_len = batch_tokens.shape
+    b, dec_seq_len = batch_tokens.shape
+
+    # Phase 2: encoder may see different tokens (parent sentence) than
+    # the decoder target (constituent).  When encoder_tokens is None,
+    # encoder and decoder use the same tokens (phase 1 / standard VAE).
+    if encoder_tokens is not None:
+        enc_toks = encoder_tokens
+        enc_lens = encoder_lengths
+        _, enc_seq_len = enc_toks.shape
+    else:
+        enc_toks = batch_tokens
+        enc_lens = batch_lengths
+        enc_seq_len = dec_seq_len
+    seq_len = dec_seq_len  # decoder sequence length for masks/positions
 
     # Encode
-    src_mask = (
-        torch.arange(seq_len, device=device).unsqueeze(0)
-        < batch_lengths.unsqueeze(1)
+    enc_src_mask = (
+        torch.arange(enc_seq_len, device=device).unsqueeze(0)
+        < enc_lens.unsqueeze(1)
     )
-    pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-    enc_input = enc_token_embedding(batch_tokens) + enc_pos_embedding(pos_ids)
-    enc_out = encoder(enc_input, src_key_padding_mask=~src_mask)
+    enc_pos_ids = torch.arange(enc_seq_len, device=device).unsqueeze(0)
+    enc_input = enc_token_embedding(enc_toks) + enc_pos_embedding(enc_pos_ids)
+    enc_out = encoder(enc_input, src_key_padding_mask=~enc_src_mask)
 
     # Pool encoder outputs to a single vector
     if _cfg is not None and getattr(_cfg, "encoder_pooling", "mean") == "attention":
@@ -527,15 +551,22 @@ def _vae_forward(
         attn_query = _attn_pool_query  # (1, 1, hidden)
         attn_weights = torch.bmm(
             attn_query.expand(b, -1, -1), enc_out.transpose(1, 2)
-        )  # (b, 1, seq_len)
-        attn_weights = attn_weights.masked_fill(~src_mask.unsqueeze(1), float("-inf"))
+        )  # (b, 1, enc_seq_len)
+        attn_weights = attn_weights.masked_fill(~enc_src_mask.unsqueeze(1), float("-inf"))
         attn_weights = F.softmax(attn_weights, dim=-1)
         pooled = torch.bmm(attn_weights, enc_out).squeeze(1)  # (b, hidden)
     else:
         # Mean pooling (default)
-        enc_masked = enc_out * src_mask.unsqueeze(-1).float()
-        denom = batch_lengths.unsqueeze(-1).float().clamp(min=1)
+        enc_masked = enc_out * enc_src_mask.unsqueeze(-1).float()
+        denom = enc_lens.unsqueeze(-1).float().clamp(min=1)
         pooled = enc_masked.sum(dim=1) / denom
+
+    # Decoder mask (for CE loss — uses decoder sequence lengths)
+    src_mask = (
+        torch.arange(dec_seq_len, device=device).unsqueeze(0)
+        < batch_lengths.unsqueeze(1)
+    )
+    pos_ids = torch.arange(dec_seq_len, device=device).unsqueeze(0)
 
     # Latent
     if _residual_vq is not None:

@@ -129,6 +129,65 @@ class IndexedDatasetWrapper(Dataset):
         return tokens, length, original_idx
 
 
+class ConstituentDataset(Dataset):
+    """Paired (parent sentence, constituent) dataset for phase 2 training.
+
+    Each sample returns encoder tokens (parent sentence) and decoder
+    tokens (constituent).  The encoder sees the full sentence context;
+    the decoder is supervised only on the constituent.
+
+    Args:
+        sentence_token_ids: Token ID lists for all full sentences.
+        constituent_token_ids: Token ID lists for constituents.
+        parent_indices: Maps each constituent to its parent sentence index.
+        max_seq_len: Maximum sequence length (including EOS).
+        eos_id: EOS token ID.
+    """
+
+    def __init__(
+        self,
+        sentence_token_ids: list[list[int]],
+        constituent_token_ids: list[list[int]],
+        parent_indices: list[int],
+        max_seq_len: int,
+        eos_id: int,
+    ) -> None:
+        self.max_seq_len = max_seq_len
+
+        # Pre-process sentences (encoder inputs)
+        self._sentences: list[tuple[Tensor, int]] = []
+        for ids in sentence_token_ids:
+            ids = ids[: max_seq_len - 1]
+            ids_eos = ids + [eos_id]
+            length = len(ids_eos)
+            padded = ids_eos + [0] * (max_seq_len - length)
+            self._sentences.append(
+                (torch.tensor(padded, dtype=torch.long), length)
+            )
+
+        # Pre-process constituents (decoder targets) with parent links
+        self.data: list[tuple[int, Tensor, int]] = []
+        for ids, parent_idx in zip(constituent_token_ids, parent_indices):
+            ids = ids[: max_seq_len - 1]
+            ids_eos = ids + [eos_id]
+            length = len(ids_eos)
+            padded = ids_eos + [0] * (max_seq_len - length)
+            self.data.append((
+                parent_idx,
+                torch.tensor(padded, dtype=torch.long),
+                length,
+            ))
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> tuple[Tensor, int, Tensor, int]:
+        """Return (enc_tokens, enc_length, dec_tokens, dec_length)."""
+        parent_idx, dec_tokens, dec_length = self.data[idx]
+        enc_tokens, enc_length = self._sentences[parent_idx]
+        return enc_tokens, enc_length, dec_tokens, dec_length
+
+
 def dynamic_pad_collate(
     batch: list[tuple[Tensor, int]],
 ) -> tuple[Tensor, Tensor]:

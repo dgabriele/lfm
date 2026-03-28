@@ -97,7 +97,11 @@ class DatasetGenerator:
 
         # 4. IPA conversion
         logger.info("Starting IPA conversion of %d samples...", len(sanitized))
-        processed = self._convert_ipa(sanitized, raw_samples)
+        processed = self._convert_ipa(
+            sanitized, raw_samples,
+            parent_seqs=constituent_parent_seqs,
+            labels=constituent_labels,
+        )
         logger.info("IPA conversion: %d processed samples", len(processed))
 
         # 5. Balance
@@ -320,6 +324,8 @@ class DatasetGenerator:
         self,
         sanitized: list[tuple[RawSample, str]],
         all_raw: list[RawSample],
+        parent_seqs: list[int] | None = None,
+        labels: list[str] | None = None,
     ) -> list[ProcessedSample]:
         """Convert sanitized text to IPA, preserving metadata."""
         from lfm.data.loaders.ipa import convert_corpus_to_ipa_labeled
@@ -340,7 +346,7 @@ class DatasetGenerator:
         cfg = self.config.sanitize
         ipa_idx = 0
 
-        for raw, text in sanitized:
+        for input_idx, (raw, text) in enumerate(sanitized):
             if ipa_idx >= len(ipa_results):
                 break
             ipa_lang, ipa = ipa_results[ipa_idx]
@@ -355,7 +361,7 @@ class DatasetGenerator:
             if len(ipa) > 0 and non_alpha / len(ipa) > cfg.max_ipa_non_alpha_ratio:
                 continue
 
-            processed.append(ProcessedSample(
+            sample = ProcessedSample(
                 seq=len(processed),
                 language=raw.language,
                 source=raw.source,
@@ -363,7 +369,12 @@ class DatasetGenerator:
                 raw=raw.text,
                 ipa=ipa,
                 ipa_length=len(ipa),
-            ))
+            )
+            if parent_seqs is not None:
+                sample["parent_seq"] = parent_seqs[input_idx]
+            if labels is not None:
+                sample["constituent_label"] = labels[input_idx]
+            processed.append(sample)
 
         return processed
 
@@ -443,6 +454,20 @@ class DatasetGenerator:
                     data=[s[field].encode("utf-8") for s in samples],
                     dtype=str_dt,
                     compression="lzf",
+                )
+
+            # Phase 2 constituent fields (written if present in samples)
+            if samples and "parent_seq" in samples[0]:
+                grp.create_dataset(
+                    "parent_seq",
+                    data=[s.get("parent_seq", -1) for s in samples],
+                    dtype="int64", compression="gzip", compression_opts=4,
+                )
+            if samples and "constituent_label" in samples[0]:
+                grp.create_dataset(
+                    "constituent_label",
+                    data=[s.get("constituent_label", "S").encode("utf-8") for s in samples],
+                    dtype=str_dt, compression="lzf",
                 )
 
         logger.info("Wrote %d samples to %s", n, h5_path)

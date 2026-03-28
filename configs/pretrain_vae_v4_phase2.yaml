@@ -1,0 +1,90 @@
+# VAE decoder pretraining config (v4 — Phase 2: constituency fine-tuning)
+#
+# Fine-tune the phase 1 decoder on constituency-augmented data using
+# sentence-context z: the encoder sees the full parent sentence while
+# the decoder is supervised only on the constituent span.
+#
+# Requires: a phase 1 checkpoint + a constituency dataset with parent_seq
+# fields (generated with --extract-constituents after the data pipeline
+# update).
+
+# Phase 1 model to resume from
+dataset_path: data/datasets/leipzig
+corpus_loader: leipzig
+corpus_loader_config:
+  data_dir: data/leipzig
+
+# Phase 2 configuration
+phase2_constituent: true
+phase2_dataset_path: data/datasets/leipzig-constituents
+phase2_mix_ratio: 0.5   # 50% full sentences, 50% constituents
+
+# Tokenizer (must match phase 1)
+spm_vocab_size: 8000
+
+# Architecture (must match phase 1)
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+
+# Linguistic structure
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 96
+encoder_pooling: mean
+
+# KL — disabled
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+
+# Contrastive / KL-beta / phonetic — disabled
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+kl_beta: 0.0
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+
+# VQ — disabled
+use_vq: false
+
+# Training (lower LR for fine-tuning)
+batch_size: 160
+gradient_accumulation_steps: 1
+use_amp: true
+lr: 0.0002
+lr_min: 0.00005
+num_epochs: 20
+
+# Latent regularization
+z_var_weight: 0.0
+z_var_target: 0.05
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 20
+dip_weight: 0.1
+val_fraction: 0.1
+seed: 42
+device: cuda
+output_path: data/models/v4-phase2/vae_decoder.pt
+
+# Topological regularization
+topo_weight: 0.0
+topo_sample_pairs: 32
+
+# Adversarial discriminator
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true
