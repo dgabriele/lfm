@@ -12,63 +12,41 @@ Currently, constituency parsing for variable-length training data is available f
 
 **Approach:** Train compound PCFGs (Kim et al., 2019) on the raw Leipzig text for each unsupported language. These learn constituency structure from distributional patterns alone — no annotations needed. The induced trees reflect each language's actual compositional structure rather than projecting English-centric categories.
 
-**Why it matters:** The tree-structured agent communication requires the decoder to produce variable-length sub-expressions across all 16 languages. Without short-phrase training data for Arabic, Hindi, Russian, etc., the decoder can only produce full sentences in those phonotactic patterns, limiting the tree's expressivity to the 7 parsed languages.
+**Why it matters:** The expression system requires the decoder to produce variable-length sub-expressions across all 16 languages. Without short-phrase training data for Arabic, Hindi, Russian, etc., the decoder can only produce full sentences in those phonotactic patterns, limiting the expression tree's capacity to the 7 parsed languages.
 
 **Alternative:** Dependency subtree extraction (Stanza has dependency parsers for all 16 languages). Headed phrases from dependency trees approximate constituency well enough for training data augmentation.
 
 ---
 
-## 2. Learned tree depth (halt signal)
+## 2. Learned tree depth
 
 **Status:** Infrastructure in place, not yet trained
 
-The `TreeSender` supports learned expand/leaf decisions via sigmoid halt logits, but initial experiments should validate the architecture with `min_depth=1` (forced root expansion) before enabling fully learned depth. The halt decision is a Bernoulli action trained via REINFORCE — high reward when correct with a shallow tree incentivizes the agent to use the minimum structure needed.
+The `ExpressionGenerator` supports learned expand/leaf decisions via sigmoid logits, with `min_depth` forcing expansion at shallow depths. The halt decision is a Bernoulli action trained via REINFORCE — high reward when correct with a shallow tree incentivizes the agent to use the minimum structure needed. Initial experiments should validate with `min_depth=1` before enabling fully learned depth.
 
 ---
 
-## 3. Bottom-up tree generation
+## 3. Cross-leaf context during generation
+
+**Status:** Not yet implemented
+
+In the continuous z-switching decode, each leaf's z is generated independently by the `ExpressionGenerator` before decoding begins. The tree topology is decided top-down, and leaf z vectors are projected from their local hidden context — with no knowledge of what other leaves will produce.
+
+A richer approach: condition later leaf z vectors on earlier leaves' decoded output. After the first leaf is decoded (via the continuous AR pass), its hidden states could feed back into the tree generator to inform subsequent leaf z projections. This would let the agent avoid redundancy ("don't repeat what the first leaf already said") and build coherent multi-constituent expressions.
+
+This is naturally compatible with the continuous z-switching architecture — the KV cache already carries context from earlier leaves. The missing piece is feeding that context back to the z-generation stage.
+
+---
+
+## 4. Multi-agent self-play
 
 **Status:** Not started
 
-Current tree generation is top-down: root context → children. An alternative is bottom-up: generate atomic leaf expressions first, then learn which leaves to compose and in what order. This mirrors how linguistic competence works — you know the words before you know the sentence structure.
-
-Bottom-up would allow the agent to first decide "what to say" (leaf z selection) and then "how to structure it" (composition order), cleanly separating content from syntax.
+The current referential game has one sender and one receiver with fixed roles. Multi-agent self-play would have agents alternate roles, developing shared conventions. Different agents might converge on different expression grammars for the same referential task — different tree topologies, different z-space dialects — and the diversity of emergent grammars is itself an interesting research output.
 
 ---
 
-## 4. Variable branching factor
-
-**Status:** Infrastructure supports it (max_children configurable)
-
-The `TreeSender` currently uses binary branching (expand creates left + right children). Natural language has variable branching — a noun phrase can have 1, 2, or 5 modifiers. Extending to categorical branching (0..K children per node) is a config change, but the REINFORCE credit assignment becomes harder with more structural actions per node.
-
----
-
-## 5. Cross-sibling attention during generation
-
-**Status:** Partially implemented (sibling context in old tree.py, removed in constituency refactor)
-
-Children of the same parent should know about each other to avoid redundancy ("don't repeat what your sibling already said"). Each child's z could be conditioned on the previous siblings' decoded hidden states. This was in the original tree-of-expressions design but removed when switching to constituency-style (leaves only). Should be re-added for the leaf generation step — later leaves conditioned on earlier siblings' content.
-
----
-
-## 6. Multi-agent self-play
-
-**Status:** Not started
-
-The current referential game has one sender and one receiver with fixed roles. Multi-agent self-play would have agents alternate roles, developing shared conventions. The tree communication architecture is well-suited for this — different agents might converge on different tree grammars for the same referential task, and the diversity of emergent grammars is itself an interesting research output.
-
----
-
-## 7. KV cache for tree generation
-
-**Status:** KV cache exists for single-sequence decode, not yet adapted for tree
-
-The `LinguisticDecoder` has KV caching (12x speedup for single-statement decode). For tree generation, each node is decoded independently — the KV cache could be shared across sibling nodes that have the same prefix (they share the parent's context). This would reduce decode cost for deep trees.
-
----
-
-## 8. Decoder fine-tuning on emergent language
+## 5. Decoder fine-tuning on emergent language
 
 **Status:** Not started
 
@@ -76,15 +54,17 @@ After agents converge on a communication protocol, the decoder could be fine-tun
 
 ---
 
-## 9. Translation from emergent tree language
+## 6. Translation from expression trees
 
 **Status:** Translation infrastructure exists for flat IPA→English
 
-The existing `lfm translate` pipeline translates flat IPA sequences to English. Extending it to tree-structured output would require the translator to process multiple leaf expressions plus their compositional structure. A tree-to-sequence model (or simply concatenating leaves with structural delimiters) could feed into the existing LLM translation pipeline.
+The existing `lfm translate` pipeline translates flat IPA sequences to English. With the expression system, the decoder produces one continuous IPA stream with z-switch boundaries derived from the tree structure. The translator could receive this stream as-is (a "run-on" alien sentence) or with tree-derived segmentation markers. Whether markers help or hinder translation quality is an empirical question — the translator may discover the structure from phonotactic cues alone.
+
+Bidirectional translation (English → alien IPA) is also supported by the architecture. The same LLM that learns IPA→English can learn the reverse direction, enabling full human-agent dialogue mediated by the emergent language.
 
 ---
 
-## 10. Emotional tone and subjective state expression
+## 7. Emotional tone and subjective state expression
 
 **Status:** Speculative research direction
 
@@ -100,8 +80,20 @@ The scientifically interesting test: give agents persistent state across communi
 
 ---
 
-## 11. Phonetic feature-aware decoding
+## 8. Phonetic feature-aware decoding
 
 **Status:** Panphon integration built, not yet used in decoding
 
 The phonetic embedding module (`generator/phonetic_embeddings.py`) maps BPE tokens to articulatory feature vectors via panphon. This could be used at decode time to bias the decoder toward phonetically coherent output — e.g., when the decoder is uncertain between two tokens, prefer the one that maintains articulatory continuity with the preceding context (coarticulation).
+
+---
+
+## 9. Non-human acoustic data (whale, bird song)
+
+**Status:** Speculative
+
+Map non-human vocalizations to IPA via acoustic-to-articulatory inversion: click trains → plosives, tonal sweeps → vowel formant transitions, frequency bands → place of articulation. The transcription would be lossy but systematic — the same acoustic features that distinguish /p/ from /t/ in human speech can assign IPA labels to whale click categories.
+
+The decoder, trained on human + whale IPA, would learn "whale phonotactics" alongside human phonotactics. The expression system could then generate whale-like segments when encoding marine biology data.
+
+**Risk:** Mixing radically different phonotactic systems may degrade human language quality. Safer approach: train on human languages first, then test whether the frozen decoder can decode whale-mapped IPA at all. If it produces valid output, the mapping is compatible enough to include in training. If not, the decoder rejects it — which is useful diagnostic information about the mapping quality.

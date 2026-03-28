@@ -1,8 +1,7 @@
 # VAE decoder pretraining config (v4 — Phase 1: full sentences only)
 #
 # Phase 1: Train on full sentences (~600K samples) to learn language
-# structure and z-conditioning. v1-proven latent_dim=256 with upgraded
-# 3-layer encoder.
+# structure and z-conditioning. v1-proven latent_dim=256, 2-layer encoder.
 #
 # Phase 2 (later): Fine-tune on constituency-augmented data to learn
 # variable-length output.
@@ -24,7 +23,7 @@ decoder_num_heads: 8
 decoder_dropout: 0.1
 
 # Linguistic structure
-attention_head_windows: [3, 7, 15, 15, 0, 0, 0, 0]
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
 attention_global_every: 7
 use_rope: true
 share_decoder_layers: true
