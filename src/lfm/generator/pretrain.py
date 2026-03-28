@@ -1347,6 +1347,7 @@ class VAEPretrainer:
             _const_iter = (
                 iter(constituent_loader) if constituent_loader is not None else None
             )
+            _mix_rng = random.Random(cfg.seed + epoch)
 
             for i, batch_data in enumerate(train_loader):
                 # Decide whether this batch is a constituent batch
@@ -1356,7 +1357,7 @@ class VAEPretrainer:
 
                 if (
                     _const_iter is not None
-                    and random.random() >= cfg.constituent_mix_ratio
+                    and _mix_rng.random() >= cfg.constituent_mix_ratio
                 ):
                     try:
                         const_batch = next(_const_iter)
