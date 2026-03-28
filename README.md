@@ -24,7 +24,7 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 
 ---
 
-## 🌐 Vision
+## Vision
 
 Neural systems — agents, encoders, scientific models — produce continuous representations that capture structure no human formalism was designed to express. A protein encoder's embedding of a novel fold, an RL agent's observation of a dynamical system, a GNN's representation of a molecular graph — these are empirically grounded, information-rich, and completely opaque.
 
@@ -34,7 +34,7 @@ The key mechanism is a **frozen linguistic bottleneck**: a VAE decoder pretraine
 
 The pipeline is concrete: an input embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for a receiver to identify what was encoded (95% accuracy, 15x above chance in a referential game). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
 
-## 🔬 The Problem
+## The Problem
 
 Any system that needs to express continuous representations as structured, interpretable sequences faces a choice:
 
@@ -60,7 +60,7 @@ Because the LLM learns the emergent language as a language — not as an encodin
 
 Translation is inherently lossy — but language compensates for that. Unlike a fixed-size code, language can expound: use more words, more phrases, more compositional structure to progressively encapsulate meaning that a single utterance would lose. This is exactly what LFM's expression system exploits. The tree-structured output grows as needed — more leaves, deeper branching — to elaborate on complex inputs, trading efficiency for fidelity the same way natural language does.
 
-## ⚙️ How It Works
+## How It Works
 
 LFM uses a **generative linguistic bottleneck**: a pretrained VAE decoder that produces linguistically structured IPA output from a latent space.
 
@@ -102,7 +102,7 @@ Only the expression generator and encoder learn. The decoder's linguistic struct
 
 Expression complexity scales with input complexity. The tree can grow deeper and wider — more leaves, more segments — to elaborate on complex inputs. Short, simple inputs produce shallow trees with brief output. This is the same mechanism natural language uses: say more when there's more to say.
 
-## 🗣️ The Linguistic Decoder
+## The Linguistic Decoder
 
 The core of LFM is a **pretrained multilingual VAE decoder** that produces linguistically structured IPA from a latent vector. After pretraining, it is frozen and becomes a fixed linguistic bottleneck for downstream use.
 
@@ -165,7 +165,7 @@ dec:  pɔɪnts wi hæv ɔlɹɛdi hɛlpt vɛɹi kwaɪʌtli ɑn ðʌ dil sɛd dʊ�
 
 The progression shows the decoder learning in stages: phonotactics first (valid sounds), then vocabulary (correct words), then composition (correct order). Token accuracy at each stage: ~20% → ~60% → ~78% → ~85%. The remaining errors at convergence are mostly word order — the bottleneck preserves *what* was said more faithfully than *how* it was sequenced.
 
-## 🌳 Expression Generation
+## Expression Generation
 
 LFM includes a learnable **expression system** for tree-structured communication through the linguistic bottleneck. Instead of mapping one embedding to one flat utterance, an agent produces a binary constituency tree where the topology is learned and each leaf carries a latent z vector. The leaves are decoded as **one continuous autoregressive sequence** with z-switching at segment boundaries — the KV cache persists across transitions, producing phonotactically coherent output with natural coarticulation.
 
@@ -256,7 +256,7 @@ src/lfm/
   visualize/            # Visualization suite (t-SNE, clustering, attention, etc.)
 ```
 
-## 📊 Structural Analysis
+## Structural Analysis
 
 Detailed visualization evidence for the model's structural properties — latent space organization, attention hierarchy, Zipf's law, smoothness, adaptive length, compositionality, cross-typological interpolation, and per-dimension latent sweeps — is presented in **[docs/structural-analysis.md](docs/structural-analysis.md)**, generated via the `lfm visualize all` and `lfm explore dim-sweep` CLI commands.
 
@@ -267,7 +267,7 @@ Key findings:
 - **Functional compositionality**: specific z dimensions control specific output properties (z[56] → length at r=-0.90)
 - **Multi-scale attention**: architectural hierarchy confirmed in per-head entropy analysis
 
-## 🎯 Agent Game Results
+## Agent Game Results
 
 REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives that ramp from random distractors to within-cluster (semantically similar) distractors over training:
 
@@ -335,7 +335,7 @@ After training with curriculum hard negatives (16-way, 100% within-cluster distr
 
 All metrics are highly significant. Similar inputs produce similar messages (topology preservation), and the message hidden states encode recoverable information about the input (diagnostic probe). The hidden-state topsim of 0.335 confirms that the frozen decoder's latent space preserves compositional structure under the learned mapping.
 
-## 💾 Dataset Generation
+## Dataset Generation
 
 LFM includes a standalone dataset generation pipeline that preprocesses raw corpus text into reusable HDF5 datasets. This decouples preprocessing from pretraining — generate once, reuse across experiments.
 
@@ -386,7 +386,7 @@ Configurable via `--sanitize-*` CLI flags. Key options:
 
 See **[docs/data-guide.md](docs/data-guide.md)** for the full HDF5 schema and configuration reference.
 
-## 📈 Visualization CLI
+## Visualization CLI
 
 LFM includes a CLI visualization suite for generating publication-quality diagnostic plots from a trained VAE checkpoint. All plots in the Structural Analysis section above were generated with this tool.
 
@@ -423,7 +423,7 @@ lfm visualize all --checkpoint data/vae_resume.pt --output-dir output/viz
 # Options: --format png|svg|pdf, --dpi 150, --device cuda, --max-samples 50000
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 poetry install --with generator,viz,datasets
@@ -506,7 +506,7 @@ outputs = faculty(agent_embedding)  # (batch, dim)
 # outputs["generator.mask"] -- variable-length mask
 ```
 
-## 🧬 Design and Rationale
+## Design and Rationale
 
 ### Why IPA, not orthographic LM output?
 
@@ -534,7 +534,7 @@ A pretrained LM has morphological knowledge handed to it as tokenizer artifacts 
 - **Resume support** — full training state saved per epoch
 - **CLI architecture** — `lfm` entry point with subcommand dispatch via argparse
 
-## 📋 Status
+## Status
 
 **PoC pretraining validated.** The VAE decoder learns a well-structured latent space over 16 typologically diverse languages, with structural claims backed by visualization evidence:
 
@@ -586,7 +586,7 @@ lfm publish dataset --repo-id username/lfm-ipa-16lang --model-dir data/models/v1
 
 Each upload generates a YAML manifest in `releases/huggingface/` recording the arguments, timestamp, HuggingFace URL, and files uploaded. Model cards and dataset cards are auto-generated from checkpoint metadata and corpus statistics.
 
-## 📖 Further Reading
+## Further Reading
 
 - **[Translation Guide](docs/translation-guide.md)** — Self-supervised IPA -> English translation: generate pairs, train, evaluate, and visualize the interpretability pipeline.
 - **[LFM vs LQM+LLM](docs/lfm-vs-lqm.md)** — How LFM's translation-based architecture compares to Large Quantitative Model + LLM pipelines for scientific discovery, and why the distinction between alignment and translation matters for finding genuinely novel structure in dynamical systems.
