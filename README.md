@@ -56,6 +56,8 @@ Because the output is in IPA — a universal phonetic representation — it is d
 
 Crucially, this is translation, not latent space alignment. The source ontology stays intact; the LLM does the interpretive work.
 
+Because the LLM learns the emergent language as a language — not as an encoding to decode — the translation is **bidirectional**. The same LLM that translates alien IPA → English can learn English → alien IPA. This closes a full communication loop: the system speaks, a human reads the translation, responds in English, the LLM translates the response back into the emergent language, and the system receives it. Bidirectional human-system dialogue mediated by a shared alien language, with the LLM as interpreter.
+
 Translation is inherently lossy — but language compensates for that. Unlike a fixed-size code, language can expound: use more words, more phrases, more compositional structure to progressively encapsulate meaning that a single utterance would lose. This is exactly what LFM's expression system exploits. The tree-structured output grows as needed — more leaves, deeper branching — to elaborate on complex inputs, trading efficiency for fidelity the same way natural language does.
 
 ## How It Works
