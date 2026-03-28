@@ -27,6 +27,7 @@ from __future__ import annotations
 import atexit
 import logging
 import signal
+import random
 from pathlib import Path
 from typing import Any
 
@@ -227,14 +228,13 @@ class VAEPretrainConfig(LFMBaseConfig):
     vq_ema_update: bool = True
     vq_decay: float = 0.99
 
-    # Phase 2: sentence-context constituent training.
-    # When enabled, the encoder sees the full parent sentence while the
-    # decoder is supervised only on the constituent span.  Requires a
-    # constituency dataset with parent_seq fields (generated with
-    # --extract-constituents).
-    phase2_constituent: bool = False
-    phase2_dataset_path: str = ""        # Path to constituency HDF5
-    phase2_mix_ratio: float = 0.5        # Fraction of full sentences to mix in
+    # Constituent context training: the encoder sees the full parent
+    # sentence while the decoder is supervised only on the constituent
+    # span.  Requires a constituency dataset with parent_seq fields
+    # (generated with --extract-constituents).
+    constituent_context: bool = False
+    constituent_dataset_path: str = ""   # Path to constituency HDF5
+    constituent_mix_ratio: float = 0.5   # Fraction of full sentences to mix in
 
 
 # ---------------------------------------------------------------------------
@@ -998,7 +998,10 @@ class VAEPretrainer:
                 corpus_embeddings.shape, corpus_embeddings.nbytes / 1e6,
             )
 
-        # Wrap dataset to return indices when contrastive is active
+        # Build train/val DataLoaders
+        _use_constituent_context = cfg.constituent_context
+        constituent_loader = None
+
         if _use_contrastive:
             from lfm.data.corpus import IndexedDatasetWrapper
 
@@ -1016,6 +1019,43 @@ class VAEPretrainer:
                 shuffle=True,
                 drop_last=True,
             )
+
+        if _use_constituent_context:
+            from lfm.data.corpus import ConstituentDataset
+            from lfm.data.dataset.reader import DatasetReader
+
+            const_reader = DatasetReader(cfg.constituent_dataset_path)
+            if not const_reader.has_constituents():
+                raise ValueError(
+                    f"Dataset at {cfg.constituent_dataset_path} lacks "
+                    f"parent_seq fields. Regenerate with --extract-constituents."
+                )
+            sentences, constituents = const_reader.load_constituent_tuples()
+
+            # Tokenize sentences and constituents with the same SPM
+            sent_token_ids = [sp.encode(ipa) for _, ipa in sentences]
+            const_token_ids = [sp.encode(ipa) for _, ipa, _, _ in constituents]
+            const_parent_indices = [parent_idx for _, _, parent_idx, _ in constituents]
+
+            constituent_dataset = ConstituentDataset(
+                sentence_token_ids=sent_token_ids,
+                constituent_token_ids=const_token_ids,
+                parent_indices=const_parent_indices,
+                max_seq_len=cfg.max_seq_len,
+                eos_id=eos_id,
+            )
+            constituent_loader = DataLoader(
+                constituent_dataset,
+                batch_size=cfg.batch_size,
+                shuffle=True,
+                drop_last=True,
+            )
+            logger.info(
+                "Constituent context: %d sentences, %d constituents, "
+                "mix_ratio=%.1f",
+                len(sentences), len(constituents), cfg.constituent_mix_ratio,
+            )
+
         val_loader = DataLoader(
             val_dataset,
             batch_size=cfg.batch_size,
@@ -1302,14 +1342,42 @@ class VAEPretrainer:
             epoch_start = time.time()
             batch_start = time.time()
 
+            # Constituent context: interleave constituent batches with
+            # regular sentence batches according to mix_ratio.
+            _const_iter = (
+                iter(constituent_loader) if constituent_loader is not None else None
+            )
+
             for i, batch_data in enumerate(train_loader):
-                if _use_contrastive:
+                # Decide whether this batch is a constituent batch
+                _is_constituent_batch = False
+                enc_tokens_override = None
+                enc_lengths_override = None
+
+                if (
+                    _const_iter is not None
+                    and random.random() >= cfg.constituent_mix_ratio
+                ):
+                    try:
+                        const_batch = next(_const_iter)
+                    except StopIteration:
+                        _const_iter = iter(constituent_loader)
+                        const_batch = next(_const_iter)
+                    enc_tokens_override = const_batch[0].to(device)
+                    enc_lengths_override = torch.as_tensor(const_batch[1], device=device)
+                    batch_tokens = const_batch[2].to(device)
+                    batch_lengths = torch.as_tensor(const_batch[3], device=device)
+                    batch_indices = None
+                    _is_constituent_batch = True
+                elif _use_contrastive:
                     batch_tokens, batch_lengths, batch_indices = batch_data
                 else:
                     batch_tokens, batch_lengths = batch_data
                     batch_indices = None
-                batch_tokens = batch_tokens.to(device)
-                batch_lengths = torch.as_tensor(batch_lengths, device=device)
+
+                if not _is_constituent_batch:
+                    batch_tokens = batch_tokens.to(device)
+                    batch_lengths = torch.as_tensor(batch_lengths, device=device)
                 b = batch_tokens.size(0)
 
                 with torch.amp.autocast(
@@ -1330,6 +1398,8 @@ class VAEPretrainer:
                             _word_dropout_p=wd_p,
                             _phonetic_sim=phonetic_sim_matrix,
                             _phonetic_smoothing=cfg.phonetic_label_smoothing,
+                            encoder_tokens=enc_tokens_override,
+                            encoder_lengths=enc_lengths_override,
                             **modules,
                         )
                     )

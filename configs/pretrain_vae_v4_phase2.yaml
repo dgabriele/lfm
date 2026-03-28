@@ -14,10 +14,10 @@ corpus_loader: leipzig
 corpus_loader_config:
   data_dir: data/leipzig
 
-# Phase 2 configuration
-phase2_constituent: true
-phase2_dataset_path: data/datasets/leipzig-constituents
-phase2_mix_ratio: 0.5   # 50% full sentences, 50% constituents
+# Constituent context training
+constituent_context: true
+constituent_dataset_path: data/datasets/leipzig-constituents
+constituent_mix_ratio: 0.5   # 50% full sentences, 50% constituents
 
 # Tokenizer (must match phase 1)
 spm_vocab_size: 8000
