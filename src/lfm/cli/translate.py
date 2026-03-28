@@ -270,6 +270,74 @@ class EvalCommand(CLICommand):
         return 0
 
 
+class EvalPhonologyCommand(CLICommand):
+    """Run phonology benchmark on the trained translator."""
+
+    @property
+    def name(self) -> str:
+        return "eval-phonology"
+
+    @property
+    def help(self) -> str:
+        return "Evaluate translator's phonological competence in the emergent language"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Run PhonologyBench-inspired tasks: syllable counting, rhyme "
+            "detection, and minimal pair discrimination on the emergent "
+            "language. Tests whether the translator LLM has acquired "
+            "genuine phonological understanding."
+        )
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--model-dir",
+            default="data/models/v1/translator",
+            help="Translator model directory",
+        )
+        parser.add_argument(
+            "--decoder-path",
+            default="data/models/v1/vae_decoder.pt",
+            help="Path to frozen decoder checkpoint",
+        )
+        parser.add_argument(
+            "--spm-path",
+            default="data/models/v1/spm.model",
+            help="Path to sentencepiece model",
+        )
+        parser.add_argument(
+            "--num-samples", type=int, default=200,
+            help="Samples per task (default: 200)",
+        )
+        parser.add_argument(
+            "--device", default="cuda",
+            help="Device for inference",
+        )
+        parser.add_argument(
+            "--output",
+            default=None,
+            help="Save results JSON to this path (default: model-dir/phonology_bench.json)",
+        )
+
+    def execute(self, args: argparse.Namespace) -> int:
+        from lfm.translator.phonology_bench import PhonologyBench
+
+        bench = PhonologyBench(
+            translator_model_dir=args.model_dir,
+            faculty_decoder_path=args.decoder_path,
+            spm_path=args.spm_path,
+            num_samples=args.num_samples,
+            device=args.device,
+        )
+        results = bench.run_all()
+        bench.print_report(results)
+
+        output = args.output or str(Path(args.model_dir) / "phonology_bench.json")
+        bench.save_results(results, output)
+        return 0
+
+
 def register_translate_group(
     parent_subparsers: argparse._SubParsersAction,
 ) -> None:
@@ -289,6 +357,7 @@ def register_translate_group(
         GeneratePairsCommand(),
         TrainCommand(),
         EvalCommand(),
+        EvalPhonologyCommand(),
     ]
 
     for cmd in commands:
