@@ -488,89 +488,18 @@ class MultilingualVAEGenerator(GeneratorModule):
                 device=device,
             )
 
-        use_cache = isinstance(self.decoder, LinguisticDecoder)
-
         bos_ids = torch.full((batch, 1), self.bos_id, dtype=torch.long, device=device)
         bos_embed = self.token_embedding(bos_ids)
 
-        all_probs: list[Tensor] = []
-        all_states: list[Tensor] = []
-
+        use_cache = isinstance(self.decoder, LinguisticDecoder)
         if use_cache:
-            kv_cache = self.decoder.make_kv_cache(
-                batch, max_len + 1, device, dtype=memory.dtype,
+            all_probs, all_states = self._decode_cached(
+                memory, bos_embed, max_len, batch, device,
             )
-
-            # Prime cache with BOS
-            mask_row = self._full_causal_mask[:, 0:1, 0:1]
-            out = self.decoder.forward_cached(
-                bos_embed, memory, kv_cache,
-                rope_freqs=self._rope_freqs, tgt_mask_row=mask_row,
-            )
-            kv_cache.advance()
-
-            for t in range(max_len):
-                last_hidden = out  # (B, 1, hdim)
-                logits_t = self.output_head(last_hidden).squeeze(1)
-
-                all_states.append(last_hidden)
-
-                eos_boost = 2.0 * (t / max(max_len - 1, 1))
-                logits_t[:, self.eos_id] += eos_boost
-
-                probs_t = gumbel_softmax(
-                    logits_t,
-                    tau=self._current_temperature,
-                    hard=self._hard_sample,
-                )
-                all_probs.append(probs_t.unsqueeze(1))
-
-                next_embed = (probs_t @ self.token_embedding.weight).unsqueeze(1)
-                seq_so_far = kv_cache.seq_len + 1
-                mask_row = self._full_causal_mask[
-                    :, kv_cache.seq_len : kv_cache.seq_len + 1, :seq_so_far
-                ]
-                out = self.decoder.forward_cached(
-                    next_embed, memory, kv_cache,
-                    rope_freqs=self._rope_freqs, tgt_mask_row=mask_row,
-                )
-                kv_cache.advance()
         else:
-            # Fallback: no KV cache
-            generated_embeds = bos_embed
-
-            for t in range(max_len):
-                seq_len = generated_embeds.size(1)
-                decoder_input = generated_embeds
-                if not isinstance(self.pos_embedding, nn.Identity):
-                    pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
-                    decoder_input = decoder_input + self.pos_embedding(pos_ids)
-
-                tgt_mask = self._full_causal_mask[:, :seq_len, :seq_len]
-                decoder_out = self.decoder(
-                    decoder_input, memory,
-                    tgt_mask=tgt_mask, rope_freqs=self._rope_freqs,
-                )
-
-                last_hidden = decoder_out[:, -1:, :]
-                logits_t = self.output_head(last_hidden).squeeze(1)
-
-                all_states.append(last_hidden)
-
-                eos_boost = 2.0 * (t / max(max_len - 1, 1))
-                logits_t[:, self.eos_id] += eos_boost
-
-                probs_t = gumbel_softmax(
-                    logits_t,
-                    tau=self._current_temperature,
-                    hard=self._hard_sample,
-                )
-                all_probs.append(probs_t.unsqueeze(1))
-
-                next_embed = probs_t @ self.token_embedding.weight
-                generated_embeds = torch.cat(
-                    [generated_embeds, next_embed.unsqueeze(1)], dim=1
-                )
+            all_probs, all_states = self._decode_uncached(
+                memory, bos_embed, max_len, device,
+            )
 
         token_probs = torch.cat(all_probs, dim=1)
         token_ids = token_probs.argmax(dim=-1)
@@ -588,6 +517,104 @@ class MultilingualVAEGenerator(GeneratorModule):
         output_mask = create_padding_mask(lengths, max_len)
 
         return token_ids, token_probs, decoder_states, lengths, output_mask
+
+    def _decode_cached(
+        self,
+        memory: Tensor,
+        bos_embed: Tensor,
+        max_len: int,
+        batch: int,
+        device: torch.device,
+    ) -> tuple[list[Tensor], list[Tensor]]:
+        """Incremental autoregressive decode with KV cache."""
+        all_probs: list[Tensor] = []
+        all_states: list[Tensor] = []
+
+        kv_cache = self.decoder.make_kv_cache(
+            batch, max_len + 1, device, dtype=memory.dtype,
+        )
+
+        # Prime cache with BOS
+        mask_row = self._full_causal_mask[:, 0:1, 0:1]
+        out = self.decoder.forward_cached(
+            bos_embed, memory, kv_cache,
+            rope_freqs=self._rope_freqs, tgt_mask_row=mask_row,
+        )
+        kv_cache.advance()
+
+        for t in range(max_len):
+            last_hidden = out
+            logits_t = self.output_head(last_hidden).squeeze(1)
+            all_states.append(last_hidden)
+
+            eos_boost = 2.0 * (t / max(max_len - 1, 1))
+            logits_t[:, self.eos_id] += eos_boost
+
+            probs_t = gumbel_softmax(
+                logits_t,
+                tau=self._current_temperature,
+                hard=self._hard_sample,
+            )
+            all_probs.append(probs_t.unsqueeze(1))
+
+            next_embed = (probs_t @ self.token_embedding.weight).unsqueeze(1)
+            seq_so_far = kv_cache.seq_len + 1
+            mask_row = self._full_causal_mask[
+                :, kv_cache.seq_len : kv_cache.seq_len + 1, :seq_so_far
+            ]
+            out = self.decoder.forward_cached(
+                next_embed, memory, kv_cache,
+                rope_freqs=self._rope_freqs, tgt_mask_row=mask_row,
+            )
+            kv_cache.advance()
+
+        return all_probs, all_states
+
+    def _decode_uncached(
+        self,
+        memory: Tensor,
+        bos_embed: Tensor,
+        max_len: int,
+        device: torch.device,
+    ) -> tuple[list[Tensor], list[Tensor]]:
+        """Full-context autoregressive decode without KV cache (fallback)."""
+        all_probs: list[Tensor] = []
+        all_states: list[Tensor] = []
+        generated_embeds = bos_embed
+
+        for t in range(max_len):
+            seq_len = generated_embeds.size(1)
+            decoder_input = generated_embeds
+            if not isinstance(self.pos_embedding, nn.Identity):
+                pos_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+                decoder_input = decoder_input + self.pos_embedding(pos_ids)
+
+            tgt_mask = self._full_causal_mask[:, :seq_len, :seq_len]
+            decoder_out = self.decoder(
+                decoder_input, memory,
+                tgt_mask=tgt_mask, rope_freqs=self._rope_freqs,
+            )
+
+            last_hidden = decoder_out[:, -1:, :]
+            logits_t = self.output_head(last_hidden).squeeze(1)
+            all_states.append(last_hidden)
+
+            eos_boost = 2.0 * (t / max(max_len - 1, 1))
+            logits_t[:, self.eos_id] += eos_boost
+
+            probs_t = gumbel_softmax(
+                logits_t,
+                tau=self._current_temperature,
+                hard=self._hard_sample,
+            )
+            all_probs.append(probs_t.unsqueeze(1))
+
+            next_embed = probs_t @ self.token_embedding.weight
+            generated_embeds = torch.cat(
+                [generated_embeds, next_embed.unsqueeze(1)], dim=1,
+            )
+
+        return all_probs, all_states
 
     # ------------------------------------------------------------------
     # Forward
