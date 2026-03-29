@@ -318,17 +318,23 @@ def run_epoch_diagnostics(
         logger.info("  interp[%.2f]: %s", a, txt[:120])
 
     # --- 3. Perturbation (around English sentence) ---
-    noise_scales = [0.0, 0.1, 0.5, 1.0]
-    z_perturbed = torch.stack(
-        [z_real[0] + s * z_running_std * torch.randn_like(z_real[0])
-         for s in noise_scales]
-    )
+    # Use wider sigma range (0-2) to show meaningful variation
+    # as z_std compresses during training.
+    noise_scales = [0.0, 0.5, 1.0, 2.0]
+    # Generate noise with distinct seeds per scale to guarantee diversity
+    perturb_noise = []
+    for si, s in enumerate(noise_scales):
+        gen = torch.Generator(device=device)
+        gen.manual_seed(cfg.seed + epoch * 100 + si)
+        noise = torch.randn(cfg.latent_dim, device=device, generator=gen)
+        perturb_noise.append(z_real[0] + s * z_running_std * noise)
+    z_perturbed = torch.stack(perturb_noise)
     if cfg.use_vq and modules.get("_residual_vq") is not None:
         z_perturbed, _, _ = modules["_residual_vq"](z_perturbed)
     perturb_texts = sample_decode(z_perturbed, **_decode_kw)
     logger.info("  perturb: around %s sentence", _lang_labels[0])
     for k, (s, txt) in enumerate(zip(noise_scales, perturb_texts)):
-        logger.info("  perturb[sigma=%.1f]: %s", s, txt[:120])
+        logger.info("  perturb[σ=%.1f]: %s", s, txt[:120])
 
     # --- 4. Random z near English cluster ---
     # Sample from the encoder distribution, then also sample
@@ -337,10 +343,14 @@ def run_epoch_diagnostics(
         torch.randn(3, cfg.latent_dim, device=device)
         * z_running_std + z_running_mean
     )
-    # 2 more near the English z (small perturbation)
+    # 2 more near the English z — use distinct seeds to guarantee different output
+    gen_a = torch.Generator(device=device)
+    gen_a.manual_seed(cfg.seed + epoch * 100 + 10)
+    gen_b = torch.Generator(device=device)
+    gen_b.manual_seed(cfg.seed + epoch * 100 + 11)
     z_near_eng = torch.stack([
-        z_real[0] + 0.3 * z_running_std * torch.randn_like(z_real[0]),
-        z_real[0] + 0.3 * z_running_std * torch.randn_like(z_real[0]),
+        z_real[0] + 0.5 * z_running_std * torch.randn(cfg.latent_dim, device=device, generator=gen_a),
+        z_real[0] + 0.5 * z_running_std * torch.randn(cfg.latent_dim, device=device, generator=gen_b),
     ])
     z_all_random = torch.cat([z_random, z_near_eng], dim=0)
     if cfg.use_vq and modules.get("_residual_vq") is not None:
