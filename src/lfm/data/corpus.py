@@ -13,39 +13,28 @@ from torch.utils.data import Dataset
 from lfm.data.config import DataConfig
 
 
-class CorpusDataset(Dataset[dict[str, Tensor]]):
-    """Dataset wrapping a text corpus for structural prior learning.
+class TextCorpusDataset(Dataset[tuple[Tensor, int, str, int]]):
+    """Pre-tokenized text with metadata for collation.
 
-    Loads and tokenizes text data from one or more corpus files, producing
-    fixed-length sequences suitable for training the LFM pipeline.
-
-    Args:
-        config: Data configuration specifying corpus paths, sequence length,
-            and preprocessing parameters.
+    Can hold both raw text lines (for language detection, etc.) and
+    pre-tokenized integer sequences.
     """
 
-    def __init__(self, config: DataConfig) -> None:
+    def __init__(
+        self, corpus: list[tuple[str, str]], config: DataConfig
+    ) -> None:
         self.config = config
-        self.corpus_paths = config.corpus_paths
-        self.max_seq_len = config.max_seq_len
-
-        # Placeholder for loaded data — populated by a future load() call
-        self._data: list[dict[str, Tensor]] = []
+        self.data = corpus
 
     def __len__(self) -> int:
-        """Return the number of samples in the dataset."""
-        return len(self._data)
+        return len(self.data)
 
-    def __getitem__(self, index: int) -> dict[str, Tensor]:
-        """Return a single sample by index.
+    def __getitem__(self, idx: int) -> tuple[str, str]:
+        return self.data[idx]
 
-        Args:
-            index: Sample index.
 
-        Returns:
-            Dictionary with tokenized sequence tensors.
-        """
-        return self._data[index]
+# Backward-compat alias
+CorpusDataset = TextCorpusDataset
 
 
 class MultilingualCorpusDataset(Dataset[tuple[Tensor, int]]):
@@ -188,6 +177,83 @@ class ConstituentDataset(Dataset):
         return enc_tokens, enc_length, dec_tokens, dec_length
 
 
+class InterleavedLoader:
+    """Interleave batches from sentence and constituent DataLoaders.
+
+    Ensures full coverage of both datasets per cycle. The epoch length
+    is determined by the larger dataset. The smaller dataset repeats
+    as needed to maintain the target mix ratio.
+
+    Each batch is either a sentence batch (2-tuple) or a constituent
+    batch (4-tuple), tagged with a boolean flag.
+
+    Args:
+        sentence_loader: DataLoader for full sentences.
+        constituent_loader: DataLoader for (parent, constituent) pairs.
+        mix_ratio: Fraction of batches that are full sentences (0-1).
+            0.5 = equal mix. 0.7 = 70% sentences, 30% constituents.
+        seed: Random seed for reproducible interleaving.
+    """
+
+    def __init__(
+        self,
+        sentence_loader: torch.utils.data.DataLoader,
+        constituent_loader: torch.utils.data.DataLoader,
+        mix_ratio: float = 0.5,
+        seed: int = 42,
+    ) -> None:
+        self.sentence_loader = sentence_loader
+        self.constituent_loader = constituent_loader
+        self.mix_ratio = mix_ratio
+        self.seed = seed
+
+        # Total batches per epoch = enough to cover the larger dataset
+        n_sent = len(sentence_loader)
+        n_const = len(constituent_loader)
+        # At mix_ratio, we need n_sent/ratio sentence batches and
+        # n_const/(1-ratio) constituent batches. Take the max.
+        self._total_batches = max(
+            int(n_sent / max(mix_ratio, 0.01)),
+            int(n_const / max(1 - mix_ratio, 0.01)),
+        )
+        self._epoch = 0
+
+    def __len__(self) -> int:
+        return self._total_batches
+
+    def __iter__(self):
+        """Yield (is_constituent, batch_data) tuples.
+
+        is_constituent=False: batch_data is (tokens, lengths)
+        is_constituent=True: batch_data is (enc_tokens, enc_lengths, dec_tokens, dec_lengths)
+        """
+        import random
+
+        rng = random.Random(self.seed + self._epoch)
+        self._epoch += 1
+
+        sent_iter = iter(self.sentence_loader)
+        const_iter = iter(self.constituent_loader)
+
+        for i in range(self._total_batches):
+            use_sentence = rng.random() < self.mix_ratio
+
+            if use_sentence:
+                try:
+                    batch = next(sent_iter)
+                except StopIteration:
+                    sent_iter = iter(self.sentence_loader)
+                    batch = next(sent_iter)
+                yield False, batch
+            else:
+                try:
+                    batch = next(const_iter)
+                except StopIteration:
+                    const_iter = iter(self.constituent_loader)
+                    batch = next(const_iter)
+                yield True, batch
+
+
 def dynamic_pad_collate(
     batch: list[tuple[Tensor, int]],
 ) -> tuple[Tensor, Tensor]:
@@ -234,124 +300,26 @@ class LengthSortedSampler(torch.utils.data.Sampler):
         bucket_multiplier: int = 10,
         seed: int = 42,
     ) -> None:
-        self._lengths = lengths
-        self._batch_size = batch_size
-        self._bucket_size = batch_size * bucket_multiplier
-        self._seed = seed
+        self.lengths = lengths
+        self.batch_size = batch_size
+        self.bucket_size = batch_size * bucket_multiplier
+        self.seed = seed
         self._epoch = 0
-
-    def set_epoch(self, epoch: int) -> None:
-        """Set epoch for reproducible cross-epoch shuffling."""
-        self._epoch = epoch
 
     def __iter__(self):
         import random
 
-        rng = random.Random(self._seed + self._epoch)
+        rng = random.Random(self.seed + self._epoch)
+        self._epoch += 1
 
         # Sort indices by length
-        sorted_indices = sorted(
-            range(len(self._lengths)), key=lambda i: self._lengths[i]
-        )
+        indices = sorted(range(len(self.lengths)), key=lambda i: self.lengths[i])
 
-        # Chunk into buckets and shuffle within each bucket
-        batches = []
-        for start in range(0, len(sorted_indices), self._bucket_size):
-            bucket = sorted_indices[start : start + self._bucket_size]
+        # Chunk into buckets, shuffle within each bucket
+        for start in range(0, len(indices), self.bucket_size):
+            bucket = indices[start : start + self.bucket_size]
             rng.shuffle(bucket)
-            # Split bucket into batch-sized chunks
-            for b_start in range(0, len(bucket), self._batch_size):
-                batches.append(bucket[b_start : b_start + self._batch_size])
-
-        # Shuffle batch order
-        rng.shuffle(batches)
-
-        for batch in batches:
-            yield from batch
+            yield from bucket
 
     def __len__(self) -> int:
-        return len(self._lengths)
-
-
-class PackedCorpusDataset(Dataset[tuple[Tensor, int]]):
-    """Packed multi-sentence sequences with EOS delimiters.
-
-    Concatenates multiple sentences into each training sequence, separated
-    by EOS tokens, so the decoder learns to emit EOS as a natural sentence
-    boundary — not just at the very end of a sequence.
-
-    Each packed sequence looks like::
-
-        [sent1_tok1, ..., sent1_tokN, EOS, sent2_tok1, ..., sent2_tokM, EOS, PAD, ...]
-
-    This ensures every training sample contains at least one EOS at a
-    non-final position, teaching the decoder that EOS is a regular part
-    of the token distribution.
-
-    Args:
-        token_ids: List of integer token id lists, one per sentence.
-        max_seq_len: Maximum packed sequence length.
-        eos_id: EOS token index used as sentence delimiter.
-        seed: Random seed for reproducible packing order.
-    """
-
-    def __init__(
-        self,
-        token_ids: list[list[int]],
-        max_seq_len: int,
-        eos_id: int,
-        languages: list[str] | None = None,
-        seed: int = 42,
-    ) -> None:
-        import random
-        from collections import defaultdict
-
-        self.eos_id = eos_id
-        self.max_seq_len = max_seq_len
-        self.data: list[tuple[Tensor, int]] = []
-        rng = random.Random(seed)
-
-        # Group sentences by language for same-language packing
-        if languages is not None:
-            by_lang: dict[str, list[list[int]]] = defaultdict(list)
-            for ids, lang in zip(token_ids, languages):
-                by_lang[lang].append(ids)
-            groups = list(by_lang.values())
-        else:
-            groups = [token_ids]
-
-        # Shuffle within each language, then greedily pack
-        for sentences in groups:
-            rng.shuffle(sentences)
-            i = 0
-            while i < len(sentences):
-                packed: list[int] = []
-                while i < len(sentences):
-                    ids = sentences[i]
-                    needed = len(ids) + 1  # sentence + EOS delimiter
-                    if len(packed) + needed > max_seq_len:
-                        break
-                    packed.extend(ids)
-                    packed.append(eos_id)
-                    i += 1
-
-                if not packed:
-                    # Single sentence too long — truncate it
-                    ids = sentences[i]
-                    packed = ids[: max_seq_len - 1] + [eos_id]
-                    i += 1
-
-                length = len(packed)
-                padded = packed + [0] * (max_seq_len - length)
-                self.data.append(
-                    (torch.tensor(padded, dtype=torch.long), length)
-                )
-
-        # Shuffle packed sequences across languages for training
-        rng.shuffle(self.data)
-
-    def __len__(self) -> int:
-        return len(self.data)
-
-    def __getitem__(self, idx: int) -> tuple[Tensor, int]:
-        return self.data[idx]
+        return len(self.lengths)

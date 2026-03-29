@@ -1047,8 +1047,9 @@ class VAEPretrainer:
                 drop_last=True,
             )
 
+        interleaved_loader = None
         if _use_constituent_context:
-            from lfm.data.corpus import ConstituentDataset
+            from lfm.data.corpus import ConstituentDataset, InterleavedLoader
             from lfm.data.dataset.reader import DatasetReader
 
             const_reader = DatasetReader(cfg.constituent_dataset_path)
@@ -1075,16 +1076,23 @@ class VAEPretrainer:
                 max_seq_len=cfg.max_seq_len,
                 eos_id=eos_id,
             )
-            constituent_loader = DataLoader(
+            constituent_dl = DataLoader(
                 constituent_dataset,
                 batch_size=cfg.batch_size,
                 shuffle=True,
                 drop_last=True,
             )
+            interleaved_loader = InterleavedLoader(
+                sentence_loader=train_loader,
+                constituent_loader=constituent_dl,
+                mix_ratio=cfg.constituent_mix_ratio,
+                seed=cfg.seed,
+            )
             logger.info(
                 "Constituent context: %d sentences, %d constituents, "
-                "mix_ratio=%.1f",
-                len(sentences), len(constituents), cfg.constituent_mix_ratio,
+                "mix_ratio=%.1f, %d batches/epoch",
+                len(sentences), len(constituents),
+                cfg.constituent_mix_ratio, len(interleaved_loader),
             )
 
         val_loader = DataLoader(
@@ -1302,7 +1310,7 @@ class VAEPretrainer:
         # 8. Training loop
         accum = cfg.gradient_accumulation_steps
         log_every = 50  # log every N batches
-        num_batches = len(train_loader)
+        num_batches = len(interleaved_loader) if interleaved_loader is not None else len(train_loader)
 
         # Parameter count for logging
         total_params = sum(
@@ -1374,41 +1382,31 @@ class VAEPretrainer:
             epoch_start = time.time()
             batch_start = time.time()
 
-            # Constituent context: interleave constituent batches with
-            # regular sentence batches according to mix_ratio.
-            _const_iter = (
-                iter(constituent_loader) if constituent_loader is not None else None
-            )
-            _mix_rng = random.Random(cfg.seed + epoch)
+            # Choose the epoch data source: interleaved (phase 2) or plain
+            _epoch_loader = interleaved_loader if interleaved_loader is not None else train_loader
 
-            for i, batch_data in enumerate(train_loader):
-                # Decide whether this batch is a constituent batch
-                _is_constituent_batch = False
+            for i, batch_data in enumerate(_epoch_loader):
+                # Unpack based on source type
                 enc_tokens_override = None
                 enc_lengths_override = None
+                batch_indices = None
 
-                if (
-                    _const_iter is not None
-                    and _mix_rng.random() >= cfg.constituent_mix_ratio
-                ):
-                    try:
-                        const_batch = next(_const_iter)
-                    except StopIteration:
-                        _const_iter = iter(constituent_loader)
-                        const_batch = next(_const_iter)
-                    enc_tokens_override = const_batch[0].to(device)
-                    enc_lengths_override = torch.as_tensor(const_batch[1], device=device)
-                    batch_tokens = const_batch[2].to(device)
-                    batch_lengths = torch.as_tensor(const_batch[3], device=device)
-                    batch_indices = None
-                    _is_constituent_batch = True
+                if interleaved_loader is not None:
+                    is_constituent, raw_batch = batch_data
+                    if is_constituent:
+                        enc_tokens_override = raw_batch[0].to(device)
+                        enc_lengths_override = torch.as_tensor(raw_batch[1], device=device)
+                        batch_tokens = raw_batch[2].to(device)
+                        batch_lengths = torch.as_tensor(raw_batch[3], device=device)
+                    else:
+                        batch_tokens = raw_batch[0].to(device)
+                        batch_lengths = torch.as_tensor(raw_batch[1], device=device)
                 elif _use_contrastive:
                     batch_tokens, batch_lengths, batch_indices = batch_data
+                    batch_tokens = batch_tokens.to(device)
+                    batch_lengths = torch.as_tensor(batch_lengths, device=device)
                 else:
                     batch_tokens, batch_lengths = batch_data
-                    batch_indices = None
-
-                if not _is_constituent_batch:
                     batch_tokens = batch_tokens.to(device)
                     batch_lengths = torch.as_tensor(batch_lengths, device=device)
                 b = batch_tokens.size(0)
