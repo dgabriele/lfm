@@ -12,9 +12,11 @@ from lfm.data.parsers.stanza_backend import STANZA_LANGS
 logger = logging.getLogger(__name__)
 
 # Priority order: Stanza constituency > benepar > dep2con
+# Benepar is disabled pending compatibility with transformers 5.x.
+# All benepar languages fall through to depcon.
 _BACKEND_PRIORITY: list[tuple[str, dict[str, str]]] = [
     ("stanza", STANZA_LANGS),
-    ("benepar", BENEPAR_MODELS),
+    # ("benepar", BENEPAR_MODELS),  # disabled: incompatible with transformers 5.x
     ("depcon", DEPCON_LANGS),
 ]
 
@@ -51,20 +53,21 @@ def get_backend(
     Raises:
         KeyError: If no backend supports the language.
     """
-    if lang_iso3 in STANZA_LANGS:
-        from lfm.data.parsers.stanza_backend import StanzaBackend
+    # Dispatch based on priority list (not hardcoded order)
+    for backend_name, lang_map in _BACKEND_PRIORITY:
+        if lang_iso3 in lang_map:
+            if backend_name == "stanza":
+                from lfm.data.parsers.stanza_backend import StanzaBackend
 
-        return StanzaBackend(lang_iso3, use_gpu=use_gpu)
+                return StanzaBackend(lang_iso3, use_gpu=use_gpu)
+            elif backend_name == "benepar":
+                from lfm.data.parsers.benepar_backend import BeneparBackend
 
-    if lang_iso3 in BENEPAR_MODELS:
-        from lfm.data.parsers.benepar_backend import BeneparBackend
+                return BeneparBackend(lang_iso3)
+            elif backend_name == "depcon":
+                from lfm.data.parsers.depcon_backend import DepConBackend
 
-        return BeneparBackend(lang_iso3)
-
-    if lang_iso3 in DEPCON_LANGS:
-        from lfm.data.parsers.depcon_backend import DepConBackend
-
-        return DepConBackend(lang_iso3, use_gpu=use_gpu)
+                return DepConBackend(lang_iso3, use_gpu=use_gpu)
 
     all_langs = supported_languages()
     raise KeyError(

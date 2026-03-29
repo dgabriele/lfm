@@ -21,10 +21,14 @@ from lfm.data.parsers.base import ConstituencyBackend, ParseTree
 
 logger = logging.getLogger(__name__)
 
-# Languages that use dep→con conversion (no constituency parser available)
+# Languages that use dep→con conversion.
+# Includes languages without constituency parsers (cs, et, fi, hi, ru)
+# and benepar languages (ar, hu, ko, pl) as fallback while benepar
+# is incompatible with transformers 5.x.
 DEPCON_LANGS: dict[str, str] = {
     "ces": "cs", "est": "et", "fin": "fi",
     "hin": "hi", "rus": "ru",
+    "ara": "ar", "hun": "hu", "kor": "ko", "pol": "pl",
 }
 
 # Map UD dependency relations to approximate constituency labels
@@ -86,9 +90,9 @@ class DepConBackend:
 
         iso2 = DEPCON_LANGS[lang_iso3]
         logger.info("Loading Stanza dependency parser for %s...", iso2)
-        stanza.download(iso2, processors="tokenize,pos,depparse", verbose=False)
+        stanza.download(iso2, processors="tokenize,pos,lemma,depparse", verbose=False)
         self._nlp = stanza.Pipeline(
-            iso2, processors="tokenize,pos,depparse",
+            iso2, processors="tokenize,pos,lemma,depparse",
             use_gpu=use_gpu, verbose=False,
         )
         self._lang = lang_iso3
