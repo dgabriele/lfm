@@ -208,6 +208,7 @@ def run_epoch_diagnostics(
     modules: dict[str, nn.Module],
     device: torch.device,
     vocab_size: int,
+    full_vocab: int | None = None,
     bos_id: int,
     eos_id: int,
     sp: object,
@@ -217,8 +218,13 @@ def run_epoch_diagnostics(
     languages_list: list[str],
     z_running_mean: Tensor,
     z_running_std: Tensor,
+    label: str = "",
 ) -> None:
-    """Run reconstruction, interpolation, perturbation, random, length, and structural diagnostics."""
+    """Run reconstruction, interpolation, perturbation, random, length, and structural diagnostics.
+
+    Args:
+        label: Optional label for mid-epoch diagnostics (e.g., "step 5000").
+    """
     # Common kwargs for sample_decode
     _decode_kw = dict(
         modules=modules,

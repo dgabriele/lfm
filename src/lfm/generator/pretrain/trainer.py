@@ -564,6 +564,37 @@ class VAEPretrainer:
                     _batch_bucket_ce_count = [0, 0, 0]
                     batch_start = time.time()
 
+                # Mid-epoch diagnostics
+                if (
+                    cfg.diagnostic_every > 0
+                    and (i + 1) % cfg.diagnostic_every == 0
+                    and (i + 1) < num_batches
+                ):
+                    for m in modules.values():
+                        if isinstance(m, nn.Module):
+                            m.eval()
+                    run_epoch_diagnostics(
+                        epoch=epoch,
+                        modules=modules,
+                        cfg=cfg,
+                        val_dataset=data.val_dataset,
+                        val_loader=data.val_loader,
+                        dataset=data.dataset,
+                        languages_list=data.languages_list,
+                        bos_id=bos_id,
+                        eos_id=eos_id,
+                        vocab_size=vocab_size,
+                        full_vocab=full_vocab,
+                        sp=data.sp,
+                        z_running_mean=z_running_mean,
+                        z_running_std=z_running_std,
+                        device=device,
+                        label=f"step {global_step}",
+                    )
+                    for m in modules.values():
+                        if isinstance(m, nn.Module):
+                            m.train()
+
             train_ce = train_ce_sum / max(train_count, 1)
             train_kl = train_kl_sum / max(train_count, 1)
             train_zvar = train_zvar_sum / max(train_count, 1)
