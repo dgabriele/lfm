@@ -369,6 +369,17 @@ data/datasets/leipzig/
   rejected.h5      # Rejected samples with rejection reasons
 ```
 
+Dataset diagnostics (`lfm visualize dataset --dataset-path <path>`):
+
+<p align="center">
+  <img src="docs/static/images/lang_counts.png" width="48%" alt="Per-language sample counts" />
+  <img src="docs/static/images/zipf.png" width="48%" alt="Word rank-frequency (Zipf law)" />
+</p>
+<p align="center">
+  <img src="docs/static/images/vocab_overlap.png" width="48%" alt="Cross-language vocabulary overlap" />
+</p>
+<p align="center"><em>Left: per-language sample distribution. Right: IPA word frequency follows Zipf's law — confirming natural language statistics. Bottom: Jaccard vocabulary overlap between languages reveals typological groupings (e.g., Romance languages share more IPA vocabulary than Turkish–Korean).</em></p>
+
 Pretraining can load directly from a generated dataset — no inline sanitization or IPA conversion:
 
 ```yaml
