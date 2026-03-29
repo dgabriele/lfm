@@ -1,0 +1,213 @@
+"""VAE pretraining configuration and constants."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from lfm.config.base import LFMBaseConfig
+
+# IPA vowels — used to strip trailing orphan consonants from decoded text
+_IPA_VOWELS = set(
+    "iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒ"
+    "ãẽĩõũɛ̃ɔ̃"  # nasalized vowels
+)
+
+
+class VAEPretrainConfig(LFMBaseConfig):
+    """Configuration for VAE decoder pretraining.
+
+    These defaults are conservative for 6GB single-GPU.  For larger GPUs,
+    consider ``decoder_hidden_dim=512``, ``decoder_num_layers=4``,
+    ``decoder_num_heads=8``, ``latent_dim=256`` for richer linguistic priors.
+
+    Attributes:
+        corpus_loader: Registry name of the corpus loader to use.
+        corpus_loader_config: Keyword arguments passed to the corpus loader
+            config constructor (e.g. ``{"data_dir": "data/leipzig"}``).
+        corpus_paths: Legacy fallback — paths to plain text files/directories.
+            Used only when ``corpus_loader`` is ``None``.
+        spm_model_path: Path to a trained sentencepiece ``.model`` file.
+            If ``None``, trains a new model from the corpus data.
+        spm_vocab_size: Vocabulary size for sentencepiece training.
+        latent_dim: Must match target ``GeneratorConfig.latent_dim``.
+        encoder_num_layers: Number of transformer encoder layers.
+        decoder_hidden_dim: Must match target
+            ``GeneratorConfig.decoder_hidden_dim``.
+        decoder_num_layers: Must match target
+            ``GeneratorConfig.decoder_num_layers``.
+        decoder_num_heads: Must match target
+            ``GeneratorConfig.decoder_num_heads``.
+        decoder_dropout: Dropout rate during pretraining.
+        max_seq_len: Maximum token sequence length (truncated).
+        kl_weight: Final KL weight after warmup.
+        kl_free_bits: Per-dimension free bits floor.  Set to ``2.0`` to
+            prevent posterior collapse with the conservative decoder.
+        kl_warmup_steps: Steps to linearly anneal KL weight from 0.
+        batch_size: Pretraining batch size per device.
+        gradient_accumulation_steps: Accumulate gradients over this many
+            batches before stepping.  Effective batch size is
+            ``batch_size * gradient_accumulation_steps``.
+        use_amp: Enable mixed precision training (``torch.amp``).
+            Halves activation memory and speeds up training.
+        lr: Learning rate.
+        num_epochs: Number of pretraining epochs.
+        val_fraction: Validation split fraction.
+        seed: Random seed for reproducibility.
+        device: Torch device string.
+        output_path: Where to save the pretrained decoder checkpoint.
+        repetition_penalty: Multiplicative penalty on logits for tokens
+            that appeared in the recent ``repetition_window`` positions.
+            ``1.0`` disables.  Applied during both teacher-forced training
+            and free-run decoding to suppress degenerate loops.
+        repetition_window: Number of recent positions to check for
+            repeated tokens.
+        topo_weight: Weight for topological regularization loss.
+            Penalizes distance mismatches between latent pairs and their
+            decoded output pairs, enforcing Lipschitz continuity.
+        topo_sample_pairs: Number of random pairs per batch for topo loss.
+        use_adversarial: Enable structural adversarial discriminator.
+        adv_weight: Weight of adversarial loss in total generator loss.
+        adv_lr: Learning rate for discriminator (separate from VAE).
+        adv_disc_hidden: Discriminator CNN channel width.
+        adv_disc_embed_dim: Discriminator embedding dimensionality.
+        adv_warmup_steps: Train discriminator alone for this many steps
+            before adding adversarial signal to generator.
+        adv_free_run_len: Max length for free-run decoding during
+            adversarial training (shorter than ``max_seq_len`` for speed).
+        adv_spectral_norm: Apply spectral normalization to discriminator.
+    """
+
+    dataset_path: str | None = None
+    corpus_loader: str | None = "leipzig"
+    corpus_loader_config: dict[str, Any] = {}
+    corpus_paths: list[str] = []
+    spm_model_path: str | None = None
+    spm_vocab_size: int = 8000
+    latent_dim: int = 256
+    encoder_num_layers: int = 2
+    decoder_hidden_dim: int = 512
+    decoder_num_layers: int = 4
+    decoder_num_heads: int = 8
+    decoder_dropout: float = 0.1
+
+    # Linguistic attention structure
+    attention_head_windows: tuple[int, ...] = (3, 3, 7, 7, 15, 15, 0, 0)
+    attention_global_every: int = 7
+    use_rope: bool = True
+    share_decoder_layers: bool = True
+    max_seq_len: int = 96
+    encoder_pooling: str = "mean"  # "mean" or "attention"
+    kl_weight: float = 0.5
+    kl_free_bits: float = 0.5
+    kl_warmup_steps: int = 10000
+    batch_size: int = 32
+    gradient_accumulation_steps: int = 2
+    use_amp: bool = True
+    lr: float = 1e-3
+    num_epochs: int = 20
+    val_fraction: float = 0.1
+    seed: int = 42
+    device: str = "cuda"
+    output_path: str = "data/vae_decoder.pt"
+
+    # Latent variance regularization: smooth quadratic penalty that
+    # pulls per-dimension z variance toward ``z_var_target``.  Provides
+    # continuous gradient signal (not just a hard floor), preventing
+    # the slow variance collapse that leads to gnorm explosion.
+    # Loss = weight * mean((var_per_dim - target)^2).
+    z_var_weight: float = 5.0
+    z_var_target: float = 0.05
+    z_var_floor: float = 0.01  # legacy, unused — kept for checkpoint compat
+
+    # Word dropout (Bowman et al. 2016): randomly zero out decoder input
+    # embeddings with this probability during training.  Forces the decoder
+    # to rely on z for reconstruction instead of the teacher-forced input
+    # highway, preventing the encoder from driving logvar → -∞.
+    # Annealed linearly from word_dropout to word_dropout_min over
+    # word_dropout_anneal_epochs epochs.
+    word_dropout: float = 0.3
+    word_dropout_min: float = 0.05
+    word_dropout_anneal_epochs: int = 20
+
+    # DIP-VAE off-diagonal covariance penalty: encourages z dimensions
+    # to be statistically independent (disentangled).  Penalizes pairwise
+    # correlation between dimensions without pushing mean toward zero.
+    dip_weight: float = 0.1
+
+    # Cosine LR decay: minimum LR at end of training.
+    lr_min: float = 1e-4
+
+    # Legacy topological regularization (disabled — replaced by z_var)
+    topo_weight: float = 0.0
+    topo_sample_pairs: int = 32
+
+    # Adversarial structural discriminator
+    use_adversarial: bool = False
+    adv_weight: float = 0.1
+    adv_lr: float = 1e-4
+    adv_disc_hidden: int = 256
+    adv_disc_embed_dim: int = 128
+    adv_warmup_steps: int = 1000
+    adv_free_run_len: int = 32
+    adv_spectral_norm: bool = True
+
+    # Scheduled sampling: anneal from 0 to target probability over warmup
+    # epochs, starting at ``scheduled_sampling_start_epoch``.  At each
+    # decoder position, replace ground truth input with the model's own
+    # prediction with this probability.  Prevents exposure bias and
+    # generation degeneration at long sequence lengths.  Must start late
+    # enough that the model produces reasonable predictions to feed back.
+    scheduled_sampling_target: float = 0.0
+    scheduled_sampling_start_epoch: int = 5
+    scheduled_sampling_warmup_epochs: int = 5
+
+    # Contrastive learning (InfoNCE): encourages similar source sentences
+    # to have similar z vectors.  Requires pre-computed sentence-transformer
+    # embeddings aligned by index with the training corpus.
+    contrastive_weight: float = 0.0
+    contrastive_temperature: float = 0.07
+    embeddings_path: str = ""
+
+    # Fixed KL for distribution smoothness (no warmup/cycling).
+    # Applied without free bits — raw KL(q||N(0,1)).
+    kl_beta: float = 0.0
+
+    # Phonetic embedding initialization and label smoothing.
+    phonetic_init: bool = True
+    phonetic_init_scale: float = 0.5
+    phonetic_label_smoothing: float = 0.1
+
+    # Vector Quantization (VQ-VAE mode).
+    # Replaces continuous Gaussian latent with discrete codebook.
+    use_vq: bool = False
+    vq_mode: str = "grouped"  # "residual" or "grouped"
+    vq_num_levels: int = 4    # for residual mode
+    vq_num_groups: int = 8    # for grouped mode
+    vq_codebook_size: int = 512
+    vq_commitment_weight: float = 0.25
+    vq_entropy_weight: float = 0.1
+    vq_balance_weight: float = 0.1
+    vq_orthogonality_weight: float = 0.01
+    vq_noise_sigma: float = 0.0
+    vq_ema_update: bool = True
+    vq_decay: float = 0.99
+
+    # Constituent context training: the encoder sees the full parent
+    # sentence while the decoder is supervised only on the constituent
+    # span.  Requires a constituency dataset with parent_seq fields
+    # (generated with --extract-constituents).
+    constituent_context: bool = False
+    constituent_dataset_path: str = ""   # Path to constituency HDF5
+    constituent_mix_ratio: float = 0.5   # Fraction of full sentences to mix in
+    constituent_max_per_language: int | None = None  # Per-language constituent cap
+    constituent_balance_by_length: bool = True  # Equalize across length buckets
+
+    # Bag-of-words auxiliary loss: penalizes missing content tokens
+    # regardless of position.  Complements CE (which is position-sensitive)
+    # by ensuring the right vocabulary appears in the output.
+    bow_weight: float = 0.0
+
+    # Mid-epoch diagnostic interval: run reconstruction/interpolation/
+    # perturbation diagnostics every N batches within each epoch.
+    # 0 = diagnostics only at epoch boundaries (default).
+    diagnostic_every: int = 0
