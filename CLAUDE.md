@@ -4,7 +4,7 @@
 
 LFM gives neural agents a natural language faculty via a pretrained multilingual VAE decoder. Agent embeddings are projected into the VAE's latent space and decoded through a frozen autoregressive transformer into variable-length IPA (International Phonetic Alphabet) utterances — linguistically structured, pronounceable, and compositional output.
 
-The decoder is pretrained on typologically diverse natural language data (16 languages from the Leipzig Corpora Collection), then frozen. During agent training, only a small input projection learns to map agent representations into the decoder's latent space. The linguistic structure acts as a bottleneck that forces compositional, structured communication.
+The decoder is pretrained on typologically diverse natural language data (7 languages from the Leipzig Corpora Collection — deu, eng, esp, ind, por, tur, vie), then frozen. During agent training, only a small input projection learns to map agent representations into the decoder's latent space. The linguistic structure acts as a bottleneck that forces compositional, structured communication.
 
 ## Architecture
 
@@ -107,7 +107,7 @@ src/lfm/
 
 ## Pretraining Results
 
-42 epochs on 560K IPA sentences from 16 languages:
+v1: 42 epochs on 560K IPA sentences from 16 languages (legacy). Current: 7 languages, ~673K sentences:
 - **Val CE: 0.52** (PPL ≈ 1.7)
 - **Reconstruction**: near-perfect through 256-dim latent bottleneck, word order largely preserved
 - **Interpolation**: smooth typological transitions (English ↔ Polish)
