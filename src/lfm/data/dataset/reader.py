@@ -109,18 +109,30 @@ class DatasetReader:
     def load_constituent_tuples(
         self,
         languages: list[str] | None = None,
+        max_per_language: int | None = None,
+        balance_by_length: bool = True,
+        length_buckets: tuple[int, ...] = (20, 50),
+        seed: int = 42,
     ) -> tuple[list[tuple[str, str]], list[tuple[str, str, int, str]]]:
         """Load phase 2 constituent data: full sentences + paired constituents.
+
+        Args:
+            languages: Filter to these ISO 639-3 codes. None = all.
+            max_per_language: Max constituents per language. None = no cap.
+            balance_by_length: If True, subsample to equalize across
+                length buckets (short/medium/long) within each language.
+            length_buckets: Character-length boundaries for buckets.
+                Default (20, 50) gives: short(<20), medium(20-50), long(>50).
+            seed: Random seed for reproducible subsampling.
 
         Returns two lists:
           - sentences: list of (lang, ipa) for all full sentences (label="S")
           - constituents: list of (lang, ipa, parent_seq, label) for
-            all extracted constituents. parent_seq indexes into the
-            sentences list.
-
-        The HDF5 file is read once; parent_seq provides O(1) lookup
-        of the parent sentence's IPA at training time.
+            extracted constituents, balanced across languages and lengths.
         """
+        import random
+        from collections import defaultdict
+
         import h5py
 
         h5_path = self._dir / "samples.h5"
@@ -134,8 +146,7 @@ class DatasetReader:
             labels = [_decode(x) for x in grp["constituent_label"][:]]
 
         sentences: list[tuple[str, str]] = []
-        constituents: list[tuple[str, str, int, str]] = []
-        # Map from original seq → position in sentences list
+        constituents_raw: list[tuple[str, str, int, str]] = []
         seq_to_sent_idx: dict[int, int] = {}
 
         for i, (lang, ipa, pseq, label) in enumerate(
@@ -147,14 +158,62 @@ class DatasetReader:
                 seq_to_sent_idx[i] = len(sentences)
                 sentences.append((lang, ipa))
             else:
-                constituents.append((lang, ipa, pseq, label))
+                constituents_raw.append((lang, ipa, pseq, label))
 
         # Remap parent_seq from global index to sentences list index
         remapped: list[tuple[str, str, int, str]] = []
-        for lang, ipa, pseq, label in constituents:
+        for lang, ipa, pseq, label in constituents_raw:
             sent_idx = seq_to_sent_idx.get(pseq, -1)
             if sent_idx >= 0:
                 remapped.append((lang, ipa, sent_idx, label))
+
+        # Balanced subsampling: across languages and length buckets
+        rng = random.Random(seed)
+
+        if max_per_language is not None or balance_by_length:
+            def _bucket(ipa: str) -> int:
+                length = len(ipa)
+                for bi, boundary in enumerate(length_buckets):
+                    if length < boundary:
+                        return bi
+                return len(length_buckets)
+
+            # Group by (language, length_bucket)
+            by_lang_bucket: dict[tuple[str, int], list[tuple[str, str, int, str]]] = defaultdict(list)
+            for item in remapped:
+                lang = item[0]
+                bkt = _bucket(item[1])
+                by_lang_bucket[(lang, bkt)].append(item)
+
+            # Determine per-bucket cap
+            if balance_by_length and max_per_language is not None:
+                n_buckets = len(length_buckets) + 1
+                per_bucket = max_per_language // n_buckets
+            elif max_per_language is not None:
+                per_bucket = max_per_language
+            else:
+                # balance_by_length without max_per_language:
+                # equalize to the smallest bucket per language
+                per_lang_min: dict[str, int] = {}
+                all_langs = set(lang for lang, _ in by_lang_bucket.keys())
+                for lang in all_langs:
+                    bucket_sizes = [
+                        len(by_lang_bucket.get((lang, bi), []))
+                        for bi in range(len(length_buckets) + 1)
+                    ]
+                    non_empty = [s for s in bucket_sizes if s > 0]
+                    per_lang_min[lang] = min(non_empty) if non_empty else 0
+                per_bucket = None  # per-language min used below
+
+            balanced: list[tuple[str, str, int, str]] = []
+            for (lang, bkt), items in sorted(by_lang_bucket.items()):
+                cap = per_bucket if per_bucket is not None else per_lang_min.get(lang, len(items))
+                if len(items) > cap:
+                    items = rng.sample(items, cap)
+                balanced.extend(items)
+
+            rng.shuffle(balanced)
+            remapped = balanced
 
         logger.info(
             "Loaded %d sentences + %d constituents from %s",

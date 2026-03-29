@@ -235,6 +235,8 @@ class VAEPretrainConfig(LFMBaseConfig):
     constituent_context: bool = False
     constituent_dataset_path: str = ""   # Path to constituency HDF5
     constituent_mix_ratio: float = 0.5   # Fraction of full sentences to mix in
+    constituent_max_per_language: int | None = None  # Per-language constituent cap
+    constituent_balance_by_length: bool = True  # Equalize across length buckets
 
     # Bag-of-words auxiliary loss: penalizes missing content tokens
     # regardless of position.  Complements CE (which is position-sensitive)
@@ -1055,7 +1057,11 @@ class VAEPretrainer:
                     f"Dataset at {cfg.constituent_dataset_path} lacks "
                     f"parent_seq fields. Regenerate with --extract-constituents."
                 )
-            sentences, constituents = const_reader.load_constituent_tuples()
+            sentences, constituents = const_reader.load_constituent_tuples(
+                max_per_language=cfg.constituent_max_per_language,
+                balance_by_length=cfg.constituent_balance_by_length,
+                seed=cfg.seed,
+            )
 
             # Tokenize sentences and constituents with the same SPM
             sent_token_ids = [sp.encode(ipa) for _, ipa in sentences]
