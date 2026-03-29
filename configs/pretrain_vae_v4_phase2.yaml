@@ -8,15 +8,15 @@
 # fields (generated with --extract-constituents after the data pipeline
 # update).
 
-# Phase 1 model to resume from
-dataset_path: data/datasets/leipzig
+# Phase 1 model to resume from (same 7 languages)
+dataset_path: data/datasets/leipzig-7lang
 corpus_loader: leipzig
 corpus_loader_config:
   data_dir: data/leipzig
 
-# Constituent context training
+# Constituent context training (7 Stanza-constituency languages)
 constituent_context: true
-constituent_dataset_path: data/datasets/leipzig-constituents-v2
+constituent_dataset_path: data/datasets/leipzig-7lang-constituents
 constituent_mix_ratio: 0.5   # 50% full sentences, 50% constituents
 constituent_max_per_language: 125000  # 2M total / 16 langs
 constituent_balance_by_length: true   # equalize short/med/long per language
@@ -63,7 +63,7 @@ gradient_accumulation_steps: 1
 use_amp: true
 lr: 0.0002
 lr_min: 0.00005
-num_epochs: 20
+num_epochs: 50
 
 # Latent regularization
 z_var_weight: 0.0

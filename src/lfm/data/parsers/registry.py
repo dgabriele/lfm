@@ -11,12 +11,12 @@ from lfm.data.parsers.stanza_backend import STANZA_LANGS
 
 logger = logging.getLogger(__name__)
 
-# Use DepCon for all languages for cross-language consistency.
-# Stanza constituency is higher quality for its 7 languages, but
-# mixing two annotation methods creates a systematic confound.
-# DepCon is available for all 16 languages via Stanza dependency parsing.
+# Stanza constituency only — 7 languages with real constituency parsers.
+# DepCon was tested and found to miss VPs/clauses entirely (43% recall).
+# Consistency > coverage for PoC: use one high-quality method on fewer
+# languages rather than a mixed or approximate method on more.
 _BACKEND_PRIORITY: list[tuple[str, dict[str, str]]] = [
-    ("depcon", DEPCON_LANGS),
+    ("stanza", STANZA_LANGS),
 ]
 
 

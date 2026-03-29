@@ -1,12 +1,13 @@
 # VAE decoder pretraining config (v4 — Phase 1: full sentences only)
 #
-# Phase 1: Train on full sentences (~600K samples) to learn language
-# structure and z-conditioning. v1-proven latent_dim=256, 2-layer encoder.
+# Phase 1: Train on full sentences from 7 languages with Stanza
+# constituency parsers. Ensures cross-language consistency when
+# phase 2 adds constituency-augmented training data.
 #
-# Phase 2 (later): Fine-tune on constituency-augmented data to learn
-# variable-length output.
+# Languages: deu, eng, spa, ind, por, tur, vie
+# (fusional, agglutinative, isolating — good typological spread)
 
-dataset_path: data/datasets/leipzig
+dataset_path: data/datasets/leipzig-7lang
 corpus_loader: leipzig
 corpus_loader_config:
   data_dir: data/leipzig
