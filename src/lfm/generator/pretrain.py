@@ -243,6 +243,11 @@ class VAEPretrainConfig(LFMBaseConfig):
     # by ensuring the right vocabulary appears in the output.
     bow_weight: float = 0.0
 
+    # Mid-epoch diagnostic interval: run reconstruction/interpolation/
+    # perturbation diagnostics every N batches within each epoch.
+    # 0 = diagnostics only at epoch boundaries (default).
+    diagnostic_every: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Corpus loading
