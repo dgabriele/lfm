@@ -236,6 +236,11 @@ class VAEPretrainConfig(LFMBaseConfig):
     constituent_dataset_path: str = ""   # Path to constituency HDF5
     constituent_mix_ratio: float = 0.5   # Fraction of full sentences to mix in
 
+    # Bag-of-words auxiliary loss: penalizes missing content tokens
+    # regardless of position.  Complements CE (which is position-sensitive)
+    # by ensuring the right vocabulary appears in the output.
+    bow_weight: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Corpus loading
@@ -504,7 +509,7 @@ def _vae_forward(
     _residual_vq: nn.Module | None = None,
     encoder_tokens: Tensor | None = None,
     encoder_lengths: Tensor | None = None,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None, Tensor]:
     """Run one VAE forward pass with optional scheduled sampling.
 
     When ``scheduled_sampling_p > 0``, a two-pass approach is used:
@@ -700,6 +705,26 @@ def _vae_forward(
 
     ce_loss = (ce * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
 
+    # Bag-of-words loss: order-invariant token presence check.
+    # Mean of per-position log-softmax gives a pooled prediction over
+    # the vocabulary, compared against target token frequencies.
+    if _cfg is not None and getattr(_cfg, "bow_weight", 0) > 0:
+        # Mean-pool logits across valid positions → (b, V)
+        # Uses the existing src_mask; no extra memory allocation.
+        mask_f = src_mask.unsqueeze(-1).float()  # (b, S, 1)
+        bow_logits = (logits * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
+        # Target: token frequency distribution per sample
+        bow_target = torch.zeros(b, full_vocab, device=device)
+        for bi in range(b):
+            valid_toks = batch_tokens[bi, :batch_lengths[bi]]
+            bow_target[bi].scatter_add_(
+                0, valid_toks, torch.ones_like(valid_toks, dtype=torch.float),
+            )
+        bow_target = bow_target / bow_target.sum(dim=-1, keepdim=True).clamp(min=1)
+        bow_loss = F.cross_entropy(bow_logits, bow_target)
+    else:
+        bow_loss = torch.tensor(0.0, device=device)
+
     # KL loss (skipped in VQ mode or when kl_weight=0)
     if _residual_vq is not None:
         kl_per_dim = torch.zeros(b, mu.size(-1), device=device)
@@ -713,7 +738,7 @@ def _vae_forward(
         kl_per_dim = torch.zeros(b, mu.size(-1), device=device)
         kl_loss = torch.tensor(0.0, device=device)
 
-    return ce_loss, kl_loss, kl_per_dim, z, dec_out, mu, logvar, vq_commitment_loss
+    return ce_loss, kl_loss, kl_per_dim, z, dec_out, mu, logvar, vq_commitment_loss, bow_loss
 
 
 # ---------------------------------------------------------------------------
@@ -1328,6 +1353,7 @@ class VAEPretrainer:
             train_cl_sum = 0.0
             train_klb_sum = 0.0
             train_vq_sum = 0.0
+            train_bow_sum = 0.0
             train_acc_correct = 0
             train_acc_total = 0
             train_count = 0
@@ -1387,7 +1413,7 @@ class VAEPretrainer:
                     _do_kl = cfg.kl_weight > 0 or cfg.kl_beta > 0
                     (ce_loss, kl_loss, kl_per_dim_train,
                      z_batch, dec_hidden, mu_batch, logvar_batch,
-                     vq_loss_batch) = (
+                     vq_loss_batch, bow_loss) = (
                         _vae_forward(
                             batch_tokens,
                             batch_lengths,
@@ -1468,6 +1494,7 @@ class VAEPretrainer:
                         + cfg.dip_weight * dip_loss
                         + cfg.contrastive_weight * cl_loss
                         + cfg.kl_beta * kl_beta_loss
+                        + cfg.bow_weight * bow_loss
                     ) / accum
 
                 scaler.scale(loss).backward()
@@ -1608,6 +1635,7 @@ class VAEPretrainer:
                 train_cl_sum += cl_loss.item() * b
                 train_klb_sum += kl_beta_loss.item() * b
                 train_vq_sum += vq_loss.item() * b
+                train_bow_sum += bow_loss.item() * b
                 train_acc_correct += _correct
                 train_acc_total += _total
                 train_count += b
@@ -1661,6 +1689,8 @@ class VAEPretrainer:
                         if hasattr(rvq, "_last_balance_loss"):
                             extra_parts.append(f"bal={rvq._last_balance_loss:.3f}")
                         _vq_util_str = " ".join(f"{u:.0%}" for u in rvq.utilization)
+                    if cfg.bow_weight > 0:
+                        extra_parts.append(f"BoW={bow_loss.item():.3f}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
                         extra_parts.append(
                             f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f}"
@@ -1702,10 +1732,12 @@ class VAEPretrainer:
             train_cl = train_cl_sum / max(train_count, 1)
             train_klb = train_klb_sum / max(train_count, 1)
             train_vq = train_vq_sum / max(train_count, 1)
+            train_bow = train_bow_sum / max(train_count, 1)
             train_loss = (
                 train_ce + cfg.kl_weight * train_kl
                 + cfg.z_var_weight * train_zvar + cfg.dip_weight * train_dip
                 + cfg.contrastive_weight * train_cl + cfg.kl_beta * train_klb
+                + cfg.bow_weight * train_bow
             )
 
             # -- Validate --
@@ -1731,7 +1763,7 @@ class VAEPretrainer:
                     with torch.amp.autocast(
                         device_type=device.type, enabled=cfg.use_amp
                     ):
-                        ce_loss, kl_loss, kl_per_dim, _, dec_hidden_val, _, _, _ = _vae_forward(
+                        ce_loss, kl_loss, kl_per_dim, _, dec_hidden_val, _, _, _, _ = _vae_forward(
                             batch_tokens,
                             batch_lengths,
                             bos_id=bos_id,
@@ -1786,6 +1818,8 @@ class VAEPretrainer:
                 epoch_parts.append(f"CL={train_cl:.4f}")
             if cfg.kl_beta > 0:
                 epoch_parts.append(f"KLβ={train_klb:.4f}")
+            if cfg.bow_weight > 0:
+                epoch_parts.append(f"BoW={train_bow:.4f}")
             if cfg.use_vq:
                 epoch_parts.append(f"VQ={train_vq:.4f}")
                 rvq = modules["_residual_vq"]
@@ -1868,7 +1902,7 @@ class VAEPretrainer:
                         with torch.amp.autocast(
                             device_type=device.type, enabled=cfg.use_amp,
                         ):
-                            _, _, _, _zb, _, _, _, _ = _vae_forward(
+                            _, _, _, _zb, _, _, _, _, _ = _vae_forward(
                                 _dt, _dl, bos_id=bos_id, full_vocab=full_vocab,
                                 kl_free_bits=0.0, compute_kl=False, **modules,
                             )
@@ -2077,15 +2111,36 @@ class VAEPretrainer:
                 # --- 1. Reconstruction ---
                 z_real = _encode_text(val_batch_tokens, val_batch_lengths)
                 recon_texts = _sample_decode(z_real)
+
+                def _word_edit_distance(a: str, b: str) -> tuple[int, int]:
+                    """Word-level Levenshtein distance. Returns (distance, max_len)."""
+                    wa, wb = a.split(), b.split()
+                    n, m = len(wa), len(wb)
+                    dp = list(range(m + 1))
+                    for i in range(1, n + 1):
+                        prev, dp[0] = dp[0], i
+                        for j in range(1, m + 1):
+                            cur = dp[j]
+                            if wa[i - 1] == wb[j - 1]:
+                                dp[j] = prev
+                            else:
+                                dp[j] = 1 + min(prev, dp[j], dp[j - 1])
+                            prev = cur
+                    return dp[m], max(n, m)
+
                 for j in range(min(2, len(_lang_labels))):
                     orig_ids = val_batch_tokens[j].cpu().tolist()
                     orig_ids = [x for x in orig_ids[:val_batch_lengths[j]] if x < vocab_size]
                     orig = sp.decode(orig_ids)
+                    dec = recon_texts[j]
+                    ed, ml = _word_edit_distance(orig, dec)
+                    wer = ed / max(ml, 1)
                     logger.info(
                         "  recon[%s] orig: %s", _lang_labels[j], orig[:120]
                     )
                     logger.info(
-                        "  recon[%s]  dec: %s", _lang_labels[j], recon_texts[j][:120]
+                        "  recon[%s]  dec: %s  [WED=%d/%d WER=%.0f%%]",
+                        _lang_labels[j], dec[:120], ed, ml, wer * 100,
                     )
 
                 # --- 2. Interpolation (English ↔ non-English) ---
