@@ -1,16 +1,35 @@
 # VAE decoder pretraining config (v4 — Phase 1: full sentences only)
 #
-# Phase 1: Train on full sentences from 7 languages with Stanza
-# constituency parsers. Ensures cross-language consistency when
-# phase 2 adds constituency-augmented training data.
-#
-# Languages: deu, eng, spa, ind, por, tur, vie
-# (fusional, agglutinative, isolating — good typological spread)
+# 16 typologically diverse languages, no redundant pairs.
+# Fusional: eng, deu, por, rus
+# Agglutinative: tur, fin, hun, kor, swa
+# Isolating/tonal: vie, ind, tha
+# Introflexive: ara
+# Ergative/polypersonal: kat
+# Split-ergative: hin
+# Philippine focus: tgl
 
-dataset_path: data/datasets/leipzig-7lang
+dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang
 corpus_loader: leipzig
 corpus_loader_config:
   data_dir: data/leipzig
+  languages:
+    - eng
+    - deu
+    - por
+    - rus
+    - tur
+    - fin
+    - hun
+    - kor
+    - vie
+    - ind
+    - ara
+    - hin
+    - swa
+    - tha
+    - kat
+    - tgl
 
 # Tokenizer
 spm_vocab_size: 8000
@@ -67,7 +86,7 @@ bow_weight: 0.0
 val_fraction: 0.1
 seed: 42
 device: cuda
-output_path: data/models/v4-phase1/vae_decoder.pt
+output_path: /home/daniel/projects/lfm/data/models/v4-phase1/vae_decoder.pt
 
 # Topological regularization
 topo_weight: 0.0

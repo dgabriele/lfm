@@ -66,6 +66,12 @@ class GenerateCommand(CLICommand):
             help="LLM gatekeeper model (default: Qwen/Qwen2.5-0.5B)",
         )
 
+        # Token length filter
+        parser.add_argument(
+            "--max-token-length", type=int, default=None,
+            help="Drop samples exceeding this BPE token count (default: no limit)",
+        )
+
         # Constituency extraction
         parser.add_argument(
             "--extract-constituents", action="store_true",
@@ -148,6 +154,7 @@ class GenerateCommand(CLICommand):
             min_samples=args.min_samples,
             sanitize=sanitize_cfg,
             llm_gate=llm_gate_cfg,
+            max_token_length=args.max_token_length,
             extract_constituents=args.extract_constituents,
             min_constituent_length=args.min_constituent_length,
             num_workers=args.num_workers,

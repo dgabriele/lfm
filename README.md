@@ -2,7 +2,7 @@
 
 A framework for encoding structured data as natural language.
 
-LFM encodes arbitrary continuous representations — agent embeddings, protein features, mathematical structures, any high-dimensional vector — as linguistically structured, pronounceable IPA (International Phonetic Alphabet) utterances. The output is compositional, variable-length, and phonotactically valid: not a cipher or a learned code, but output that shares the structural properties of natural language because it is generated through a decoder pretrained on 16 human languages. This makes it interpretable by any multilingual LLM.
+LFM encodes arbitrary continuous representations — agent embeddings, protein features, mathematical structures, any high-dimensional vector — as linguistically structured, pronounceable IPA (International Phonetic Alphabet) utterances. The output is compositional, variable-length, and phonotactically valid: not a cipher or a learned code, but output that shares the structural properties of natural language because it is generated through a decoder pretrained on multiple typologically diverse human languages. This makes it interpretable by any multilingual LLM.
 
 ---
 
@@ -30,7 +30,7 @@ Neural systems — agents, encoders, scientific models — produce continuous re
 
 LFM makes them speakable. It encodes any continuous representation as a new natural language — not English, not mathematics, but an emergent language whose structure is inherited from a pretrained multilingual decoder. The language is compositional, variable-length, and phonotactically regular. Any multilingual LLM can learn to translate it — and because the language encodes empirical grounding from its source domain, learning the language means acquiring that grounding.
 
-The key mechanism is a **frozen linguistic bottleneck**: a VAE decoder pretrained on 7 typologically diverse languages, then frozen. Downstream systems don't learn a communication protocol from scratch — they learn to project their representations into the decoder's latent space, and the decoder's structure constrains the output to be linguistically well-formed. This is analogous to Universal Grammar in the Chomskyan sense: a fixed structural prior that constrains the space of possible languages, where only the mapping from meaning to form is learned. This avoids the known failure modes of end-to-end emergent communication (anti-Zipfian codes, degenerate protocols, non-compositional signals).
+The key mechanism is a **frozen linguistic bottleneck**: a VAE decoder pretrained on typologically diverse languages, then frozen. Downstream systems don't learn a communication protocol from scratch — they learn to project their representations into the decoder's latent space, and the decoder's structure constrains the output to be linguistically well-formed. This is analogous to Universal Grammar in the Chomskyan sense: a fixed structural prior that constrains the space of possible languages, where only the mapping from meaning to form is learned. This avoids the known failure modes of end-to-end emergent communication (anti-Zipfian codes, degenerate protocols, non-compositional signals).
 
 The pipeline is concrete: an input embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for a receiver to identify what was encoded (95% accuracy, 15x above chance in a referential game). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
 
@@ -50,7 +50,7 @@ This applies to multi-agent communication, but also to any setting where you wan
 
 ### Translation, not alignment
 
-The emergent language that LFM produces is not human language — but it is *language-like*. It has morphology, phonotactic structure, and compositional regularity. This is by design: the structural inductive biases come from the frozen decoder, which was pretrained on 7 typologically diverse human languages.
+The emergent language that LFM produces is not human language — but it is *language-like*. It has morphology, phonotactic structure, and compositional regularity. This is by design: the structural inductive biases come from the frozen decoder, which was pretrained on typologically diverse human languages.
 
 Because the output is in IPA — a universal phonetic representation — it is directly compatible with any LLM that has seen phonetic or multilingual data. A small LLM can be fine-tuned on (IPA, English) pairs to translate the emergent language, the same way it would learn any new language from parallel text.
 
@@ -66,13 +66,17 @@ LFM uses a **generative linguistic bottleneck**: a pretrained VAE decoder that p
 
 ### Step 1: Pretrain the VAE decoder
 
-A multilingual VAE is trained on IPA-transcribed text from 7 typologically diverse languages (Leipzig Corpora Collection). These 7 are selected for having Stanza constituency parsers, enabling self-consistent phrase-level training data:
+A multilingual VAE is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). The current training set covers 16 languages spanning major morphological types:
 
 | Typology | Languages |
 |----------|-----------|
-| Fusional | German, Spanish, Portuguese, English |
-| Agglutinative | Turkish |
-| Isolating | Vietnamese, Indonesian |
+| Fusional | English, German, Portuguese, Russian |
+| Agglutinative | Turkish, Finnish, Hungarian, Korean, Swahili |
+| Isolating/Tonal | Vietnamese, Indonesian, Thai |
+| Introflexive | Arabic |
+| Ergative | Georgian |
+| Split-ergative | Hindi |
+| Philippine focus | Tagalog |
 
 The training corpus is constituency-augmented: full sentences are parsed into phrase constituents (NP, VP, PP, clauses) via Stanza, and each constituent becomes a separate training sample alongside the full sentence (~5.75M samples total). This teaches the decoder to produce well-formed output at all lengths — from short noun phrases to full sentences — rather than always generating fixed-length sequences. Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), tokenized with sentencepiece BPE (`max_seq_len=96`).
 
@@ -124,13 +128,13 @@ The **LinguisticDecoder** has architectural biases for natural language:
 
 ### Pretraining
 
-The decoder is trained on IPA-transcribed text from 7 typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay (per-epoch), DIP-VAE covariance regularization, and full resume support.
+The decoder is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay (per-epoch), DIP-VAE covariance regularization, and full resume support.
 
 **v4 (current)**: constituency-augmented dataset (~5.75M samples — full sentences + extracted NP/VP/PP phrases), latent_dim=384, encoder_num_layers=3, 20 epochs. The constituency augmentation teaches the decoder to produce variable-length output at all scales.
 
 ### Pretraining results (v1)
 
-Phase 1 on ~673K IPA sentences from 7 languages (latent_dim=256, lr=0.0005):
+Phase 1 results (latent_dim=256, lr=0.0005):
 - **Val CE: 0.52** (PPL ≈ 1.7)
 - **Reconstruction**: near-perfect through 256-dim latent bottleneck, word order largely preserved
 - **Interpolation**: smooth typological transitions (English ↔ Polish)
@@ -316,7 +320,7 @@ TEXT: "Of course, Satan is no stranger to the game."
  IPA: thariksi dimesial lud thojlua leetelmiset martifik atyshymyznynyn en jakhan termirlakin ke
 ```
 
-Each input produces a distinct, pronounceable IPA utterance. The output draws on phonotactic patterns from all 16 training languages — the decoder mixes Indonesian, Turkish, Polish, Vietnamese, and other typological features into a novel linguistic form that is neither any specific human language nor a degenerate code.
+Each input produces a distinct, pronounceable IPA utterance. The output draws on phonotactic patterns from all 16 training languages — the decoder mixes typological features from its training languages into a novel linguistic form that is neither any specific human language nor a degenerate code.
 
 ### Structural evaluation
 
@@ -535,7 +539,7 @@ A pretrained LM has morphological knowledge handed to it as tokenizer artifacts 
 
 ## Status
 
-**PoC pretraining validated.** The VAE decoder learns a well-structured latent space over 7 typologically diverse languages, with structural claims backed by visualization evidence:
+**PoC pretraining validated.** The VAE decoder learns a well-structured latent space over typologically diverse languages, with structural claims backed by visualization evidence:
 
 - Latent space organizes languages typologically (t-SNE, clustering)
 - Multi-scale attention heads function as designed (entropy analysis)

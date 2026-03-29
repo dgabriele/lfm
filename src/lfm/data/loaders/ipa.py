@@ -35,6 +35,7 @@ _ARPA_TO_IPA: dict[str, str] = {
 
 # Epitran language codes for our supported languages
 _EPITRAN_LANGS: dict[str, str] = {
+    # Original 16
     "tur": "tur-Latn",
     "deu": "deu-Latn",
     "spa": "spa-Latn",
@@ -50,7 +51,11 @@ _EPITRAN_LANGS: dict[str, str] = {
     "hin": "hin-Deva",
     "kor": "kor-Hang",
     "ara": "ara-Arab",
-    # "jpn": "jpn-Kana",  # produces kana, not IPA — excluded until proper G2P
+    # New diversity additions
+    "swa": "swa-Latn",
+    "tha": "tha-Thai",
+    "kat": "kat-Geor",
+    "tgl": "tgl-Latn",
 }
 
 

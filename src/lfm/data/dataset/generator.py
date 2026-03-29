@@ -104,6 +104,21 @@ class DatasetGenerator:
         )
         logger.info("IPA conversion: %d processed samples", len(processed))
 
+        # 4b. Filter by max token length (IPA character length as proxy)
+        if cfg.max_token_length is not None:
+            before = len(processed)
+            # IPA chars → BPE tokens ratio is ~1.1-1.3 depending on language.
+            # Use ipa_length field directly as a conservative proxy.
+            # A sample with ipa_length <= max_token_length * 1.2 will almost
+            # certainly fit within max_token_length BPE tokens.
+            char_limit = int(cfg.max_token_length * 1.2)
+            processed = [s for s in processed if s["ipa_length"] <= char_limit]
+            logger.info(
+                "max_token_length=%d (char_limit=%d): kept %d/%d (%.0f%%)",
+                cfg.max_token_length, char_limit,
+                len(processed), before, len(processed) / max(before, 1) * 100,
+            )
+
         # 5. Balance
         logger.info("Balancing per-language sample counts...")
         processed = self._balance(processed)

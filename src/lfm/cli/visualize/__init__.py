@@ -118,10 +118,12 @@ def register_visualize_group(
         sub.set_defaults(command_handler=cmd)
 
     # Commands with their own argument sets (no shared checkpoint args)
+    from lfm.cli.visualize.dataset import DatasetVizCommand
     from lfm.cli.visualize.translation import TranslationCommand
 
     standalone_commands = [
         TranslationCommand(),
+        DatasetVizCommand(),
     ]
 
     for cmd in standalone_commands:
