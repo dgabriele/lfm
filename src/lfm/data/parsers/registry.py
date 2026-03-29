@@ -11,12 +11,11 @@ from lfm.data.parsers.stanza_backend import STANZA_LANGS
 
 logger = logging.getLogger(__name__)
 
-# Priority order: Stanza constituency > benepar > dep2con
-# Benepar is disabled pending compatibility with transformers 5.x.
-# All benepar languages fall through to depcon.
+# Use DepCon for all languages for cross-language consistency.
+# Stanza constituency is higher quality for its 7 languages, but
+# mixing two annotation methods creates a systematic confound.
+# DepCon is available for all 16 languages via Stanza dependency parsing.
 _BACKEND_PRIORITY: list[tuple[str, dict[str, str]]] = [
-    ("stanza", STANZA_LANGS),
-    # ("benepar", BENEPAR_MODELS),  # disabled: incompatible with transformers 5.x
     ("depcon", DEPCON_LANGS),
 ]
 

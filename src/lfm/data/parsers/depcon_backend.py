@@ -21,14 +21,17 @@ from lfm.data.parsers.base import ConstituencyBackend, ParseTree
 
 logger = logging.getLogger(__name__)
 
-# Languages that use dep→con conversion.
-# Includes languages without constituency parsers (cs, et, fi, hi, ru)
-# and benepar languages (ar, hu, ko, pl) as fallback while benepar
-# is incompatible with transformers 5.x.
+# All 16 training languages via dependency → constituency conversion.
+# Using one method for all languages ensures cross-language consistency.
 DEPCON_LANGS: dict[str, str] = {
+    # Originally Stanza constituency
+    "deu": "de", "eng": "en", "spa": "es", "ind": "id",
+    "por": "pt", "tur": "tr", "vie": "vi",
+    # Originally benepar
+    "ara": "ar", "hun": "hu", "kor": "ko", "pol": "pl",
+    # Always depcon
     "ces": "cs", "est": "et", "fin": "fi",
     "hin": "hi", "rus": "ru",
-    "ara": "ar", "hun": "hu", "kor": "ko", "pol": "pl",
 }
 
 # Map UD dependency relations to approximate constituency labels
