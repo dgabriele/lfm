@@ -164,8 +164,8 @@ def _parse_language_worker(
 ) -> list[tuple[str, str, str, int]]:
     """Worker: parse all sentences for one language, extract constituents.
 
-    Runs in a separate process with its own Stanza pipeline.
-    Progress written directly to a shared log file (no queues).
+    Runs in a separate process with its own parser backend (Stanza,
+    benepar, or dep→con depending on the language).
 
     Args:
         args: (language, texts, min_length, progress_file, sentence_indices)
@@ -176,16 +176,12 @@ def _parse_language_worker(
         List of (language, text, label, parent_seq) tuples.
         parent_seq is the global index of the source sentence.
     """
-    import stanza
+    from lfm.data.parsers import get_backend
+    from lfm.data.parsers.base import ParseTree
 
     lang, texts, min_length, progress_file, sent_indices = args
-    iso2 = CONSTITUENCY_LANGS[lang]
 
-    stanza.download(iso2, processors="tokenize,pos,constituency", verbose=False)
-    nlp = stanza.Pipeline(
-        iso2, processors="tokenize,pos,constituency",
-        use_gpu=True, verbose=False,
-    )
+    backend = get_backend(lang, use_gpu=True)
 
     labels = EXTRACT_LABELS
     results: list[tuple[str, str, str, int]] = []
@@ -194,21 +190,22 @@ def _parse_language_worker(
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
-        batch_indices = sent_indices[i : i + batch_size] if sent_indices else list(range(i, i + len(batch)))
-        doc = nlp("\n\n".join(batch))
+        batch_indices = (
+            sent_indices[i : i + batch_size]
+            if sent_indices
+            else list(range(i, i + len(batch)))
+        )
 
-        # Map parsed sentences back to batch indices
-        sent_idx = 0
-        for sentence in doc.sentences:
-            if sentence.constituency is None:
-                sent_idx += 1
+        trees = backend.parse(batch)
+
+        for si, tree in enumerate(trees):
+            if tree is None:
                 continue
-            parent_seq = batch_indices[min(sent_idx, len(batch_indices) - 1)]
-            _extract_from_tree(
-                sentence.constituency, lang, labels, min_length,
+            parent_seq = batch_indices[min(si, len(batch_indices) - 1)]
+            _extract_from_parse_tree(
+                tree, lang, labels, min_length,
                 results, depth=0, parent_seq=parent_seq,
             )
-            sent_idx += 1
 
         processed += len(batch)
         if processed % 500 == 0:
@@ -249,7 +246,7 @@ def _extract_from_tree(
     depth: int,
     parent_seq: int = -1,
 ) -> None:
-    """Recursively extract constituents from a parse tree node."""
+    """Recursively extract constituents from a Stanza parse tree node."""
     label = getattr(node, "label", "")
     children = getattr(node, "children", [])
 
@@ -261,6 +258,36 @@ def _extract_from_tree(
     for child in children:
         if hasattr(child, "children") and child.children:
             _extract_from_tree(
+                child, language, labels, min_length, out, depth + 1,
+                parent_seq=parent_seq,
+            )
+
+
+def _extract_from_parse_tree(
+    node: object,
+    language: str,
+    labels: set[str],
+    min_length: int,
+    out: list[tuple[str, str, str, int]],
+    depth: int,
+    parent_seq: int = -1,
+) -> None:
+    """Recursively extract constituents from a ParseTree node.
+
+    Works with both lfm.data.parsers.base.ParseTree and Stanza trees
+    (both have .label and .children attributes).
+    """
+    label = getattr(node, "label", "")
+    children = getattr(node, "children", [])
+
+    if label in labels and depth > 0:
+        text = node.leaf_text() if hasattr(node, "leaf_text") else _tree_text(node)
+        if len(text) >= min_length:
+            out.append((language, text, label, parent_seq))
+
+    for child in children:
+        if hasattr(child, "children") and child.children:
+            _extract_from_parse_tree(
                 child, language, labels, min_length, out, depth + 1,
                 parent_seq=parent_seq,
             )
@@ -325,11 +352,14 @@ def extract_constituents_parallel(
         (lang, text, "S", -1) for lang, text in samples
     ]
 
-    # Build work items for supported languages only
+    # Build work items for all languages with parser support
+    from lfm.data.parsers import supported_languages
+    _supported = supported_languages()
+
     work_items: list[tuple[str, list[str], int]] = []
     work_indices: list[list[int]] = []
     for lang, texts in by_lang.items():
-        if lang in CONSTITUENCY_LANGS:
+        if lang in _supported:
             work_items.append((lang, texts, min_length))
             work_indices.append(by_lang_indices[lang])
 
