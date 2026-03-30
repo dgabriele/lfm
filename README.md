@@ -13,7 +13,7 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 3. ⚙️ [How It Works](#how-it-works) — three-step pipeline overview
 4. 🗣️ [The Linguistic Decoder](#the-linguistic-decoder) — architecture, pretraining, sample outputs
 5. 🌳 [Expression Generation](#expression-generation) — tree-structured generation through the decoder
-6. 🎯 [Agent Game Results](#agent-game-results) — REINFORCE referential game validation
+6. 🎯 [Agent Game Results](#agent-game-results) — Referential game validation (direct backprop)
 7. 📊 [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
 8. 💾 [Dataset Generation](#dataset-generation) — HDF5 pipeline with constituency augmentation
 9. 📈 [Visualization CLI](#visualization-cli) — t-SNE, clustering, attention, Zipf, and more
@@ -32,7 +32,7 @@ LFM makes them speakable. It encodes any continuous representation as a new natu
 
 The key mechanism is a **frozen linguistic bottleneck**: a VAE decoder pretrained on typologically diverse languages, then frozen. Downstream systems don't learn a communication protocol from scratch — they learn to project their representations into the decoder's latent space, and the decoder's structure constrains the output to be linguistically well-formed. This is analogous to Universal Grammar in the Chomskyan sense: a fixed structural prior that constrains the space of possible languages, where only the mapping from meaning to form is learned. This avoids the known failure modes of end-to-end emergent communication (anti-Zipfian codes, degenerate protocols, non-compositional signals).
 
-The pipeline is concrete: an input embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for a receiver to identify what was encoded (95% accuracy, 15x above chance in a referential game). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
+The pipeline is concrete: an input embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for a receiver to identify what was encoded (99.2% peak accuracy, 15.9x above chance in a referential game). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
 
 ## The Problem
 
@@ -286,30 +286,29 @@ Key findings:
 
 ## Agent Game Results
 
-REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives that ramp from random distractors to within-cluster (semantically similar) distractors over training:
+Referential game with direct backprop through the v4 frozen decoder, using real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives:
 
 | Metric | Value |
 |--------|-------|
-| Accuracy (100% hard negatives) | **~89%** (chance = 6.25%) |
-| Peak batch accuracy | **92.2%** |
-| Improvement over chance | **14.3x** |
-| Message length | 96 tokens |
-| Receiver loss | 0.27-0.50 (from 2.8 at start) |
-| Batch size | 128 |
-| Convergence | ~500 steps to plateau |
+| Accuracy (100% hard negatives) | **~96%** (chance = 6.25%) |
+| Peak batch accuracy | **99.2%** |
+| Improvement over chance | **15.9x** |
+| Message length | ~41 tokens |
+| Loss at plateau | 0.05-0.08 |
+| Batch size | 256 |
+| Convergence | ~50 steps to >95% |
 
-### Curriculum training
+### Two-phase backprop
 
-The game starts with random (easy) distractors and linearly ramps to 100% within-cluster (hard) distractors over 500 steps. The system maintains ~89% accuracy even when all 15 distractors come from the same semantic cluster as the target — meaning the frozen linguistic bottleneck carries fine-grained discriminative information, not just coarse topic-level distinctions.
+Gradients flow directly from the receiver's cross-entropy loss through the frozen decoder's cross-attention to the latent memory, back to the sender's `_input_proj`. No REINFORCE needed — the decoder's cross-attention is the gradient highway. Phase 1 generates tokens via fast KV-cached decode (no_grad); phase 2 re-runs the decoder on those tokens in one parallel pass with gradients enabled. An attention-based message encoder (2-layer self-attention + learned query readout) reads the decoder's multi-scale hidden states.
 
 ```
-step=0    hard=0%    acc=6.2%    (random init)
-step=50   hard=10%   acc=91.4%
-step=250  hard=50%   acc=81.2%
-step=500  hard=100%  acc=88.3%
-step=1000 hard=100%  acc=90.6%
-step=1500 hard=100%  acc=88.3%
-step=2000 hard=100%  acc=89.1%   (stable plateau)
+step=0    hard=0%    acc=7.0%    (random init)
+step=50   hard=10%   acc=99.2%
+step=250  hard=50%   acc=96.9%
+step=500  hard=100%  acc=95.7%
+step=1000 hard=100%  acc=97.3%
+step=1500 hard=100%  acc=95.7%   (stable plateau)
 ```
 
 ### Example outputs
@@ -334,7 +333,7 @@ TEXT: "Of course, Satan is no stranger to the game."
  IPA: thariksi dimesial lud thojlua leetelmiset martifik atyshymyznynyn en jakhan termirlakin ke
 ```
 
-Each input produces a distinct, pronounceable IPA utterance. The output draws on phonotactic patterns from all 16 training languages — the decoder mixes typological features from its training languages into a novel linguistic form that is neither any specific human language nor a degenerate code.
+Each input produces a distinct, pronounceable IPA utterance (~41 tokens with the v4 decoder). The output draws on phonotactic patterns from all 16 training languages — the decoder mixes typological features from its training languages into a novel linguistic form that is neither any specific human language nor a degenerate code.
 
 ### Structural evaluation
 
@@ -509,8 +508,9 @@ lfm visualize all --checkpoint data/vae_resume.pt
 **Run the referential game** — train an input projection to encode LLM embeddings through the frozen decoder:
 
 ```bash
-python scripts/precompute_embeddings.py  # one-time: sentence embeddings
-python scripts/run_referential_reinforce.py
+python scripts/precompute_embeddings.py        # one-time: sentence embeddings
+poetry run lfm agent referential               # train with defaults (batch 256, 2000 steps)
+poetry run lfm agent referential --help        # see all options
 ```
 
 **Use in your own agent system** —
@@ -574,7 +574,7 @@ A pretrained LM has morphological knowledge handed to it as tokenizer artifacts 
 - Compositional structure present (power-law probe R-squared, top dims at 0.6-0.75)
 - Low effective dimensionality (90% variance in 3 PCs)
 
-The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 93% accuracy (7.4x above chance).
+The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 99.2% peak accuracy (15.9x above chance), with ~96% sustained at 100% hard negatives.
 
 ### Limitations
 
