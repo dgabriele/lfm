@@ -130,7 +130,7 @@ The **LinguisticDecoder** has architectural biases for natural language:
 
 The decoder is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay (per-epoch), DIP-VAE covariance regularization, and full resume support.
 
-**v4 (current)**: constituency-augmented dataset (~5.75M samples — full sentences + extracted NP/VP/PP phrases), latent_dim=384, encoder_num_layers=3, 20 epochs. The constituency augmentation teaches the decoder to produce variable-length output at all scales.
+**v4 (current)**: 2.6M IPA sentences from 16 typologically diverse languages, syllable-aligned BPE tokenization, 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Variable-length output is handled architecturally via the expression system's z-switching decode.
 
 ### Pretraining results
 
@@ -160,34 +160,27 @@ dec:  ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌ
       [WED=0/19, WER=0%]
 ```
 
-### Interpolation (English → Portuguese, 9 steps)
+### Cross-typological Interpolation
 
-Smooth typological transition through the latent space:
+The latent space supports smooth interpolation between typologically distant languages. Pairs are auto-selected by maximum z-distance across language family boundaries:
 
-```
-0.000: boʊθ ʌnd ʌfɛnθ ʌnd boʊθ ʌnd ʌfɑnsfɪvɪldæks ʌnd boʊθ boʊθɛɹiʌm ...
-0.250: boʊθ ʌnd ʌfendɝθ ʌnd ʌ umɛfɑnlfɪsaɪzɪz ʌnd ʌ boʊθ pɔɪnts ...
-0.500: boʊθ nɐ suɐ dikɐdɛ ʌnd ʌ ɛspɛfensiɐ nɛpɛ nɐʁɐ vɤj umɐ dɛ ...
-0.625: nɐ suɐ boʊθ ɛspɛjtensiɐ dɛ inɛɾiɐ umɐ puɾiɐ vɤj jɛlfupskwa ...
-0.750: nɐ suɐ ɛspɛɾiensiɐ dɛ nɛpɛ inɛ umɐ dɛ umɐ kuɾlfɐ nɐ suɐ ...
-1.000: nɐ suɐ ɛspɛɾiensiɐ nɐ suɐ ɛspɛɾiensiɐ nɐ suɐ nɐ inɛ ...
-```
+<p align="center">
+  <img src="docs/static/images/interpolation_trajectories.png" width="60%" alt="Interpolation trajectories in t-SNE space" />
+</p>
+<p align="center"><em>Arabic→Vietnamese (Afro-Asiatic introflexive → Austroasiatic isolating) and German→Turkish (Indo-European fusional → Turkic agglutinative). Decoded IPA transitions smoothly through intermediate typological regions.</em></p>
 
-English phonology at t=0, mixed English-Portuguese at t=0.5, clean Portuguese at t=1.0.
+### Perturbation (σ=0 to σ=2)
 
-### Perturbation (σ=0 to σ=3)
-
-Adding noise scaled to the encoder's z distribution:
+Adding noise scaled to the encoder's z distribution to the same z vector:
 
 ```
-σ=0.00: boʊθ ʌnd ʌfɛnθ ʌnd boʊθ ʌnd ʌfɑnsfɪvɪldæks ...           (English, unchanged)
-σ=0.50: boʊθ ʌnd juθɑnskfnɪs ʌnd ʌfleɪvsɛnsɛpæks ...              (English, content shifts)
-σ=1.00: boʊθ ʌnd juskin pule innɑn ʋi ʌfoksørætien ...             (mixed, Finnish elements)
-σ=2.00: juskin jɛri kule ʋirnɑn ɣarni ʃikokɑn ntsɑnin ...         (Finnish phonotactics)
-σ=3.00: juri nsin ʃikɑn sɑksin pumpiɑ mskin ko kolrnʃe ...         (far from English, agglutinative)
+σ=0.0: ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
+σ=0.5: ɪf ju θɪŋk hɔltɨ vɤj mɯk wɪl ðʌ pipʌl hu pɹɑmʌni ðʌ naʌmz ʌv thlɐnɐ nɐs infoɾ vei ɑɹ faɪnɪŋ ...
+σ=1.0: ɪf jukɛntins ðʌ mɛstʌl caeɪz ðʌ pipʌl hu ðʌ dʒʌmz ɪz pɹɑmʌdʒʌlz ʌv dɪskjʌɛstɪŋ ɪf aʊɝ pɾɔvojɝ ...
+σ=2.0: ʃaɾ a si̇ɒni svoi kajanlaɾɯn mɐsja ini dɛleɾi hann bœlen o bœlæʃleɾi snabajili ve undɑkoɰinɯz ...
 ```
 
-Small noise preserves language and content. At σ=1.0, phonotactics shift to mixed typology. At σ=3.0, the output has fully crossed into a different typological region of the manifold.
+σ=0 is perfect reconstruction. σ=0.5 preserves English phonotactics with content shifts. σ=1.0 shows mixed typology. σ=2.0 has crossed entirely into agglutinative/Turkic phonotactics — the decoder navigates continuously through the latent manifold.
 
 ## Expression Generation
 

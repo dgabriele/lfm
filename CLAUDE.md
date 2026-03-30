@@ -107,37 +107,32 @@ src/lfm/
 
 ## Pretraining Results
 
-v1: 42 epochs on 560K IPA sentences from 16 languages (legacy). Current: 7 languages, ~673K sentences:
-- **Val CE: 0.52** (PPL ≈ 1.7)
-- **Reconstruction**: near-perfect through 256-dim latent bottleneck, word order largely preserved
-- **Interpolation**: smooth typological transitions (English ↔ Polish)
-- **σ=0.5 perturbation**: paraphrastic variation within language
-- **TTR: 0.958**, rep_rate: 0.00, mean word length: 4.7, active z dims: 256/256
+**v4 (current)**: 2.6M IPA sentences, 16 languages, 9 epochs with syllable-aligned BPE and 8-token z memory (latent_dim=256, lr=0.0005):
 
-### Sample outputs (epoch 36):
+- **Val CE: 0.061** (PPL ≈ 1.06)
+- **Token accuracy: 96.8%**
+- **Reconstruction**: near-perfect through 256-dim bottleneck (WER=0% on diagnostic samples)
+- **Interpolation**: smooth cross-typological transitions (Arabic↔Vietnamese, German↔Turkish)
+- **Perturbation**: σ=0.5 preserves language, σ=1.0 shifts typology, σ=3.0 crosses to different family
+- **Active z dims: 256/256**, PCA 90% variance in 146 PCs, Smoothness Spearman r=0.620 (p≈0)
 
-**Reconstruction:**
-```
-orig: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt pʌlis skɑtlʌnd waɪ ðʌ foʊtʌɡɹæf hæd nɑt bɪn ɹilist
-dec:  ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
-```
+### Sample outputs (epoch 9, v4):
 
-**Interpolation (English → Polish):**
+**Reconstruction (WER=0%):**
 ```
-0.00: ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skɑtlʌnd pʌlis waɪ ðʌ foʊtʌɡɹæf hæd bɪn ɹilist nɑt
-0.50: faʊndɝ ɡʊd seɪ ðʌ lɪθi ælkʌɡɹeɪʃʌnt ɪz ɔlsoʊ wʌn ʌbaʊt kʌlwarnaʃ ɔf dos rɔʃʌn...
-1.00: zaatakɔvali nas faɲi muvjɔnt͡s tɔ dɔpjɛrɔ druɡji t͡sɔ film batma ɔ vɨbiɲɛt͡ɕɛ dɔ rɔlɛ xɔrɨ
+orig: ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
+dec:  ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
 ```
 
-**Perturbation (σ=0.5):**
+**Perturbation (σ=0 to σ=2, same z):**
 ```
-ðʌ bɔɹdɝ tɛlʌɡɹæf æskt skæŋlʌnd ðʌ sɛfʌleɪ lɪdmʌ vɪ thew ɐlbɛjkɔmɛ ɹiɲɪt͡seʃ lɔledr
+σ=0.0: ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
+σ=0.5: ɪf ju θɪŋk hɔltɨ vɤj mɯk wɪl ðʌ pipʌl hu pɹɑmʌni ðʌ naʌmz ʌv thlɐnɐ nɐs infoɾ vei ɑɹ faɪnɪŋ ðʌ dăw thuŋi
+σ=1.0: ɪf jukɛntins ðʌ mɛstʌl caeɪz ðʌ pipʌl hu ðʌ dʒʌmz ɪz pɹɑmʌdʒʌlz ʌv dɪskjʌɛstɪŋ ɪf aʊɝ pɾɔvojɝ swɪs hu
+σ=2.0: ʃaɾ a si̇ɒni svoi kajanlaɾɯn mɐsja ini dɛleɾi hann bœlen o bœlæʃleɾi snabajili ve undɑkoɰinɯz mosfeɰi jujedi dœnfɛʃyjde
 ```
 
-**Random z:**
-```
-pɹoʊtɛlz ʌnd daɪl ɲiən wʌt ðʌ ɪnkɹʌpdeɪʃʌnz ʌv noɦɪ popoɟɪ lɛɟɪ v kɛɹi tu nikolɛt ɪn komːe
-```
+σ=0 is perfect reconstruction. σ=0.5 preserves English phonotactics with content shifts. σ=1.0 shows mixed typology. σ=2.0 has crossed entirely into agglutinative/Turkic phonotactics.
 
 ## Agent Game Results
 
