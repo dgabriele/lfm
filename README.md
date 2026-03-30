@@ -612,9 +612,11 @@ Each upload generates a YAML manifest in `releases/huggingface/` recording the a
 
 ## Further Reading
 
-- **[Translation Guide](docs/translation-guide.md)** — Self-supervised IPA -> English translation: generate pairs, train, evaluate, and visualize the interpretability pipeline.
-- **[LFM vs LQM+LLM](docs/lfm-vs-lqm.md)** — How LFM's translation-based architecture compares to Large Quantitative Model + LLM pipelines for scientific discovery, and why the distinction between alignment and translation matters for finding genuinely novel structure in dynamical systems.
-- **[Roadmap](docs/roadmap.md)** — Planned improvements: unsupervised constituency induction, learned tree depth, bottom-up generation, multi-agent self-play, and more.
+- **[Grounded Reasoning](docs/grounded-reasoning.md)** — How LFM enables reasoning in a data-reconstructive alien language rather than English, with self-verifying inference and learned compositional structure. Compares to chain-of-thought, tree-of-thought, and process reward models.
+- **[Translation Guide](docs/translation-guide.md)** — Self-supervised IPA → English translation: generate pairs, train, evaluate, and visualize the interpretability pipeline.
+- **[Expression System](docs/expression-system.md)** — Tree-structured expression generation: architecture, continuous z-switching decode, integration guide, and downstream applications.
+- **[LFM vs LQM+LLM](docs/lfm-vs-lqm.md)** — How LFM's translation-based architecture compares to Large Quantitative Model + LLM pipelines for scientific discovery.
+- **[Roadmap](docs/roadmap.md)** — Planned improvements: constituency-labeled leaves, bidirectional translation, multi-agent self-play, emotional tone expression, and more.
 
 ## License
 
