@@ -1,29 +1,26 @@
-"""Referential game with REINFORCE through the linguistic bottleneck.
+"""Referential game with direct backprop through the linguistic bottleneck.
 
 The sender's embedding is projected to z, the frozen decoder generates
-variable-length IPA text (the "message"), the message is re-encoded
-into a fixed vector, and the receiver scores candidates against it.
+variable-length IPA text via differentiable Gumbel-Softmax, the decoder's
+hidden states are re-encoded via attention into a fixed vector, and the
+receiver scores candidates against it.
 
-The generated text IS the bottleneck — not z. Complex embeddings should
-produce longer, more detailed utterances; simple ones produce shorter.
-
-Since text generation is non-differentiable, we use REINFORCE:
-  - Action: the generated token sequence (from frozen decoder)
-  - Reward: whether the receiver correctly identified the target
-  - Policy: _input_proj (maps embedding → z, which conditions the decoder)
-
-The receiver and message re-encoder are trained with standard backprop
-(they operate on the discrete text, not through the decoder).
+Two-phase forward:
+  1. Generate token sequence with no_grad (fast KV-cached decode).
+  2. Re-run the decoder on the generated tokens WITH gradients in one
+     parallel pass.  Gradients flow through cross-attention to the latent
+     memory back to _input_proj.
 
 Usage::
 
-    python scripts/generate_synthetic_embeddings.py  # or real embeddings
+    python scripts/precompute_embeddings.py  # or real embeddings
     python scripts/run_referential_reinforce.py
 """
 
 from __future__ import annotations
 
 import logging
+import sys
 
 import numpy as np
 import torch
@@ -34,6 +31,11 @@ from lfm.embeddings.store import EmbeddingStore
 from lfm.faculty.config import FacultyConfig
 from lfm.faculty.model import LanguageFaculty
 from lfm.generator.config import GeneratorConfig
+from lfm.generator.layers import multiscale_causal_mask
+
+# Force line-buffered output
+sys.stderr = open(sys.stderr.fileno(), "w", buffering=1, closefd=False)
+sys.stdout = open(sys.stdout.fileno(), "w", buffering=1, closefd=False)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,73 +44,70 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Message encoder: attention over decoder hidden states
+# ---------------------------------------------------------------------------
+
+
 class MessageEncoder(nn.Module):
-    """Re-encode N variable-length statement hidden states into a fixed vector.
+    """Encode variable-length decoder hidden states into a fixed message vector.
 
-    For each statement, mean-pools the decoder hidden states into a
-    statement-level embedding, then uses learned cross-statement attention
-    to aggregate N statement embeddings into one message vector.
-
-    When num_statements=1, degrades to the original single-pool behavior.
+    Uses self-attention to process the decoder's multi-scale hidden states,
+    then a learned query cross-attention readout to produce a fixed-size
+    vector.  This preserves the rich per-position structure from the
+    multi-head decoder rather than destroying it with mean-pooling.
     """
 
     def __init__(
-        self, hidden_dim: int, output_dim: int, num_statements: int = 1,
+        self,
+        hidden_dim: int,
+        output_dim: int,
+        num_heads: int = 8,
+        num_layers: int = 2,
     ) -> None:
         super().__init__()
-        self.num_statements = num_statements
-        self.statement_proj = nn.Sequential(
-            nn.Linear(hidden_dim, output_dim),
-            nn.ReLU(),
-            nn.Linear(output_dim, output_dim),
-        )
-        if num_statements > 1:
-            self.agg_query = nn.Parameter(torch.randn(1, 1, output_dim) * 0.02)
-            self.agg_attn = nn.MultiheadAttention(
-                embed_dim=output_dim, num_heads=4, batch_first=True,
+        self.layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=num_heads,
+                dim_feedforward=hidden_dim * 4,
+                batch_first=True,
+                dropout=0.1,
             )
-        else:
-            self.agg_query = None
-            self.agg_attn = None
+            for _ in range(num_layers)
+        ])
+        self.query = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
+        self.readout = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=num_heads, batch_first=True,
+        )
+        self.out_norm = nn.LayerNorm(hidden_dim)
+        self.proj = nn.Linear(hidden_dim, output_dim)
 
-    def forward(
-        self,
-        statement_embeddings: Tensor,
-        statement_mask: Tensor,
-    ) -> Tensor:
-        """Pool N statement hidden states into a single message vector.
+    def forward(self, hidden_states: Tensor, mask: Tensor) -> Tensor:
+        """Encode decoder hidden states into a message vector.
 
         Args:
-            statement_embeddings: (batch, N, S, H) or (batch, S, H) for N=1.
-            statement_mask: (batch, N, S) or (batch, S) for N=1.
+            hidden_states: (batch, seq_len, hidden_dim) decoder states.
+            mask: (batch, seq_len) boolean mask (True = valid).
 
         Returns:
             (batch, output_dim) message vector.
         """
-        if statement_embeddings.dim() == 3:
-            # Single statement — backward compat: (B, S, H) → (B, 1, S, H)
-            statement_embeddings = statement_embeddings.unsqueeze(1)
-            statement_mask = statement_mask.unsqueeze(1)
+        pad_mask = ~mask
+        x = hidden_states
+        for layer in self.layers:
+            x = layer(x, src_key_padding_mask=pad_mask)
 
-        b, n, s, h = statement_embeddings.shape
+        b = x.size(0)
+        query = self.query.expand(b, -1, -1)
+        readout, _ = self.readout(query, x, x, key_padding_mask=pad_mask)
+        readout = self.out_norm(readout.squeeze(1))
+        return self.proj(readout)
 
-        # 1. Mean-pool each statement independently
-        mask_f = statement_mask.unsqueeze(-1).float()  # (B, N, S, 1)
-        pooled = (
-            (statement_embeddings * mask_f).sum(dim=2)
-            / mask_f.sum(dim=2).clamp(min=1)
-        )  # (B, N, H)
 
-        # 2. Project each statement
-        stmt_vecs = self.statement_proj(pooled)  # (B, N, output_dim)
-
-        # 3. Aggregate across statements
-        if n == 1 or self.agg_attn is None:
-            return stmt_vecs.squeeze(1)
-
-        query = self.agg_query.expand(b, -1, -1)  # (B, 1, output_dim)
-        agg, _ = self.agg_attn(query, stmt_vecs, stmt_vecs)
-        return agg.squeeze(1)  # (B, output_dim)
+# ---------------------------------------------------------------------------
+# Receiver
+# ---------------------------------------------------------------------------
 
 
 class Receiver(nn.Module):
@@ -119,19 +118,77 @@ class Receiver(nn.Module):
         self.proj = nn.Linear(dim, dim)
 
     def forward(self, message: Tensor, candidates: Tensor) -> Tensor:
-        """Score candidates.
-
-        Args:
-            message: (batch, dim) message vector.
-            candidates: (batch, K, dim) candidate embeddings.
-
-        Returns:
-            (batch, K) logits.
-        """
-        projected = self.proj(message)  # (B, dim)
+        projected = self.proj(message)
         return torch.bmm(
-            projected.unsqueeze(1), candidates.transpose(1, 2)
+            projected.unsqueeze(1), candidates.transpose(1, 2),
         ).squeeze(1)
+
+
+# ---------------------------------------------------------------------------
+# Differentiable decoder re-run
+# ---------------------------------------------------------------------------
+
+
+def rerun_decoder_with_grad(
+    gen, z: Tensor, tokens: Tensor, mask: Tensor,
+) -> Tensor:
+    """Re-run the frozen decoder on generated tokens WITH gradients.
+
+    Phase 2 of the two-phase forward: takes the token sequence from
+    phase 1 (no_grad generation) and runs it through the decoder in
+    one parallel pass.  Gradients flow through the decoder's cross-
+    attention to memory, back to z and _input_proj.
+
+    The token embeddings are detached (integer lookup) — only the
+    cross-attention path to memory carries gradient signal.
+
+    Args:
+        gen: The MultilingualVAEGenerator (frozen decoder).
+        z: Latent codes (batch, latent_dim) WITH gradient.
+        tokens: Generated token IDs (batch, seq_len) from phase 1.
+        mask: Boolean mask (batch, seq_len).
+
+    Returns:
+        Decoder hidden states (batch, seq_len, hidden_dim) with gradients.
+    """
+    # Calibrate / quantize z (same path as generation)
+    if gen._vq_codebook is not None:
+        z_dec = gen._quantize_z(z)
+    elif gen._z_stats_initialized:
+        z_dec = gen.calibrate_z(z)
+    else:
+        z_dec = z
+
+    # z → memory (differentiable through frozen linear)
+    memory = gen.latent_to_decoder(z_dec).reshape(
+        z.size(0), gen._num_memory_tokens, -1,
+    )
+
+    # Embed the generated tokens (detached — no grad through token chain)
+    tok_emb = gen.token_embedding(tokens)
+
+    # Full causal mask for the sequence
+    seq_len = tokens.size(1)
+    causal_mask = multiscale_causal_mask(
+        seq_len,
+        num_heads=gen.config.decoder_num_heads,
+        head_windows=gen.config.attention_head_windows,
+        global_every=gen.config.attention_global_every,
+        device=z.device,
+    )
+
+    # Run decoder in one parallel pass — cross-attention to memory has grad
+    rope = gen._rope_freqs[:seq_len] if gen._rope_freqs is not None else None
+    hidden = gen.decoder(
+        tok_emb, memory, tgt_mask=causal_mask, rope_freqs=rope,
+    )
+
+    return hidden
+
+
+# ---------------------------------------------------------------------------
+# Main training loop
+# ---------------------------------------------------------------------------
 
 
 def main(
@@ -141,13 +198,13 @@ def main(
     steps: int = 2000,
     sender_lr: float = 1e-4,
     receiver_lr: float = 1e-3,
-    batch_size: int = 128,
+    batch_size: int = 64,
     num_distractors: int = 15,
     embedding_dim: int = 384,
     device: str = "cuda",
     log_every: int = 50,
     checkpoint_every: int = 100,
-    baseline_decay: float = 0.99,
+    output_dir: str = "data/referential_game",
     curriculum: bool = True,
     curriculum_warmup: int = 500,
     curriculum_start: float = 0.0,
@@ -155,18 +212,18 @@ def main(
     resume: str | None = None,
     vq_codebook_path: str | None = None,
     vq_residual_alpha: float = 1.0,
-    length_cost: float = 0.0,
-    target_length: int = 96,
     num_statements: int = 1,
     max_output_len: int = 96,
+    num_memory_tokens: int = 8,
+    encoder_layers: int = 2,
+    encoder_heads: int = 8,
+    max_grad_norm: float = 1.0,
 ) -> dict[str, float]:
-    """Run the REINFORCE referential game.
+    """Run the referential game with direct backprop.
 
-    Two optimizers:
-    - Sender (REINFORCE): _input_proj learns which z produces messages
-      that help the receiver succeed.
-    - Receiver (backprop): message_encoder + receiver learn to extract
-      discriminative info from the generated text.
+    Single optimizer trains _input_proj, message encoder, and receiver
+    end-to-end via the receiver's cross-entropy loss.  Gradients flow
+    through the frozen decoder's cross-attention to the latent memory.
     """
     torch_device = torch.device(device)
 
@@ -178,7 +235,7 @@ def main(
         store.num_passages, store.embedding_dim, store.num_clusters,
     )
 
-    # Faculty with frozen generator — full AR decode (eval mode for decoder)
+    # Faculty with frozen generator — eval mode for full AR decode
     faculty_config = FacultyConfig(
         dim=embedding_dim,
         generator=GeneratorConfig(
@@ -189,55 +246,57 @@ def main(
             num_statements=num_statements,
             vq_codebook_path=vq_codebook_path,
             vq_residual_alpha=vq_residual_alpha,
+            num_memory_tokens=num_memory_tokens,
         ),
     )
 
     faculty = LanguageFaculty(faculty_config).to(torch_device)
+    gen = faculty.generator
+    gen.eval()
 
-    # We need the generator to do full AR decode, not the direct z path.
-    # Set eval mode so freeze_decoder + training doesn't trigger the shortcut.
-    faculty.generator.eval()
-
-    # Trigger lazy init of _input_proj by running one forward pass
+    # Trigger lazy init of _input_proj
     with torch.no_grad():
         dummy = torch.randn(1, embedding_dim).to(torch_device)
         faculty(dummy)
 
-    # Message encoder: decoder_hidden_dim → embedding_dim
+    # Message encoder: attention over decoder hidden states
     decoder_hidden = faculty_config.generator.decoder_hidden_dim
     msg_encoder = MessageEncoder(
-        decoder_hidden, embedding_dim, num_statements,
+        decoder_hidden, embedding_dim,
+        num_heads=encoder_heads, num_layers=encoder_layers,
     ).to(torch_device)
     receiver = Receiver(embedding_dim).to(torch_device)
 
-    # Sender params (REINFORCE — only _input_proj)
-    sender_params = [
-        p for p in faculty.generator.parameters() if p.requires_grad
-    ]
-    sender_optimizer = torch.optim.Adam(sender_params, lr=sender_lr)
+    # Collect trainable params
+    sender_params = [p for p in gen.parameters() if p.requires_grad]
+    encoder_params = list(msg_encoder.parameters())
+    receiver_params = list(receiver.parameters())
+    all_params = sender_params + encoder_params + receiver_params
 
-    # Receiver params (backprop)
-    receiver_params = list(msg_encoder.parameters()) + list(receiver.parameters())
-    receiver_optimizer = torch.optim.Adam(receiver_params, lr=receiver_lr)
+    # Single optimizer with per-group learning rates
+    optimizer = torch.optim.Adam([
+        {"params": sender_params, "lr": sender_lr},
+        {"params": encoder_params, "lr": receiver_lr},
+        {"params": receiver_params, "lr": receiver_lr},
+    ])
 
     logger.info(
-        "Sender params: %d, Receiver params: %d",
+        "Sender params: %d, Encoder params: %d, Receiver params: %d",
         sum(p.numel() for p in sender_params),
+        sum(p.numel() for p in encoder_params),
         sum(p.numel() for p in receiver_params),
     )
 
     # Resume from checkpoint
     start_step = 0
-    baseline = 0.0
     if resume is not None:
         ckpt = torch.load(resume, map_location=torch_device, weights_only=False)
-        faculty.generator._input_proj.load_state_dict(ckpt["input_proj"])
-        faculty.generator._input_refine.load_state_dict(ckpt["input_refine"])
+        gen._input_proj.load_state_dict(ckpt["input_proj"])
+        gen._input_refine.load_state_dict(ckpt["input_refine"])
         msg_encoder.load_state_dict(ckpt["msg_encoder"])
         receiver.load_state_dict(ckpt["receiver"])
         start_step = ckpt.get("step", 0)
-        baseline = ckpt.get("baseline", 0.0)
-        logger.info("Resumed from %s at step %d (baseline=%.3f)", resume, start_step, baseline)
+        logger.info("Resumed from %s at step %d", resume, start_step)
 
     embeddings_np = store._embeddings
     cluster_labels = store._cluster_labels
@@ -246,8 +305,13 @@ def main(
     chance = 1.0 / num_candidates
     rng = np.random.default_rng(42)
 
+    # Output directory
+    from pathlib import Path
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    best_acc = 0.0
+
     logger.info(
-        "REINFORCE referential game: %d distractors, chance=%.1f%%, curriculum=%s",
+        "Backprop referential game: %d distractors, chance=%.1f%%, curriculum=%s",
         num_distractors, chance * 100, curriculum,
     )
     if curriculum:
@@ -267,7 +331,7 @@ def main(
         # --- Sample batch ---
         idx = rng.integers(0, n, size=batch_size)
         anchor = torch.tensor(
-            embeddings_np[idx], dtype=torch.float32
+            embeddings_np[idx], dtype=torch.float32,
         ).to(torch_device)
 
         # Sample distractors: mix of hard (same cluster) and easy (random)
@@ -286,161 +350,131 @@ def main(
             dist_indices[i] = np.concatenate([hard_idx, easy_idx])
 
         distractors = torch.tensor(
-            embeddings_np[dist_indices], dtype=torch.float32
+            embeddings_np[dist_indices], dtype=torch.float32,
         ).to(torch_device)
 
-        # --- Sender: generate message via frozen decoder ---
-        # Need to capture log_prob of the generated tokens for REINFORCE
+        # =============================================================
+        # Phase 1: Generate tokens (no_grad, fast KV-cached decode)
+        # =============================================================
         with torch.no_grad():
             lfm_outputs = faculty(anchor)
 
-        # Extract decoder hidden states and mask
-        gen_embeddings = lfm_outputs["generator.embeddings"]  # (B, N*S, H)
-        gen_mask = lfm_outputs["generator.mask"]  # (B, N*S)
-        # Statement-level data for multi-statement MessageEncoder
-        gen_stmt_emb = lfm_outputs.get("generator.statement_embeddings")  # (B, N, S, H)
-        gen_stmt_mask = lfm_outputs.get("generator.statement_mask")  # (B, N, S)
+        tokens = lfm_outputs["generator.tokens"]        # (B, S)
+        gen_mask = lfm_outputs["generator.mask"]         # (B, S)
 
-        # Also get the log probability of the generated sequence
-        # from the generator's token_probs
-        token_probs = lfm_outputs["generator.token_probs"]  # (B, S, V)
-        tokens = lfm_outputs["generator.tokens"]  # (B, S)
+        # =============================================================
+        # Phase 2: Re-run decoder WITH gradients (parallel, one pass)
+        # =============================================================
+        # Recompute z from _input_proj with gradients
+        gen._ensure_input_proj(anchor.size(-1))
+        embeddings_in = anchor.unsqueeze(1)  # (B, 1, dim)
+        mask_in = torch.ones(
+            batch_size, 1, dtype=torch.bool, device=torch_device,
+        )
+        pooled = gen._pool(embeddings_in, mask_in)
+        h = gen._input_proj(pooled) + gen._input_refine(pooled)
+        n_stmt = gen.config.num_statements
+        h = h.view(batch_size, n_stmt, gen._latent_dim * 2)
+        mu, _ = h.chunk(2, dim=-1)  # (B, N, latent_dim)
+        z = mu.reshape(batch_size * n_stmt, gen._latent_dim)
 
-        # Log prob of each generated token under the policy
-        log_probs_all = torch.log(
-            token_probs.gather(2, tokens.unsqueeze(-1)).squeeze(-1) + 1e-10
-        )  # (B, S)
-        # Mask and sum for sequence log prob
-        (log_probs_all * gen_mask.float()).sum(dim=1)  # (B,)
+        # Re-run decoder: cross-attention gradients flow to z → _input_proj
+        hidden = rerun_decoder_with_grad(gen, z, tokens, gen_mask)
 
-        # --- Receiver: score candidates ---
-        if gen_stmt_emb is not None:
-            message = msg_encoder(gen_stmt_emb.detach(), gen_stmt_mask.detach())
-        else:
-            message = msg_encoder(gen_embeddings.detach(), gen_mask.detach())
+        # =============================================================
+        # Encode message and score candidates
+        # =============================================================
+        message = msg_encoder(hidden, gen_mask)
 
         candidates = torch.cat(
-            [anchor.unsqueeze(1), distractors], dim=1
+            [anchor.unsqueeze(1), distractors], dim=1,
         )
-        perm = torch.stack(
-            [torch.randperm(num_candidates, device=torch_device)
-             for _ in range(batch_size)]
-        )
+        perm = torch.stack([
+            torch.randperm(num_candidates, device=torch_device)
+            for _ in range(batch_size)
+        ])
         perm_expanded = perm.unsqueeze(-1).expand_as(candidates)
         candidates = torch.gather(candidates, 1, perm_expanded)
         target_idx = (perm == 0).long().argmax(dim=1)
 
         logits = receiver(message, candidates)
 
-        # --- Receiver loss (backprop) ---
-        receiver_loss = F.cross_entropy(logits, target_idx)
-        receiver_optimizer.zero_grad()
-        receiver_loss.backward()
-        nn.utils.clip_grad_norm_(receiver_params, 1.0)
-        receiver_optimizer.step()
+        # =============================================================
+        # Single loss, single backward
+        # =============================================================
+        loss = F.cross_entropy(logits, target_idx)
 
-        # --- Sender loss (REINFORCE) ---
-        with torch.no_grad():
-            preds = logits.argmax(dim=1)
-            correct = (preds == target_idx).float()  # 1 if correct, 0 if not
-            # Length-penalized reward: correct predictions are discounted by
-            # message length.  Incorrect predictions always get 0.  This
-            # incentivizes the shortest message that still discriminates.
-            msg_lengths = gen_mask.float().sum(dim=1)  # (B,)
-            # Normalize by the target message length. Messages shorter than
-            # this get bonus reward, longer get penalized toward zero.
-            reward = correct * (1.0 - length_cost * msg_lengths / target_length).clamp(min=0)
-            # Update baseline
-            baseline = baseline_decay * baseline + (1 - baseline_decay) * reward.mean().item()
-            advantage = reward - baseline
-
-        # REINFORCE: ∇J = E[advantage * ∇log π(a|s)]
-        # We need gradients of _input_proj w.r.t. the log probability
-        # of the generated sequence. But the generation was done with
-        # no_grad. We need to recompute the z → log_prob path with grad.
-
-        # Recompute z with gradients
-        gen = faculty.generator
-        n_stmt = gen.config.num_statements
-        gen._ensure_input_proj(anchor.size(-1))
-        embeddings_in = anchor.unsqueeze(1)  # (B, 1, dim)
-        mask_in = torch.ones(
-            batch_size, 1, dtype=torch.bool, device=torch_device
-        )
-        pooled = gen._pool(embeddings_in, mask_in)
-        h = gen._input_proj(pooled) + gen._input_refine(pooled)
-        h = h.view(batch_size, n_stmt, gen._latent_dim * 2)
-        mu, logvar = h.chunk(2, dim=-1)  # each (B, N, latent_dim)
-
-        # Surrogate: push all N mu vectors toward z values that got high reward.
-        # Advantage (B,) broadcasts to all N statements for the same sample.
-        sender_loss = -(
-            advantage.detach().unsqueeze(-1).unsqueeze(-1) * mu
-        ).sum(dim=(-2, -1)).mean()
-
-        sender_optimizer.zero_grad()
-        sender_loss.backward()
-        nn.utils.clip_grad_norm_(sender_params, 1.0)
-        sender_optimizer.step()
+        optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(all_params, max_grad_norm)
+        optimizer.step()
 
         # --- Logging ---
         if step % log_every == 0:
-            accuracy = reward.mean().item()
+            with torch.no_grad():
+                accuracy = (logits.argmax(1) == target_idx).float().mean().item()
             total_len = gen_mask.float().sum(dim=1).mean().item()
-            # Per-statement length breakdown
+
             stmt_lens_t = lfm_outputs.get("generator.statement_lengths")
             if stmt_lens_t is not None:
-                avg_per = stmt_lens_t.float().mean(dim=0)  # (N,)
+                avg_per = stmt_lens_t.float().mean(dim=0)
                 stmt_str = "/".join(f"{v:.0f}" for v in avg_per.tolist())
                 len_info = f"stmt_lens={stmt_str} total={total_len:.0f}"
             else:
                 len_info = f"avg_msg_len={total_len:.1f}"
+
             logger.info(
-                "step=%d  recv_loss=%.3f  acc=%.1f%%  "
-                "%s  baseline=%.3f  hard=%.0f%%  "
+                "step=%d  loss=%.3f  acc=%.1f%%  "
+                "%s  hard=%.0f%%  "
                 "(chance=%.1f%%)",
                 step,
-                receiver_loss.item(),
+                loss.item(),
                 accuracy * 100,
                 len_info,
-                baseline,
                 hard_ratio * 100,
                 chance * 100,
             )
 
-        # --- Periodic checkpoint ---
+        # --- Periodic checkpoint: latest + best ---
         if step > 0 and step % checkpoint_every == 0:
+            with torch.no_grad():
+                step_acc = (logits.argmax(1) == target_idx).float().mean().item()
             ckpt = {
-                "input_proj": faculty.generator._input_proj.state_dict(),
-                "input_refine": faculty.generator._input_refine.state_dict(),
+                "input_proj": gen._input_proj.state_dict(),
+                "input_refine": gen._input_refine.state_dict(),
                 "msg_encoder": msg_encoder.state_dict(),
                 "receiver": receiver.state_dict(),
                 "step": step,
-                "baseline": baseline,
+                "accuracy": step_acc,
             }
-            torch.save(ckpt, f"data/input_proj_step{step}.pt")
-            torch.save(ckpt, "data/input_proj.pt")  # always keep latest
-            logger.info("Checkpoint saved at step %d", step)
+            latest_path = str(Path(output_dir) / "latest.pt")
+            best_path = str(Path(output_dir) / "best.pt")
+            torch.save(ckpt, latest_path)
+            if step_acc > best_acc:
+                best_acc = step_acc
+                torch.save(ckpt, best_path)
+                logger.info("Checkpoint step %d — new best acc=%.1f%%", step, step_acc * 100)
+            else:
+                logger.info("Checkpoint step %d — acc=%.1f%% (best=%.1f%%)", step, step_acc * 100, best_acc * 100)
 
     # --- Save final checkpoint ---
     torch.save(
         {
-            "input_proj": faculty.generator._input_proj.state_dict(),
-            "input_refine": faculty.generator._input_refine.state_dict(),
+            "input_proj": gen._input_proj.state_dict(),
+            "input_refine": gen._input_refine.state_dict(),
             "msg_encoder": msg_encoder.state_dict(),
             "receiver": receiver.state_dict(),
             "step": steps,
-            "baseline": baseline,
         },
-        "data/input_proj.pt",
+        str(Path(output_dir) / "latest.pt"),
     )
-    logger.info("Saved final checkpoint to data/input_proj.pt")
+    logger.info("Saved final checkpoint to %s/latest.pt", output_dir)
 
-    final_acc = reward.mean().item()
+    with torch.no_grad():
+        final_acc = (logits.argmax(1) == target_idx).float().mean().item()
     results = {
         "final_accuracy": final_acc,
-        "final_receiver_loss": receiver_loss.item(),
-        "baseline": baseline,
+        "final_loss": loss.item(),
         "chance": chance,
     }
     logger.info("Final: %s", results)
@@ -450,24 +484,31 @@ def main(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="REINFORCE referential game")
+    parser = argparse.ArgumentParser(description="Referential game (backprop)")
     parser.add_argument("--resume", default=None, help="Resume from checkpoint")
     parser.add_argument("--steps", type=int, default=2000)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--vq-codebook", default=None, help="Path to VQ codebook")
     parser.add_argument("--vq-alpha", type=float, default=1.0, help="VQ residual alpha")
-    parser.add_argument("--length-cost", type=float, default=0.0, help="Length penalty")
-    parser.add_argument("--target-length", type=int, default=96, help="Length cost norm")
-    parser.add_argument("--num-statements", type=int, default=1, help="Statements per input")
-    parser.add_argument("--max-output-len", type=int, default=96, help="Max tokens per statement")
-    parser.add_argument("--curriculum-warmup", type=int, default=500, help="Curriculum steps")
+    parser.add_argument("--num-statements", type=int, default=1)
+    parser.add_argument("--max-output-len", type=int, default=96)
+    parser.add_argument("--curriculum-warmup", type=int, default=500)
+    parser.add_argument("--num-memory-tokens", type=int, default=8)
+    parser.add_argument("--encoder-layers", type=int, default=2)
+    parser.add_argument("--encoder-heads", type=int, default=8)
+    parser.add_argument("--sender-lr", type=float, default=1e-4)
+    parser.add_argument("--receiver-lr", type=float, default=1e-3)
+    parser.add_argument("--output-dir", default="data/referential_game")
     args = parser.parse_args()
     main(
         resume=args.resume, steps=args.steps, batch_size=args.batch_size,
         device=args.device, vq_codebook_path=args.vq_codebook,
-        vq_residual_alpha=args.vq_alpha, length_cost=args.length_cost,
-        target_length=args.target_length,
+        vq_residual_alpha=args.vq_alpha,
         num_statements=args.num_statements, max_output_len=args.max_output_len,
         curriculum_warmup=args.curriculum_warmup,
+        num_memory_tokens=args.num_memory_tokens,
+        encoder_layers=args.encoder_layers, encoder_heads=args.encoder_heads,
+        sender_lr=args.sender_lr, receiver_lr=args.receiver_lr,
+        output_dir=args.output_dir,
     )
