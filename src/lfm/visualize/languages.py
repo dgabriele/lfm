@@ -34,6 +34,10 @@ LANGUAGES: dict[str, LanguageInfo] = {
     "spa": LanguageInfo("spa", "Spanish", "Indo-European", "fusional"),
     "tur": LanguageInfo("tur", "Turkish", "Turkic", "agglutinative"),
     "vie": LanguageInfo("vie", "Vietnamese", "Austroasiatic", "isolating"),
+    "swa": LanguageInfo("swa", "Swahili", "Niger-Congo", "agglutinative"),
+    "tha": LanguageInfo("tha", "Thai", "Kra-Dai", "isolating"),
+    "kat": LanguageInfo("kat", "Georgian", "Kartvelian", "agglutinative"),
+    "tgl": LanguageInfo("tgl", "Tagalog", "Austronesian", "isolating"),
 }
 
 # Unique families (for color mapping)

@@ -10,52 +10,72 @@ import numpy as np
 # --------------------------------------------------------------------------
 
 # 16 distinct colors for individual languages (tab20 subset)
-LANG_COLORS: dict[str, str] = {
-    "ara": "#1f77b4",
-    "ces": "#ff7f0e",
-    "deu": "#2ca02c",
-    "eng": "#d62728",
-    "est": "#9467bd",
-    "fin": "#8c564b",
-    "hin": "#e377c2",
-    "hun": "#7f7f7f",
-    "ind": "#bcbd22",
-    "kor": "#17becf",
-    "pol": "#aec7e8",
-    "por": "#ffbb78",
-    "rus": "#98df8a",
-    "spa": "#ff9896",
-    "tur": "#c5b0d5",
-    "vie": "#c49c94",
-}
+def _build_color_map(keys: list[str]) -> dict[str, str]:
+    """Generate maximally distinct colors for a list of keys.
 
-# Family colors (fewer groups, bolder)
-FAMILY_COLORS: dict[str, str] = {
-    "Afro-Asiatic": "#e41a1c",
-    "Austroasiatic": "#377eb8",
-    "Austronesian": "#4daf4a",
-    "Indo-European": "#984ea3",
-    "Koreanic": "#ff7f00",
-    "Turkic": "#a65628",
-    "Uralic": "#f781bf",
-}
+    Uses evenly spaced hues in HSV with varied saturation/value
+    to maximize perceptual distinctness regardless of key count.
+    """
+    import colorsys
 
-# Morphological type colors
-MORPH_COLORS: dict[str, str] = {
-    "agglutinative": "#1b9e77",
-    "fusional": "#d95f02",
-    "introflexive": "#7570b3",
-    "isolating": "#e7298a",
-}
+    n = max(len(keys), 1)
+    colors: dict[str, str] = {}
+    for i, k in enumerate(sorted(keys)):
+        hue = i / n
+        # Alternate saturation and value for adjacent hues
+        sat = 0.75 if i % 2 == 0 else 0.55
+        val = 0.85 if i % 3 != 2 else 0.65
+        r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+        colors[k] = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+    return colors
 
 
-def get_color_map(by: str = "language") -> dict[str, str]:
-    """Return the color map for the given grouping."""
+# Pre-built color maps — extended dynamically by get_color_map()
+LANG_COLORS: dict[str, str] = {}
+FAMILY_COLORS: dict[str, str] = {}
+MORPH_COLORS: dict[str, str] = {}
+
+
+def get_color_map(by: str = "language", keys: list[str] | None = None) -> dict[str, str]:
+    """Return a color map for the given grouping.
+
+    Dynamically generates colors for any set of keys. Caches results
+    for consistency across calls.
+
+    Args:
+        by: "language", "family", or "type".
+        keys: If provided, ensures all keys have colors assigned.
+    """
+    global LANG_COLORS, FAMILY_COLORS, MORPH_COLORS
+
     if by == "family":
-        return FAMILY_COLORS
-    if by == "type":
-        return MORPH_COLORS
-    return LANG_COLORS
+        target = FAMILY_COLORS
+    elif by == "type":
+        target = MORPH_COLORS
+    else:
+        target = LANG_COLORS
+
+    if keys:
+        missing = [k for k in keys if k not in target]
+        if missing:
+            all_keys = sorted(set(list(target.keys()) + keys))
+            target.update(_build_color_map(all_keys))
+
+    # If empty, populate from languages.py metadata
+    if not target:
+        from lfm.visualize.languages import LANGUAGES
+
+        if by == "language":
+            all_keys = sorted(LANGUAGES.keys())
+        elif by == "family":
+            all_keys = sorted({l.family for l in LANGUAGES.values()})
+        elif by == "type":
+            all_keys = sorted({l.morph_type for l in LANGUAGES.values()})
+        else:
+            all_keys = []
+        target.update(_build_color_map(all_keys, palette))
+
+    return target
 
 
 # --------------------------------------------------------------------------

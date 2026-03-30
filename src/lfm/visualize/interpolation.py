@@ -71,21 +71,36 @@ class InterpolationVisualization(BaseVisualization):
                 pairs.append((a.strip(), b.strip()))
             return pairs
 
-        # Auto-select: find the 2 most distant language pairs in z-space
+        # Auto-select: pick typologically distinct, well-populated pairs.
+        # Prefer languages with large clusters (not peripheral outliers)
+        # for visually informative interpolation paths.
         if lang_means is None or len(lang_means) < 2:
-            return [("pol", "vie"), ("ara", "fin")]
+            return [("eng", "tur"), ("por", "fin")]
 
-        codes = sorted(lang_means.keys())
+        # Preferred pairs: typologically distinct, well-represented
+        _preferred = [
+            ("eng", "tur"),  # fusional → agglutinative
+            ("por", "fin"),  # Romance → Uralic
+            ("deu", "vie"),  # Germanic → isolating/tonal
+            ("rus", "ind"),  # Slavic → Austronesian
+        ]
+        selected: list[tuple[str, str]] = []
+        codes = set(lang_means.keys())
+        for a, b in _preferred:
+            if a in codes and b in codes and len(selected) < 2:
+                selected.append((a, b))
+        if len(selected) >= 2:
+            return selected
+
+        # Fallback: pick from available languages by distance
+        all_codes = sorted(codes)
         best_pairs: list[tuple[float, str, str]] = []
-        for i, a in enumerate(codes):
-            for b in codes[i + 1:]:
+        for i, a in enumerate(all_codes):
+            for b in all_codes[i + 1:]:
                 dist = np.linalg.norm(lang_means[a] - lang_means[b])
                 best_pairs.append((dist, a, b))
         best_pairs.sort(reverse=True)
 
-        # Take the most distant pair, then the most distant pair that
-        # doesn't share a language with the first
-        selected: list[tuple[str, str]] = []
         used: set[str] = set()
         for _, a, b in best_pairs:
             if len(selected) >= 2:

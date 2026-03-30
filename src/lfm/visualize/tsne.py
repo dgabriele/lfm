@@ -101,7 +101,13 @@ class TSNEVisualization(BaseVisualization):
         by: str,
     ) -> None:
         """Draw one scatter plot, coloring points by *by* grouping."""
-        cmap = get_color_map(by)
+        # Ensure colors exist for all languages/families/types in the data
+        unique_codes = sorted(set(languages))
+        unique_labels = sorted({get_label(c, by) for c in unique_codes})
+        if by == "language":
+            cmap = get_color_map(by, keys=unique_codes)
+        else:
+            cmap = get_color_map(by, keys=unique_labels)
 
         # Group indices by label so each group gets a single scatter call
         # (cleaner legend, consistent z-order)
