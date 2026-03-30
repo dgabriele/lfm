@@ -19,10 +19,9 @@ from .corpus import _load_corpus_labeled, _train_sentencepiece, syllabify_for_bp
 logger = logging.getLogger(__name__)
 
 
-def _encode_ipa(sp: Any, text: str, syllable_aligned: bool = False) -> list[int]:
-    """Encode IPA text with optional syllable pre-processing."""
-    if syllable_aligned:
-        text = syllabify_for_bpe(text)
+def _encode_ipa(sp: Any, text: str) -> list[int]:
+    """Encode IPA text. Syllable alignment is baked into the SPM vocabulary
+    at training time — no pre-processing needed at encode time."""
     return sp.encode(text, out_type=int)
 
 
@@ -145,8 +144,7 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
         languages_list = []
         _surviving_indices: list[int] = []
         for idx, (lang, ipa) in enumerate(labeled):
-            _syl_aligned = getattr(cfg, "syllable_aligned_bpe", False)
-            ids = _encode_ipa(sp, ipa, syllable_aligned=_syl_aligned)
+            ids = _encode_ipa(sp, ipa)
             ids = [x for x in ids if x not in _spm_specials]
             if len(ids) >= 5:
                 token_ids_list.append(ids)
@@ -287,9 +285,8 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
         )
 
         # Tokenize sentences and constituents with the same SPM
-        _syl = getattr(cfg, "syllable_aligned_bpe", False)
-        sent_token_ids = [_encode_ipa(sp, ipa, syllable_aligned=_syl) for _, ipa in sentences]
-        const_token_ids = [_encode_ipa(sp, ipa, syllable_aligned=_syl) for _, ipa, _, _ in constituents]
+        sent_token_ids = [_encode_ipa(sp, ipa) for _, ipa in sentences]
+        const_token_ids = [_encode_ipa(sp, ipa) for _, ipa, _, _ in constituents]
         const_parent_indices = [parent_idx for _, _, parent_idx, _ in constituents]
 
         constituent_dataset = ConstituentDataset(
