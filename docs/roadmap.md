@@ -2,6 +2,11 @@
 
 Planned improvements and research directions, ordered by expected impact and novelty.
 
+## Recently Implemented
+
+- **Multi-token z memory** — z projected into K=8 memory tokens for decoder cross-attention, spreading z influence across all output positions (previously concentrated at positions 55+)
+- **Syllable-aligned BPE** — syllabify IPA before sentencepiece training so BPE merges cannot cross syllable boundaries; 93% → ~100% syllable alignment by construction
+
 ---
 
 **Contents**
@@ -94,13 +99,13 @@ The risk: fine-tuning on a narrow z distribution might degrade the decoder's abi
 
 ## 7. Constituency-augmented decoder training
 
-**Status:** Infrastructure built, not yet trained
+**Status:** Infrastructure built, deprioritized for PoC
 
-Train the decoder on both full sentences and extracted phrase constituents (NPs, VPs, PPs, clauses). The encoder sees the full parent sentence (providing rich z context), while the decoder is supervised only on the constituent span. This teaches variable-length EOS behavior — the decoder learns to stop after a short NP just as confidently as after a full sentence.
+Train the decoder on both full sentences and extracted phrase constituents. The encoder sees the full parent sentence (providing rich z context), while the decoder is supervised only on the constituent span. This teaches variable-length EOS behavior.
 
-**Current status:** The dataset generation pipeline (`--extract-constituents`) produces constituency-augmented HDF5 datasets with `parent_seq` fields linking each constituent to its source sentence. Multi-backend parsing supports 16 languages via Stanza constituency (7 languages) and dependency-to-constituency conversion (9 languages). The `ConstituentDataset` and `InterleavedLoader` handle mixed sentence/constituent training with configurable mix ratios.
+**Deprioritized because:** The expression system's continuous z-switching decode handles variable-length output architecturally — each leaf produces a full sentence to EOS, and the tree topology determines how many sentences the agent produces. Sub-sentence constituency training is not required for the PoC. The full infrastructure is built (dataset generation, `ConstituentDataset`, `InterleavedLoader`, multi-backend parsing) and can be activated when constituency-labeled leaves (item 1) are implemented.
 
-**Relation to item 1:** This provides the training signal for constituency-labeled leaves. Without this training, the decoder can't reliably produce short, complete constituents on demand. With it, the constituency label embedding (item 1) becomes a precise control over output structure.
+**Relation to item 1:** This provides the training signal for constituency-labeled leaves. With the decoder trained to produce labeled constituents on demand, the expression tree becomes a syntactic blueprint rather than just a multi-sentence decomposition.
 
 ---
 
