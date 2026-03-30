@@ -123,10 +123,27 @@ def _sanitize_samples(
     return sanitize_samples(samples, cfg=legacy_cfg)
 
 
+def syllabify_for_bpe(text: str) -> str:
+    """Insert spaces at syllable boundaries within words.
+
+    Splits each IPA word into syllables so BPE merges cannot cross
+    syllable boundaries. Word boundaries (existing spaces) are preserved.
+
+    Example::
+
+        "mækswɛl sɛd" → "mæk swɛl sɛd"
+    """
+    from lfm.data.syllabify import syllabify_ipa
+
+    syllables = syllabify_ipa(text)
+    return " ".join(s for s in syllables if s.strip())
+
+
 def _train_sentencepiece(
     lines: list[str],
     vocab_size: int,
     output_dir: str,
+    syllable_aligned: bool = False,
 ) -> str:
     """Train a sentencepiece model on the given lines.
 
@@ -134,6 +151,8 @@ def _train_sentencepiece(
         lines: Text lines for training.
         vocab_size: Target vocabulary size.
         output_dir: Directory to save the model.
+        syllable_aligned: If True, syllabify text before BPE training
+            so merge boundaries respect syllable structure.
 
     Returns:
         Path to the trained ``.model`` file.
@@ -148,6 +167,10 @@ def _train_sentencepiece(
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if syllable_aligned:
+        logger.info("Syllabifying corpus for syllable-aligned BPE...")
+        lines = [syllabify_for_bpe(line) for line in lines]
 
     corpus_file = out_dir / "spm_train_corpus.txt"
     with open(corpus_file, "w", encoding="utf-8") as f:

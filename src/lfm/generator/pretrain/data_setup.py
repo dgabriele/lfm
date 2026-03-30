@@ -14,9 +14,16 @@ from lfm.data.corpus import MultilingualCorpusDataset
 
 from .checkpoint import _file_hash
 from .config import VAEPretrainConfig
-from .corpus import _load_corpus_labeled, _train_sentencepiece
+from .corpus import _load_corpus_labeled, _train_sentencepiece, syllabify_for_bpe
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_ipa(sp: Any, text: str, syllable_aligned: bool = False) -> list[int]:
+    """Encode IPA text with optional syllable pre-processing."""
+    if syllable_aligned:
+        text = syllabify_for_bpe(text)
+    return sp.encode(text, out_type=int)
 
 
 class PreprocessedData:
@@ -117,7 +124,8 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
             spm_path = cfg.spm_model_path
         else:
             spm_path = _train_sentencepiece(
-                lines, cfg.spm_vocab_size, output_dir
+                lines, cfg.spm_vocab_size, output_dir,
+                syllable_aligned=getattr(cfg, "syllable_aligned_bpe", False),
             )
 
         try:
@@ -137,7 +145,8 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
         languages_list = []
         _surviving_indices: list[int] = []
         for idx, (lang, ipa) in enumerate(labeled):
-            ids = sp.encode(ipa, out_type=int)
+            _syl_aligned = getattr(cfg, "syllable_aligned_bpe", False)
+            ids = _encode_ipa(sp, ipa, syllable_aligned=_syl_aligned)
             ids = [x for x in ids if x not in _spm_specials]
             if len(ids) >= 5:
                 token_ids_list.append(ids)
@@ -278,8 +287,9 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
         )
 
         # Tokenize sentences and constituents with the same SPM
-        sent_token_ids = [sp.encode(ipa) for _, ipa in sentences]
-        const_token_ids = [sp.encode(ipa) for _, ipa, _, _ in constituents]
+        _syl = getattr(cfg, "syllable_aligned_bpe", False)
+        sent_token_ids = [_encode_ipa(sp, ipa, syllable_aligned=_syl) for _, ipa in sentences]
+        const_token_ids = [_encode_ipa(sp, ipa, syllable_aligned=_syl) for _, ipa, _, _ in constituents]
         const_parent_indices = [parent_idx for _, _, parent_idx, _ in constituents]
 
         constituent_dataset = ConstituentDataset(
