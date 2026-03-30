@@ -27,7 +27,7 @@ Agent Embedding (384-dim)
 - **MultilingualVAEGenerator** (`generator/multilingual_vae.py`): Frozen decoder + learned input projection
 - **VAE Pretraining** (`generator/pretrain.py`): Full pipeline with IPA conversion, nucleus sampling, sanitization
 - **Dataset Generation** (`data/dataset/`): HDF5 dataset pipeline — load → sanitize → LLM gate → IPA → balance → HDF5
-- **Referential Game** (`scripts/run_referential_reinforce.py`): REINFORCE-based agent game through the linguistic bottleneck
+- **Referential Game** (`agents/games/referential.py`): Direct backprop agent game through the linguistic bottleneck (`lfm agent referential`)
 
 ### Package Structure
 
@@ -35,6 +35,13 @@ Agent Embedding (384-dim)
 src/lfm/
   _registry.py          # @register / create() / list_registered()
   _types.py             # Tensor type aliases
+  agents/               # Agent communication games
+    config.py           # Shared configs (MessageEncoderConfig, CurriculumConfig)
+    components.py       # MessageEncoder (attention), Receiver (dot-product)
+    decode.py           # rerun_decoder_with_grad (two-phase differentiable decode)
+    trainer.py          # AgentTrainer (game-agnostic training loop)
+    games/              # Individual game implementations
+      referential.py    # ReferentialGame + ReferentialGameConfig
   config/               # LFMBaseConfig, ExperimentConfig
   core/                 # LFMModule (ABC), LFMLoss, CompositeLoss
   expression/           # Learnable tree-structured expression generation
@@ -136,12 +143,15 @@ dec:  ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌ
 
 ## Agent Game Results
 
-REINFORCE referential game with real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K sentences):
-- **~95% accuracy** on 16-way discrimination with **100% hard negatives** (within-cluster distractors)
-- Chance = 6.25%, **15.2× above random**
-- Curriculum: 0% → 100% hard negatives over 500 steps, stable plateau at ~95%
-- Batch size 512, converges in ~500 steps
-- Variable-length messages (17-19 tokens) via z-norm scaling
+Referential game with direct backprop through the v4 frozen decoder (all-MiniLM-L6-v2, 384-dim, 10K sentences):
+- **99.2% best accuracy** on 16-way discrimination with **100% hard negatives** (within-cluster distractors)
+- Chance = 6.25%, **15.9× above random**
+- Curriculum: 0% → 100% hard negatives over 500 steps
+- Batch size 256, converges in ~50 steps to >95%
+- Variable-length messages (~41 tokens)
+- Two-phase forward: (1) no_grad KV-cached generation, (2) parallel decoder re-run with gradients through cross-attention to latent memory
+- Single optimizer: sender_lr=3e-5, receiver_lr=3e-4
+- Attention-based message encoder (2-layer self-attention + learned query readout) over decoder hidden states
 
 ### Evaluation Scripts
 
@@ -171,7 +181,7 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - `poetry install --with phonology` — Install with panphon (legacy)
 - `poetry install --with translator` — Install with transformers/peft (translation)
 - `poetry install --with publish` — Install with huggingface-hub (publishing)
-- `poetry run pytest` — Run tests (120 tests)
+- `poetry run pytest` — Run tests (160 tests)
 - `poetry run ruff check src/` — Lint
 - `poetry run ruff format src/` — Format
 - `poetry run lfm visualize --help` — Show visualization commands
@@ -184,6 +194,8 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - `poetry run lfm dataset generate --source leipzig` — Generate HDF5 dataset from Leipzig corpus
 - `poetry run lfm dataset generate --source leipzig --no-llm-gate` — Generate without LLM quality gate
 - `poetry run lfm dataset list --detail` — List installed datasets with per-language stats
+- `poetry run lfm agent referential` — Train referential game (direct backprop)
+- `poetry run lfm agent referential --steps 2000 --batch-size 256` — With custom settings
 - `poetry run lfm publish model --repo-id user/lfm-decoder-v1` — Publish decoder to HuggingFace
 - `poetry run lfm publish dataset --repo-id user/lfm-ipa-16lang` — Publish IPA corpus to HuggingFace
 
@@ -219,5 +231,5 @@ pretrain_vae_decoder(config)
 python scripts/precompute_embeddings.py
 
 # 3. Run the referential game
-python scripts/run_referential_reinforce.py
+poetry run lfm agent referential
 ```
