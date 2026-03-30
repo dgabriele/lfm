@@ -429,7 +429,9 @@ class VAEPretrainer:
                     with torch.no_grad():
                         gen_tokens, _, gen_mask = _free_run_decode(
                             torch.randn(adv_batch, cfg.latent_dim, device=device),
-                            cfg.adv_free_run_len, bos_id=bos_id, **dec_mods,
+                            cfg.adv_free_run_len, bos_id=bos_id,
+                            num_memory_tokens=getattr(cfg, "num_memory_tokens", 1),
+                            **dec_mods,
                         )
                     real_tokens = batch_tokens[:adv_batch]
                     real_lengths = batch_lengths[:adv_batch]

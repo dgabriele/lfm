@@ -75,7 +75,8 @@ def build_model(
         enc_to_latent = nn.Linear(hidden, cfg.latent_dim * 2).to(device)
         residual_vq = None
 
-    latent_to_decoder = nn.Linear(cfg.latent_dim, hidden).to(device)
+    _n_mem = getattr(cfg, "num_memory_tokens", 1)
+    latent_to_decoder = nn.Linear(cfg.latent_dim, _n_mem * hidden).to(device)
     dec_token_embedding = nn.Embedding(full_vocab, hidden).to(device)
 
     # Positional embedding: only used when RoPE is disabled

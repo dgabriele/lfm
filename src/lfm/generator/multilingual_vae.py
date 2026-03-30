@@ -70,7 +70,11 @@ class MultilingualVAEGenerator(GeneratorModule):
             precompute_rope_freqs,
         )
 
-        self.latent_to_decoder = nn.Linear(config.latent_dim, config.decoder_hidden_dim)
+        self._num_memory_tokens = config.num_memory_tokens
+        self.latent_to_decoder = nn.Linear(
+            config.latent_dim,
+            config.num_memory_tokens * config.decoder_hidden_dim,
+        )
         self.token_embedding = nn.Embedding(self._full_vocab, config.decoder_hidden_dim)
 
         # Positional embedding: only used when RoPE is disabled
@@ -476,7 +480,9 @@ class MultilingualVAEGenerator(GeneratorModule):
         elif self._z_stats_initialized:
             z = self.calibrate_z(z)
 
-        memory = self.latent_to_decoder(z).unsqueeze(1)
+        memory = self.latent_to_decoder(z).reshape(
+            z.size(0), self._num_memory_tokens, -1,
+        )
 
         # Precompute the full causal mask once (reuse rows per step)
         if self._full_causal_mask is None or self._full_causal_mask.size(1) < max_len + 1:

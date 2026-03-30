@@ -183,8 +183,9 @@ def _vae_forward(
         z = mu + std * torch.randn_like(std)
         vq_commitment_loss = None
 
-    # Decode
-    memory = latent_to_decoder(z).unsqueeze(1)
+    # Decode — reshape into K memory tokens for multi-token z injection
+    _n_mem = getattr(_cfg, "num_memory_tokens", 1) if _cfg is not None else 1
+    memory = latent_to_decoder(z).reshape(b, _n_mem, -1)
     bos_col = torch.full((b, 1), bos_id, dtype=torch.long, device=device)
     teacher_input_ids = torch.cat([bos_col, batch_tokens[:, :-1]], dim=1)
 
@@ -345,6 +346,7 @@ def _free_run_decode(
     decoder: nn.TransformerDecoder,
     output_head: nn.Linear,
     bos_id: int,
+    num_memory_tokens: int = 1,
     temperature: float = 1.0,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Autoregressive decode from latent z with Gumbel-Softmax.
@@ -371,7 +373,7 @@ def _free_run_decode(
     batch = z.size(0)
     device = z.device
 
-    memory = latent_to_decoder(z).unsqueeze(1)  # (B, 1, H)
+    memory = latent_to_decoder(z).reshape(z.size(0), num_memory_tokens, -1)
     bos_embed = dec_token_embedding(
         torch.full((batch, 1), bos_id, dtype=torch.long, device=device)
     )

@@ -132,14 +132,24 @@ The decoder is trained on IPA-transcribed text from typologically diverse langua
 
 **v4 (current)**: constituency-augmented dataset (~5.75M samples — full sentences + extracted NP/VP/PP phrases), latent_dim=384, encoder_num_layers=3, 20 epochs. The constituency augmentation teaches the decoder to produce variable-length output at all scales.
 
-### Pretraining results (v1)
+### Pretraining results
 
-Phase 1 results (latent_dim=256, lr=0.0005):
-- **Val CE: 0.52** (PPL ≈ 1.7)
-- **Reconstruction**: near-perfect through 256-dim latent bottleneck, word order largely preserved
-- **Interpolation**: smooth typological transitions (English ↔ Polish)
-- **σ=0.5 perturbation**: paraphrastic variation within language
-- **TTR: 0.958**, rep_rate: 0.00, mean word length: 4.7, active z dims: 256/256
+2.6M IPA sentences, 16 languages, 12 epochs (latent_dim=256, lr=0.0005):
+
+| Metric | Value |
+|--------|-------|
+| Val CE | **0.26** (PPL ≈ 1.30) |
+| Token accuracy | 88.9% |
+| Active z dims | 256/256 |
+| Smoothness (Spearman) | r=0.525 (p≈0) |
+| Probe mean R² | 0.051 |
+| PCA 90% variance | 146 PCs |
+
+<p align="center">
+  <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
+  <img src="docs/static/images/tsne_by_type.png" width="48%" alt="t-SNE of latent space colored by morphological type" />
+</p>
+<p align="center"><em>Left: hierarchical clustering recovers linguistically sensible language groupings from the latent space. Right: t-SNE projection colored by morphological type. Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
 
 ### How to read the reconstruction diagnostic
 

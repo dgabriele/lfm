@@ -75,6 +75,10 @@ class GeneratorConfig(LFMBaseConfig):
     Enables translation-invariant pattern learning."""
     share_decoder_layers: bool = True
     """Use N/2 unique layers each applied twice (literal recursion)."""
+    num_memory_tokens: int = 1
+    """Number of memory tokens for z → decoder cross-attention.
+    1 = single memory vector (original behavior). K > 1 projects z into K
+    memory tokens, giving the decoder richer z access across all positions."""
 
     pretrained_decoder_path: str | None = None
     spm_model_path: str | None = None

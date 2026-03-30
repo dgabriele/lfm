@@ -41,6 +41,7 @@ decoder_hidden_dim: 512
 decoder_num_layers: 4
 decoder_num_heads: 8
 decoder_dropout: 0.1
+num_memory_tokens: 8
 
 # Linguistic structure
 attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
