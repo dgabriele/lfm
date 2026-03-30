@@ -16,14 +16,14 @@ from sklearn.manifold import TSNE
 
 from lfm.visualize import BaseVisualization
 from lfm.visualize.config import VisualizeConfig
-from lfm.visualize.languages import LANGUAGES, get_label
+from lfm.visualize.languages import get_label
 from lfm.visualize.style import (
     FIGSIZE_SINGLE,
     SCATTER_ALPHA,
     SCATTER_SIZE,
     apply_style,
+    data_legend,
     get_color_map,
-    language_legend,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,29 +100,30 @@ class TSNEVisualization(BaseVisualization):
         languages: list[str],
         by: str,
     ) -> None:
-        """Draw one scatter plot, coloring points by *by* grouping."""
-        # Ensure colors exist for all languages/families/types in the data
-        unique_codes = sorted(set(languages))
-        unique_labels = sorted({get_label(c, by) for c in unique_codes})
+        """Draw one scatter plot, coloring points by *by* grouping.
+
+        Colors are derived ONLY from the languages present in the data.
+        """
+        # Build label for each point
+        point_labels = [get_label(c, by) for c in languages]
+        unique_labels = sorted(set(point_labels))
+
+        # For language grouping, color keys are the ISO codes;
+        # for family/type, color keys are the label strings.
         if by == "language":
+            unique_codes = sorted(set(languages))
             cmap = get_color_map(by, keys=unique_codes)
         else:
             cmap = get_color_map(by, keys=unique_labels)
 
-        # Group indices by label so each group gets a single scatter call
-        # (cleaner legend, consistent z-order)
+        # Group indices by label for single scatter call per group
         label_to_idx: dict[str, list[int]] = {}
-        for i, code in enumerate(languages):
-            label = get_label(code, by)
+        for i, label in enumerate(point_labels):
             label_to_idx.setdefault(label, []).append(i)
 
         for label in sorted(label_to_idx):
             idx = np.array(label_to_idx[label])
-            # Resolve color: for "language" grouping the key is the code,
-            # for family/type the key is the label itself.
             if by == "language":
-                # All codes in this group share the same label (language name),
-                # but the color map is keyed by code.
                 code = languages[idx[0]]
                 color = cmap.get(code, "#333333")
             else:
@@ -152,7 +153,19 @@ class TSNEVisualization(BaseVisualization):
         ax.set_title(title)
         ax.set_xlabel("Dimension 1")
         ax.set_ylabel("Dimension 2")
-        language_legend(ax, by=by)
+        ax.set_aspect("equal")
+
+        # Build legend from data only
+        unique_codes = sorted(set(languages))
+        if by == "language":
+            cmap = get_color_map(by, keys=unique_codes)
+            label_map = {c: get_label(c, by) for c in unique_codes}
+            data_legend(ax, unique_codes, cmap, labels=label_map)
+        else:
+            unique_labels = sorted({get_label(c, by) for c in unique_codes})
+            cmap = get_color_map(by, keys=unique_labels)
+            data_legend(ax, unique_labels, cmap)
+
         fig.tight_layout()
         return fig
 
@@ -164,7 +177,7 @@ class TSNEVisualization(BaseVisualization):
         """Generate three t-SNE/UMAP scatter figures.
 
         Args:
-            data: Must contain ``"z"`` (Tensor of shape (N, 384)) and
+            data: Must contain ``"z"`` (Tensor of shape (N, D)) and
                   ``"languages"`` (list[str] of ISO 639-3 codes).
 
         Returns:

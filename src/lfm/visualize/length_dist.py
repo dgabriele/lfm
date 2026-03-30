@@ -1,7 +1,7 @@
 """Output length distribution analysis for the VAE decoder.
 
 Generates three figures:
-1. Histogram comparing decoded vs. training corpus sequence lengths.
+1. Histogram comparing decoded vs. training corpus sequence lengths (density).
 2. Box plot of sequence lengths grouped by source language.
 3. Scatter of decoded length vs. latent norm with linear trend.
 """
@@ -17,13 +17,13 @@ from matplotlib.figure import Figure
 
 from lfm.visualize import BaseVisualization
 from lfm.visualize.config import VisualizeConfig
-from lfm.visualize.languages import LANGUAGES
+from lfm.visualize.languages import get_label
 from lfm.visualize.loader import decode_z
 from lfm.visualize.style import (
     FIGSIZE_SINGLE,
     FIGSIZE_WIDE,
-    LANG_COLORS,
     apply_style,
+    get_color_map,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,11 @@ class LengthDistVisualization(BaseVisualization):
         decoded_lengths: np.ndarray,
         corpus_lengths: np.ndarray,
     ) -> Figure:
-        """Histogram of decoded vs. training corpus sequence lengths."""
+        """Histogram of decoded vs. training corpus sequence lengths.
+
+        Both distributions are normalized to density so they are
+        visually comparable despite different sample sizes.
+        """
         fig, ax = plt.subplots(figsize=FIGSIZE_WIDE)
 
         bins = np.linspace(
@@ -69,8 +73,9 @@ class LengthDistVisualization(BaseVisualization):
         ax.hist(
             corpus_lengths,
             bins=bins,
+            density=True,
             alpha=0.5,
-            label="Training corpus",
+            label=f"Training corpus (n={len(corpus_lengths):,})",
             color="#1f77b4",
             edgecolor="white",
             linewidth=0.5,
@@ -78,16 +83,17 @@ class LengthDistVisualization(BaseVisualization):
         ax.hist(
             decoded_lengths,
             bins=bins,
+            density=True,
             alpha=0.5,
-            label="Decoded",
+            label=f"Decoded (n={len(decoded_lengths):,})",
             color="#ff7f0e",
             edgecolor="white",
             linewidth=0.5,
         )
 
         ax.set_xlabel("Sequence length (tokens)")
-        ax.set_ylabel("Count")
-        ax.set_title("Output Length Distribution")
+        ax.set_ylabel("Density")
+        ax.set_title("Output Length Distribution (normalized)")
         ax.legend()
         fig.tight_layout()
         return fig
@@ -123,10 +129,11 @@ class LengthDistVisualization(BaseVisualization):
         # Sort by language code for consistent ordering
         codes = sorted(lang_lengths.keys())
         data = [lang_lengths[c] for c in codes]
-        labels = [
-            LANGUAGES[c].name if c in LANGUAGES else c for c in codes
-        ]
-        colors = [LANG_COLORS.get(c, "#333333") for c in codes]
+        labels = [get_label(c, "language") for c in codes]
+
+        # Generate colors from actual data keys
+        color_map = get_color_map("language", keys=codes)
+        colors = [color_map.get(c, "#333333") for c in codes]
 
         bp = ax.boxplot(
             data,

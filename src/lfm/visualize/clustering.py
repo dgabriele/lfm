@@ -21,8 +21,8 @@ from scipy.spatial.distance import pdist, squareform
 
 from lfm.visualize import BaseVisualization
 from lfm.visualize.config import VisualizeConfig
-from lfm.visualize.languages import FAMILIES, LANGUAGES
-from lfm.visualize.style import FAMILY_COLORS, FIGSIZE_SINGLE, FIGSIZE_WIDE, apply_style
+from lfm.visualize.languages import LANGUAGES
+from lfm.visualize.style import FIGSIZE_SINGLE, FIGSIZE_WIDE, apply_style, get_color_map
 
 logger = logging.getLogger(__name__)
 
@@ -151,30 +151,33 @@ class ClusteringVisualization(BaseVisualization):
             above_threshold_color="#999999",
         )
 
+        # Build data-driven family color map from the codes in this data
+        families_present = sorted({
+            LANGUAGES[c].family for c in codes if c in LANGUAGES
+        })
+        family_colors = get_color_map("family", keys=families_present) if families_present else {}
+
         # Color the x-axis tick labels by family
         leaf_order = dendro["leaves"]
         tick_labels = ax.get_xticklabels()
         for tick, leaf_idx in zip(tick_labels, leaf_order):
             code = codes[leaf_idx]
             family = LANGUAGES[code].family if code in LANGUAGES else None
-            color = FAMILY_COLORS.get(family, "#333333")
+            color = family_colors.get(family, "#333333")
             tick.set_color(color)
             tick.set_fontweight("bold")
 
         # Add a family-color legend
-        families_present = {
-            LANGUAGES[c].family for c in codes if c in LANGUAGES
-        }
         handles = [
             plt.Line2D(
                 [0], [0],
                 marker="s",
                 color="w",
-                markerfacecolor=FAMILY_COLORS.get(f, "#333"),
+                markerfacecolor=family_colors.get(f, "#333"),
                 markersize=8,
                 label=f,
             )
-            for f in sorted(families_present)
+            for f in families_present
         ]
         ax.legend(
             handles=handles,
@@ -230,19 +233,25 @@ class ClusteringVisualization(BaseVisualization):
             ax=ax,
         )
 
+        # Build data-driven family color map
+        families_present = sorted({
+            LANGUAGES[c].family for c in codes_ordered if c in LANGUAGES
+        })
+        family_colors = get_color_map("family", keys=families_present) if families_present else {}
+
         # Color tick labels by family
         for tick in ax.get_xticklabels():
             name = tick.get_text()
             code = self._name_to_code(name, codes_ordered, labels_ordered)
             family = LANGUAGES[code].family if code and code in LANGUAGES else None
-            tick.set_color(FAMILY_COLORS.get(family, "#333333"))
+            tick.set_color(family_colors.get(family, "#333333"))
             tick.set_fontweight("bold")
 
         for tick in ax.get_yticklabels():
             name = tick.get_text()
             code = self._name_to_code(name, codes_ordered, labels_ordered)
             family = LANGUAGES[code].family if code and code in LANGUAGES else None
-            tick.set_color(FAMILY_COLORS.get(family, "#333333"))
+            tick.set_color(family_colors.get(family, "#333333"))
             tick.set_fontweight("bold")
 
         ax.set_title("Pairwise Distance Matrix (Hierarchical Order)")

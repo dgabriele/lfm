@@ -19,8 +19,8 @@ class InterpolationCommand(CLICommand):
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "--pairs",
-            default="pol-vie,ara-fin",
-            help="Language pairs for interpolation, e.g. pol-vie,ara-fin",
+            default="",
+            help="Language pairs for interpolation, e.g. eng-tur,ara-fin (auto-selected if empty)",
         )
         parser.add_argument(
             "--steps",

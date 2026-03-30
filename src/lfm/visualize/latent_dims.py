@@ -23,7 +23,7 @@ from sklearn.decomposition import PCA
 from lfm.visualize import BaseVisualization
 from lfm.visualize.config import VisualizeConfig
 from lfm.visualize.languages import LANGUAGES
-from lfm.visualize.style import FIGSIZE_SINGLE, FIGSIZE_WIDE, LANG_COLORS, apply_style
+from lfm.visualize.style import FIGSIZE_SINGLE, FIGSIZE_WIDE, apply_style
 
 logger = logging.getLogger(__name__)
 

@@ -2,87 +2,84 @@
 
 from __future__ import annotations
 
+import colorsys
+from functools import lru_cache
+from typing import FrozenSet
+
 import matplotlib.pyplot as plt
 import numpy as np
 
 # --------------------------------------------------------------------------
-# Color palettes
+# Color generation — fully dynamic, data-driven, zero hardcoded languages
 # --------------------------------------------------------------------------
 
-# 16 distinct colors for individual languages (tab20 subset)
-def _build_color_map(keys: list[str]) -> dict[str, str]:
-    """Generate maximally distinct colors for a list of keys.
+# Session-level caches: mapping (by, frozenset(keys)) -> color dict.
+# This ensures consistency across calls within the same session while
+# adapting to whatever keys are actually present in the data.
+_color_cache: dict[tuple[str, FrozenSet[str]], dict[str, str]] = {}
 
-    Uses evenly spaced hues in HSV with varied saturation/value
-    to maximize perceptual distinctness regardless of key count.
+
+def _generate_colors(keys: list[str]) -> dict[str, str]:
+    """Generate maximally distinct colors for a sorted list of keys.
+
+    Uses evenly spaced hues in HSV with alternating saturation/value
+    to maximize perceptual separation regardless of key count.
+    Golden-ratio hue spacing avoids clustering when key counts are small.
     """
-    import colorsys
-
     n = max(len(keys), 1)
     colors: dict[str, str] = {}
+    # Golden angle provides better perceptual spread than linear spacing
+    golden_ratio = (1 + 5**0.5) / 2
     for i, k in enumerate(sorted(keys)):
-        hue = i / n
-        # Alternate saturation and value for adjacent hues
-        sat = 0.75 if i % 2 == 0 else 0.55
+        # Golden-angle spacing wraps around [0,1) without clustering
+        hue = (i / golden_ratio) % 1.0
+        # Alternate saturation and value for adjacent items
+        sat = 0.80 if i % 2 == 0 else 0.55
         val = 0.85 if i % 3 != 2 else 0.65
         r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
-        colors[k] = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+        colors[k] = f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
     return colors
-
-
-# Pre-built color maps — extended dynamically by get_color_map()
-LANG_COLORS: dict[str, str] = {}
-FAMILY_COLORS: dict[str, str] = {}
-MORPH_COLORS: dict[str, str] = {}
 
 
 def get_color_map(by: str = "language", keys: list[str] | None = None) -> dict[str, str]:
     """Return a color map for the given grouping.
 
-    Dynamically generates colors for any set of keys. Caches results
-    for consistency across calls.
+    Generates colors dynamically from the provided keys. Caches results
+    for consistency across calls within the same session.
 
     Args:
-        by: "language", "family", or "type".
-        keys: If provided, ensures all keys have colors assigned.
+        by: Grouping type ("language", "family", or "type").
+            Used only as a cache namespace.
+        keys: The actual data keys to generate colors for.
+              MUST be provided — colors are never generated from
+              hardcoded language lists.
+
+    Returns:
+        Dict mapping each key to a hex color string.
+
+    Raises:
+        ValueError: If keys is None or empty.
     """
-    global LANG_COLORS, FAMILY_COLORS, MORPH_COLORS
+    if not keys:
+        raise ValueError(
+            f"get_color_map(by={by!r}) requires explicit keys from the data. "
+            "Colors must be generated from actual data, not hardcoded lists."
+        )
 
-    if by == "family":
-        target = FAMILY_COLORS
-    elif by == "type":
-        target = MORPH_COLORS
-    else:
-        target = LANG_COLORS
+    cache_key = (by, frozenset(keys))
+    if cache_key in _color_cache:
+        return _color_cache[cache_key]
 
-    if keys:
-        missing = [k for k in keys if k not in target]
-        if missing:
-            all_keys = sorted(set(list(target.keys()) + keys))
-            target.update(_build_color_map(all_keys))
-
-    # If empty, populate from languages.py metadata
-    if not target:
-        from lfm.visualize.languages import LANGUAGES
-
-        if by == "language":
-            all_keys = sorted(LANGUAGES.keys())
-        elif by == "family":
-            all_keys = sorted({l.family for l in LANGUAGES.values()})
-        elif by == "type":
-            all_keys = sorted({l.morph_type for l in LANGUAGES.values()})
-        else:
-            all_keys = []
-        target.update(_build_color_map(all_keys, palette))
-
-    return target
+    colors = _generate_colors(sorted(set(keys)))
+    _color_cache[cache_key] = colors
+    return colors
 
 
 # --------------------------------------------------------------------------
 # Figure style
 # --------------------------------------------------------------------------
 
-FIGSIZE_SINGLE = (8, 6)
+FIGSIZE_SINGLE = (8, 8)  # Square for scatter plots
 FIGSIZE_WIDE = (12, 6)
 FIGSIZE_TALL = (8, 10)
 FIGSIZE_GRID = (16, 12)
@@ -118,41 +115,39 @@ def apply_style() -> None:
     })
 
 
-def language_legend(ax, by: str = "language", **kwargs) -> None:
-    """Add a compact language legend to an axes."""
-    from lfm.visualize.languages import LANGUAGES, get_label
+def data_legend(
+    ax: plt.Axes,
+    keys: list[str],
+    colors: dict[str, str],
+    labels: dict[str, str] | None = None,
+    **kwargs,
+) -> None:
+    """Add a compact legend showing only the given keys.
 
-    cmap = get_color_map(by)
-    seen: set[str] = set()
+    Args:
+        ax: Matplotlib axes.
+        keys: Data keys to include (only these appear in the legend).
+        colors: Color map (key -> hex color).
+        labels: Optional display labels (key -> label). If None, keys are used.
+        **kwargs: Passed to ax.legend().
+    """
     handles = []
-
-    if by == "language":
-        for code in sorted(LANGUAGES.keys()):
-            label = get_label(code, by)
-            if label not in seen:
-                seen.add(label)
-                handles.append(
-                    plt.Line2D(
-                        [0], [0],
-                        marker="o",
-                        color="w",
-                        markerfacecolor=cmap.get(code, "#333"),
-                        markersize=6,
-                        label=label,
-                    )
-                )
-    else:
-        for label, color in sorted(cmap.items()):
-            handles.append(
-                plt.Line2D(
-                    [0], [0],
-                    marker="o",
-                    color="w",
-                    markerfacecolor=color,
-                    markersize=6,
-                    label=label,
-                )
+    seen: set[str] = set()
+    for key in sorted(keys):
+        display = labels.get(key, key) if labels else key
+        if display in seen:
+            continue
+        seen.add(display)
+        handles.append(
+            plt.Line2D(
+                [0], [0],
+                marker="o",
+                color="w",
+                markerfacecolor=colors.get(key, "#333333"),
+                markersize=6,
+                label=display,
             )
+        )
 
     defaults = dict(
         loc="center left",

@@ -8,7 +8,7 @@ Generates two figures per run:
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,26 +17,37 @@ from matplotlib.figure import Figure
 from sklearn.manifold import TSNE
 
 from lfm.visualize import BaseVisualization
-from lfm.visualize.languages import LANGUAGES
+from lfm.visualize.languages import get_label
 from lfm.visualize.loader import decode_z
-from lfm.visualize.style import FIGSIZE_TALL, FIGSIZE_WIDE, LANG_COLORS, apply_style
+from lfm.visualize.style import (
+    FIGSIZE_SINGLE,
+    FIGSIZE_TALL,
+    FIGSIZE_WIDE,
+    apply_style,
+    get_color_map,
+)
 
 logger = logging.getLogger(__name__)
 
-# Colors cycled across interpolation pairs when LANG_COLORS is insufficient
-_PAIR_COLORS = [
-    "#e41a1c",
-    "#377eb8",
-    "#4daf4a",
-    "#984ea3",
-    "#ff7f00",
-    "#a65628",
-    "#f781bf",
-    "#999999",
+# Distinct colors for interpolation paths (high contrast, colorblind-safe)
+_PATH_COLORS = [
+    "#2166ac",  # strong blue
+    "#b2182b",  # strong red
+    "#1b7837",  # forest green
+    "#762a83",  # purple
+    "#e08214",  # orange
+    "#01665e",  # teal
+    "#d6604d",  # salmon
+    "#5aae61",  # lime
 ]
 
-# Maximum background points to include in the t-SNE projection
-_MAX_BG_POINTS = 5000
+# Background points for the t-SNE projection — large enough to avoid
+# the interpolation points dominating the projection.
+_MAX_BG_POINTS = 12000
+
+# Minimum samples for a language to be eligible for auto pair selection.
+# Languages with fewer points are peripheral outliers.
+_MIN_SAMPLES_FOR_PAIR = 1000
 
 
 class InterpolationVisualization(BaseVisualization):
@@ -47,17 +58,19 @@ class InterpolationVisualization(BaseVisualization):
         return "interpolation"
 
     # ------------------------------------------------------------------
-    # Pair parsing
+    # Pair selection — fully dynamic, no hardcoded languages
     # ------------------------------------------------------------------
 
     def _parse_pairs(
-        self, lang_means: dict[str, np.ndarray] | None = None,
+        self,
+        lang_means: dict[str, np.ndarray] | None = None,
+        lang_counts: dict[str, int] | None = None,
     ) -> list[tuple[str, str]]:
         """Parse pairs or auto-select based on maximum z-space distance.
 
         If ``self.config.pairs`` is set, parse it (``"pol-vie,ara-fin"``).
         Otherwise, dynamically select 2 pairs that span the greatest
-        distance in latent space, ensuring visually distinct trajectories.
+        distance in latent space from languages with sufficient samples.
         """
         raw = self.config.pairs
         if raw:
@@ -71,43 +84,47 @@ class InterpolationVisualization(BaseVisualization):
                 pairs.append((a.strip(), b.strip()))
             return pairs
 
-        # Auto-select: pick typologically distinct, well-populated pairs.
-        # Prefer languages with large clusters (not peripheral outliers)
-        # for visually informative interpolation paths.
         if lang_means is None or len(lang_means) < 2:
-            return [("eng", "tur"), ("por", "fin")]
+            # Return empty — caller will handle gracefully
+            logger.warning("Cannot auto-select pairs: fewer than 2 languages")
+            return []
 
-        # Preferred pairs: typologically distinct, well-represented
-        _preferred = [
-            ("eng", "tur"),  # fusional → agglutinative
-            ("por", "fin"),  # Romance → Uralic
-            ("deu", "vie"),  # Germanic → isolating/tonal
-            ("rus", "ind"),  # Slavic → Austronesian
-        ]
+        # Filter to well-represented languages (avoid outlier clusters)
+        counts = lang_counts or {}
+        eligible = {
+            code for code, mean in lang_means.items()
+            if counts.get(code, 0) >= _MIN_SAMPLES_FOR_PAIR
+        }
+
+        # If too few pass the threshold, relax to all available
+        if len(eligible) < 4:
+            eligible = set(lang_means.keys())
+
+        eligible_codes = sorted(eligible)
+        logger.info(
+            "Auto-selecting pairs from %d eligible languages (>=%d samples): %s",
+            len(eligible_codes),
+            _MIN_SAMPLES_FOR_PAIR,
+            eligible_codes,
+        )
+
+        # Rank all pairs by z-distance
+        ranked: list[tuple[float, str, str]] = []
+        for i, a in enumerate(eligible_codes):
+            for b in eligible_codes[i + 1:]:
+                dist = float(np.linalg.norm(lang_means[a] - lang_means[b]))
+                ranked.append((dist, a, b))
+        ranked.sort(reverse=True)
+
+        # Greedily select 2 pairs with no shared languages
         selected: list[tuple[str, str]] = []
-        codes = set(lang_means.keys())
-        for a, b in _preferred:
-            if a in codes and b in codes and len(selected) < 2:
-                selected.append((a, b))
-        if len(selected) >= 2:
-            return selected
-
-        # Fallback: pick from available languages by distance
-        all_codes = sorted(codes)
-        best_pairs: list[tuple[float, str, str]] = []
-        for i, a in enumerate(all_codes):
-            for b in all_codes[i + 1:]:
-                dist = np.linalg.norm(lang_means[a] - lang_means[b])
-                best_pairs.append((dist, a, b))
-        best_pairs.sort(reverse=True)
-
         used: set[str] = set()
-        for _, a, b in best_pairs:
-            if len(selected) >= 2:
-                break
-            if len(selected) == 0 or (a not in used and b not in used):
+        for _, a, b in ranked:
+            if a not in used and b not in used:
                 selected.append((a, b))
                 used.update([a, b])
+            if len(selected) >= 2:
+                break
 
         logger.info(
             "Auto-selected interpolation pairs: %s (by max z-distance)",
@@ -120,20 +137,22 @@ class InterpolationVisualization(BaseVisualization):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _language_means(
+    def _language_stats(
         z: torch.Tensor, languages: list[str]
-    ) -> dict[str, np.ndarray]:
-        """Compute mean z vector for each language code."""
+    ) -> tuple[dict[str, np.ndarray], dict[str, int]]:
+        """Compute mean z vector and sample count for each language code."""
         z_np = z.cpu().numpy() if isinstance(z, torch.Tensor) else np.asarray(z)
 
         buckets: dict[str, list[np.ndarray]] = defaultdict(list)
         for vec, lang in zip(z_np, languages):
             buckets[lang].append(vec)
 
-        return {
+        means = {
             code: np.mean(np.stack(vecs), axis=0)
             for code, vecs in buckets.items()
         }
+        counts = {code: len(vecs) for code, vecs in buckets.items()}
+        return means, counts
 
     # ------------------------------------------------------------------
     # Interpolation
@@ -164,18 +183,13 @@ class InterpolationVisualization(BaseVisualization):
     ) -> Figure:
         """Create a t-SNE scatter with interpolation paths overlaid.
 
-        Runs t-SNE on the combined set (background + interpolation points)
-        so that intermediate points are projected into the same space.
-        Interpolation points are color-coded by t (gradient from start
-        to end) to show the progression through latent space.
+        Uses a large background sample (12K+ points) so interpolation
+        points don't distort the projection. Square aspect ratio with
+        equal axes. Labels placed with offset arrows to avoid overlap.
         """
-        from matplotlib.colors import LinearSegmentedColormap
-
-        from lfm.visualize.style import get_color_map
-
         z_np = z.cpu().numpy() if isinstance(z, torch.Tensor) else np.asarray(z)
 
-        # Subsample background points for speed
+        # Subsample background points
         n_bg = min(len(z_np), _MAX_BG_POINTS)
         rng = np.random.RandomState(self.config.seed)
         bg_idx = rng.choice(len(z_np), size=n_bg, replace=False)
@@ -202,93 +216,108 @@ class InterpolationVisualization(BaseVisualization):
         bg_xy = xy[:n_bg]
         interp_xy = xy[n_bg:]
 
-        # Plot
-        fig, ax = plt.subplots(figsize=FIGSIZE_WIDE)
+        # --- Plot ---
+        fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
 
-        # Background scatter colored by family (more visible)
-        family_colors = get_color_map("family")
-        for lang_code in sorted(set(bg_langs)):
-            mask = np.array([l == lang_code for l in bg_langs])
-            info = LANGUAGES.get(lang_code)
-            family = info.family if info else "Unknown"
+        # Background scatter colored by language family
+        unique_bg_codes = sorted(set(bg_langs))
+        unique_families = sorted({get_label(c, "family") for c in unique_bg_codes})
+        family_colors = get_color_map("family", keys=unique_families)
+
+        for lang_code in unique_bg_codes:
+            mask = np.array([lang == lang_code for lang in bg_langs])
+            family = get_label(lang_code, "family")
             color = family_colors.get(family, "#cccccc")
             ax.scatter(
                 bg_xy[mask, 0], bg_xy[mask, 1],
-                s=8, alpha=0.3, c=color, edgecolors="none",
+                s=8, alpha=0.20, c=color, edgecolors="none",
                 rasterized=True, label="_bg",
             )
 
-        # Overlay each interpolation path with t-colored markers
+        # Overlay each interpolation path
         offset = 0
         for i, (arr, (lang_a, lang_b)) in enumerate(
             zip(interp_arrays, pair_labels)
         ):
             n_pts = arr.shape[0]
-            path_xy = interp_xy[offset : offset + n_pts]
+            path_xy = interp_xy[offset: offset + n_pts]
             offset += n_pts
 
-            pair_color = _PAIR_COLORS[i % len(_PAIR_COLORS)]
-            name_a = LANGUAGES[lang_a].name if lang_a in LANGUAGES else lang_a
-            name_b = LANGUAGES[lang_b].name if lang_b in LANGUAGES else lang_b
-            pair_label = f"{name_a} \u2192 {name_b}"
+            path_color = _PATH_COLORS[i % len(_PATH_COLORS)]
+            name_a = get_label(lang_a, "language")
+            name_b = get_label(lang_b, "language")
+            pair_str = f"{name_a} \u2192 {name_b}"
 
-            # Connected line through all interpolation points
+            # Connected line
             ax.plot(
                 path_xy[:, 0], path_xy[:, 1],
-                color=pair_color, linewidth=1.5, alpha=0.6, zorder=3,
+                color=path_color, linewidth=2.0, alpha=0.7, zorder=3,
             )
 
-            # Color-code points by t (dark at start, light at end)
+            # Color-coded points by interpolation t
             ts = np.linspace(0, 1, n_pts)
-            scatter = ax.scatter(
+            ax.scatter(
                 path_xy[:, 0], path_xy[:, 1],
-                s=25, c=ts, cmap="coolwarm", edgecolors=pair_color,
-                linewidths=0.5, zorder=4, vmin=0, vmax=1,
+                s=30, c=ts, cmap="coolwarm", edgecolors=path_color,
+                linewidths=0.6, zorder=4, vmin=0, vmax=1,
             )
 
-            # Dummy for legend
-            ax.plot([], [], color=pair_color, linewidth=2.5, label=pair_label)
+            # Legend entry
+            ax.plot([], [], color=path_color, linewidth=2.5, label=pair_str)
 
-            # Start marker (circle) — offset label away from path
+            # Start marker (circle) with arrow annotation
             ax.scatter(
                 path_xy[0, 0], path_xy[0, 1],
-                s=200, c=pair_color, marker="o", edgecolors="black",
+                s=200, c=path_color, marker="o", edgecolors="black",
                 linewidths=1.5, zorder=5,
             )
-            # Smart label placement: offset away from the midpoint
+            # Offset direction: away from path midpoint
             mid_xy = path_xy[n_pts // 2]
-            dx_start = path_xy[0, 0] - mid_xy[0]
-            dy_start = path_xy[0, 1] - mid_xy[1]
-            norm_s = max(np.sqrt(dx_start**2 + dy_start**2), 1e-6)
+            dx_s = path_xy[0, 0] - mid_xy[0]
+            dy_s = path_xy[0, 1] - mid_xy[1]
+            norm_s = max(np.sqrt(dx_s**2 + dy_s**2), 1e-6)
+            # Annotate with arrow connector for clean label placement
             ax.annotate(
-                name_a, xy=(path_xy[0, 0], path_xy[0, 1]),
-                xytext=(15 * dx_start / norm_s, 15 * dy_start / norm_s),
+                name_a,
+                xy=(path_xy[0, 0], path_xy[0, 1]),
+                xytext=(30 * dx_s / norm_s, 30 * dy_s / norm_s),
                 textcoords="offset points",
-                fontsize=11, fontweight="bold", color=pair_color, zorder=6,
+                fontsize=10, fontweight="bold", color=path_color,
+                arrowprops=dict(
+                    arrowstyle="->", color=path_color,
+                    lw=1.2, connectionstyle="arc3,rad=0.15",
+                ),
+                zorder=6,
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=path_color, alpha=0.8),
             )
 
-            # End marker (square)
+            # End marker (square) with arrow annotation
             ax.scatter(
                 path_xy[-1, 0], path_xy[-1, 1],
-                s=200, c=pair_color, marker="s", edgecolors="black",
+                s=200, c=path_color, marker="s", edgecolors="black",
                 linewidths=1.5, zorder=5,
             )
-            dx_end = path_xy[-1, 0] - mid_xy[0]
-            dy_end = path_xy[-1, 1] - mid_xy[1]
-            norm_e = max(np.sqrt(dx_end**2 + dy_end**2), 1e-6)
+            dx_e = path_xy[-1, 0] - mid_xy[0]
+            dy_e = path_xy[-1, 1] - mid_xy[1]
+            norm_e = max(np.sqrt(dx_e**2 + dy_e**2), 1e-6)
             ax.annotate(
-                name_b, xy=(path_xy[-1, 0], path_xy[-1, 1]),
-                xytext=(15 * dx_end / norm_e, 15 * dy_end / norm_e),
+                name_b,
+                xy=(path_xy[-1, 0], path_xy[-1, 1]),
+                xytext=(30 * dx_e / norm_e, 30 * dy_e / norm_e),
                 textcoords="offset points",
-                fontsize=9,
-                fontweight="bold",
-                color=color,
+                fontsize=10, fontweight="bold", color=path_color,
+                arrowprops=dict(
+                    arrowstyle="->", color=path_color,
+                    lw=1.2, connectionstyle="arc3,rad=0.15",
+                ),
                 zorder=6,
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=path_color, alpha=0.8),
             )
 
         ax.set_title("Latent Interpolation Trajectories")
         ax.set_xlabel("t-SNE Dimension 1")
         ax.set_ylabel("t-SNE Dimension 2")
+        ax.set_aspect("equal")
         ax.legend(loc="best", frameon=True, framealpha=0.9)
         fig.tight_layout()
         return fig
@@ -324,7 +353,7 @@ class InterpolationVisualization(BaseVisualization):
         n_pairs = len(pair_labels)
         ts = np.linspace(0.0, 1.0, steps)
 
-        # Compute figure height: ~0.35 inches per row, plus margins per subplot
+        # Compute figure height
         row_height = 0.35
         subplot_margin = 1.2
         fig_height = max(
@@ -346,8 +375,10 @@ class InterpolationVisualization(BaseVisualization):
             ax.invert_yaxis()
             ax.axis("off")
 
-            name_a = LANGUAGES[lang_a].name if lang_a in LANGUAGES else lang_a
-            name_b = LANGUAGES[lang_b].name if lang_b in LANGUAGES else lang_b
+            name_a = get_label(lang_a, "language")
+            name_b = get_label(lang_b, "language")
+            path_color = _PATH_COLORS[idx % len(_PATH_COLORS)]
+
             ax.set_title(
                 f"Interpolation: {name_a} \u2192 {name_b}",
                 fontsize=12,
@@ -365,28 +396,20 @@ class InterpolationVisualization(BaseVisualization):
                 verticalalignment="center",
             )
 
-            # Precompute language endpoint colors for the margin indicator
-            c_start = np.array(
-                plt.cm.colors.to_rgba(
-                    LANG_COLORS.get(lang_a, "#333333")
-                )[:3]
-            )
-            c_end = np.array(
-                plt.cm.colors.to_rgba(
-                    LANG_COLORS.get(lang_b, "#333333")
-                )[:3]
-            )
+            # Color endpoints for margin indicator
+            c_start = np.array(plt.cm.colors.to_rgba(path_color)[:3])
+            # Use a complementary lighter shade for end
+            c_end = np.clip(c_start * 0.5 + 0.5, 0, 1)
 
             for row, (t_val, text) in enumerate(zip(ts, texts)):
                 y = row + 1.0
-                # Shade alternating rows
                 if row % 2 == 0:
                     ax.axhspan(
                         y - 0.4, y + 0.4,
                         facecolor="#f0f0f0", edgecolor="none", zorder=0,
                     )
 
-                # Left-margin color indicator showing language transition
+                # Left-margin color indicator
                 frac = t_val
                 indicator_color = (1 - frac) * c_start + frac * c_end
                 ax.axhspan(
@@ -400,7 +423,6 @@ class InterpolationVisualization(BaseVisualization):
                     fontsize=9, verticalalignment="center",
                     family="monospace", color="#555555",
                 )
-                # Truncate long decoded strings for display
                 display_text = text if len(text) <= 100 else text[:97] + "..."
                 ax.text(
                     0.15, y, display_text,
@@ -429,9 +451,9 @@ class InterpolationVisualization(BaseVisualization):
 
         z = data["z"]
         languages = data["languages"]
-        lang_means = self._language_means(z, languages)
+        lang_means, lang_counts = self._language_stats(z, languages)
 
-        pairs = self._parse_pairs(lang_means)
+        pairs = self._parse_pairs(lang_means, lang_counts)
         steps = self.config.steps
         logger.info(
             "Interpolation: %d pair(s), %d steps each", len(pairs), steps
