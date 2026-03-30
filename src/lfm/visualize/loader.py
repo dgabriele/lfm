@@ -371,10 +371,25 @@ def encode_labeled_corpus(
         # v1 cache — fall back to re-loading with labels
         return _encode_labeled_fallback(model_data, config)
 
-    # Subsample if needed (keep alignment)
+    # Per-language balanced subsampling to avoid visual/statistical bias
     if len(token_ids_list) > config.max_samples:
+        from collections import defaultdict
+
         rng = random.Random(config.seed)
-        indices = rng.sample(range(len(token_ids_list)), config.max_samples)
+        by_lang: dict[str, list[int]] = defaultdict(list)
+        for idx, lang in enumerate(languages):
+            by_lang[lang].append(idx)
+
+        n_langs = len(by_lang)
+        per_lang = config.max_samples // max(n_langs, 1)
+        indices: list[int] = []
+        for lang in sorted(by_lang.keys()):
+            lang_indices = by_lang[lang]
+            if len(lang_indices) > per_lang:
+                lang_indices = rng.sample(lang_indices, per_lang)
+            indices.extend(lang_indices)
+        rng.shuffle(indices)
+
         token_ids_list = [token_ids_list[i] for i in indices]
         languages = [languages[i] for i in indices]
 
