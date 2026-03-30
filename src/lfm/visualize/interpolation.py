@@ -66,11 +66,14 @@ class InterpolationVisualization(BaseVisualization):
         lang_means: dict[str, np.ndarray] | None = None,
         lang_counts: dict[str, int] | None = None,
     ) -> list[tuple[str, str]]:
-        """Parse pairs or auto-select based on maximum z-space distance.
+        """Parse pairs or auto-select diverse, well-separated pairs.
 
         If ``self.config.pairs`` is set, parse it (``"pol-vie,ara-fin"``).
-        Otherwise, dynamically select 2 pairs that span the greatest
-        distance in latent space from languages with sufficient samples.
+        Otherwise, dynamically select 2 pairs that:
+        1. Cross language family boundaries (typological diversity)
+        2. Span the greatest distance in latent space
+        3. Use well-represented languages (sufficient samples)
+        4. Don't reuse languages or families between pairs
         """
         raw = self.config.pairs
         if raw:
@@ -85,7 +88,6 @@ class InterpolationVisualization(BaseVisualization):
             return pairs
 
         if lang_means is None or len(lang_means) < 2:
-            # Return empty — caller will handle gracefully
             logger.warning("Cannot auto-select pairs: fewer than 2 languages")
             return []
 
@@ -108,26 +110,54 @@ class InterpolationVisualization(BaseVisualization):
             eligible_codes,
         )
 
-        # Rank all pairs by z-distance
+        # Rank cross-family pairs by z-distance (ensures typological diversity)
         ranked: list[tuple[float, str, str]] = []
         for i, a in enumerate(eligible_codes):
+            family_a = get_label(a, "family")
             for b in eligible_codes[i + 1:]:
+                family_b = get_label(b, "family")
+                if family_a == family_b:
+                    continue
                 dist = float(np.linalg.norm(lang_means[a] - lang_means[b]))
                 ranked.append((dist, a, b))
         ranked.sort(reverse=True)
 
-        # Greedily select 2 pairs with no shared languages
+        # Fallback: if no cross-family pairs, use all pairs
+        if not ranked:
+            for i, a in enumerate(eligible_codes):
+                for b in eligible_codes[i + 1:]:
+                    dist = float(np.linalg.norm(lang_means[a] - lang_means[b]))
+                    ranked.append((dist, a, b))
+            ranked.sort(reverse=True)
+
+        # Greedily select 2 pairs with no shared languages or families
         selected: list[tuple[str, str]] = []
         used: set[str] = set()
+        used_families: set[str] = set()
         for _, a, b in ranked:
-            if a not in used and b not in used:
-                selected.append((a, b))
-                used.update([a, b])
+            if a in used or b in used:
+                continue
+            family_a = get_label(a, "family")
+            family_b = get_label(b, "family")
+            if family_a in used_families or family_b in used_families:
+                continue
+            selected.append((a, b))
+            used.update([a, b])
+            used_families.update([family_a, family_b])
             if len(selected) >= 2:
                 break
 
+        # Relax family constraint if needed
+        if len(selected) < 2:
+            for _, a, b in ranked:
+                if a not in used and b not in used:
+                    selected.append((a, b))
+                    used.update([a, b])
+                if len(selected) >= 2:
+                    break
+
         logger.info(
-            "Auto-selected interpolation pairs: %s (by max z-distance)",
+            "Auto-selected interpolation pairs: %s (by max z-distance, cross-family)",
             selected,
         )
         return selected
@@ -183,9 +213,11 @@ class InterpolationVisualization(BaseVisualization):
     ) -> Figure:
         """Create a t-SNE scatter with interpolation paths overlaid.
 
-        Uses a large background sample (12K+ points) so interpolation
-        points don't distort the projection. Square aspect ratio with
-        equal axes. Labels placed with offset arrows to avoid overlap.
+        Uses a large background sample so interpolation points don't
+        distort the projection. Axes are clipped to the main data
+        distribution (percentile bounds) so outliers don't compress
+        the visualization. Labels are placed at fixed offset angles
+        to prevent overlap.
         """
         z_np = z.cpu().numpy() if isinstance(z, torch.Tensor) else np.asarray(z)
 
@@ -216,10 +248,16 @@ class InterpolationVisualization(BaseVisualization):
         bg_xy = xy[:n_bg]
         interp_xy = xy[n_bg:]
 
+        # --- Compute axis limits from background data (exclude outliers) ---
+        x_lo, x_hi = np.percentile(bg_xy[:, 0], [1, 99])
+        y_lo, y_hi = np.percentile(bg_xy[:, 1], [1, 99])
+        x_pad = (x_hi - x_lo) * 0.12
+        y_pad = (y_hi - y_lo) * 0.12
+
         # --- Plot ---
         fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
 
-        # Background scatter colored by language family
+        # Background scatter colored by language family (subtle)
         unique_bg_codes = sorted(set(bg_langs))
         unique_families = sorted({get_label(c, "family") for c in unique_bg_codes})
         family_colors = get_color_map("family", keys=unique_families)
@@ -230,12 +268,26 @@ class InterpolationVisualization(BaseVisualization):
             color = family_colors.get(family, "#cccccc")
             ax.scatter(
                 bg_xy[mask, 0], bg_xy[mask, 1],
-                s=8, alpha=0.20, c=color, edgecolors="none",
+                s=6, alpha=0.15, c=color, edgecolors="none",
                 rasterized=True, label="_bg",
             )
 
+        # Fixed label offset directions for each endpoint (prevents overlap).
+        # Angle in degrees from marker center, cycling through 4 quadrants.
+        _LABEL_OFFSETS = [
+            (-45, 35),   # pair 0 start: upper-left
+            (45, -35),   # pair 0 end: lower-right
+            (45, 35),    # pair 1 start: upper-right
+            (-45, -35),  # pair 1 end: lower-left
+            (-50, 0),    # pair 2 start: left
+            (50, 0),     # pair 2 end: right
+            (0, 40),     # pair 3 start: top
+            (0, -40),    # pair 3 end: bottom
+        ]
+
         # Overlay each interpolation path
         offset = 0
+        label_idx = 0
         for i, (arr, (lang_a, lang_b)) in enumerate(
             zip(interp_arrays, pair_labels)
         ):
@@ -251,15 +303,15 @@ class InterpolationVisualization(BaseVisualization):
             # Connected line
             ax.plot(
                 path_xy[:, 0], path_xy[:, 1],
-                color=path_color, linewidth=2.0, alpha=0.7, zorder=3,
+                color=path_color, linewidth=2.5, alpha=0.8, zorder=3,
             )
 
             # Color-coded points by interpolation t
             ts = np.linspace(0, 1, n_pts)
             ax.scatter(
                 path_xy[:, 0], path_xy[:, 1],
-                s=30, c=ts, cmap="coolwarm", edgecolors=path_color,
-                linewidths=0.6, zorder=4, vmin=0, vmax=1,
+                s=35, c=ts, cmap="coolwarm", edgecolors=path_color,
+                linewidths=0.8, zorder=4, vmin=0, vmax=1,
             )
 
             # Legend entry
@@ -268,19 +320,15 @@ class InterpolationVisualization(BaseVisualization):
             # Start marker (circle) with arrow annotation
             ax.scatter(
                 path_xy[0, 0], path_xy[0, 1],
-                s=200, c=path_color, marker="o", edgecolors="black",
+                s=180, c=path_color, marker="o", edgecolors="black",
                 linewidths=1.5, zorder=5,
             )
-            # Offset direction: away from path midpoint
-            mid_xy = path_xy[n_pts // 2]
-            dx_s = path_xy[0, 0] - mid_xy[0]
-            dy_s = path_xy[0, 1] - mid_xy[1]
-            norm_s = max(np.sqrt(dx_s**2 + dy_s**2), 1e-6)
-            # Annotate with arrow connector for clean label placement
+            ofs_start = _LABEL_OFFSETS[label_idx % len(_LABEL_OFFSETS)]
+            label_idx += 1
             ax.annotate(
                 name_a,
                 xy=(path_xy[0, 0], path_xy[0, 1]),
-                xytext=(30 * dx_s / norm_s, 30 * dy_s / norm_s),
+                xytext=ofs_start,
                 textcoords="offset points",
                 fontsize=10, fontweight="bold", color=path_color,
                 arrowprops=dict(
@@ -288,22 +336,24 @@ class InterpolationVisualization(BaseVisualization):
                     lw=1.2, connectionstyle="arc3,rad=0.15",
                 ),
                 zorder=6,
-                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=path_color, alpha=0.8),
+                bbox=dict(
+                    boxstyle="round,pad=0.3", fc="white",
+                    ec=path_color, lw=1.5, alpha=0.95,
+                ),
             )
 
             # End marker (square) with arrow annotation
             ax.scatter(
                 path_xy[-1, 0], path_xy[-1, 1],
-                s=200, c=path_color, marker="s", edgecolors="black",
+                s=180, c=path_color, marker="s", edgecolors="black",
                 linewidths=1.5, zorder=5,
             )
-            dx_e = path_xy[-1, 0] - mid_xy[0]
-            dy_e = path_xy[-1, 1] - mid_xy[1]
-            norm_e = max(np.sqrt(dx_e**2 + dy_e**2), 1e-6)
+            ofs_end = _LABEL_OFFSETS[label_idx % len(_LABEL_OFFSETS)]
+            label_idx += 1
             ax.annotate(
                 name_b,
                 xy=(path_xy[-1, 0], path_xy[-1, 1]),
-                xytext=(30 * dx_e / norm_e, 30 * dy_e / norm_e),
+                xytext=ofs_end,
                 textcoords="offset points",
                 fontsize=10, fontweight="bold", color=path_color,
                 arrowprops=dict(
@@ -311,14 +361,21 @@ class InterpolationVisualization(BaseVisualization):
                     lw=1.2, connectionstyle="arc3,rad=0.15",
                 ),
                 zorder=6,
-                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=path_color, alpha=0.8),
+                bbox=dict(
+                    boxstyle="round,pad=0.3", fc="white",
+                    ec=path_color, lw=1.5, alpha=0.95,
+                ),
             )
+
+        # Clip axes to main data distribution (outliers don't compress plot)
+        ax.set_xlim(x_lo - x_pad, x_hi + x_pad)
+        ax.set_ylim(y_lo - y_pad, y_hi + y_pad)
 
         ax.set_title("Latent Interpolation Trajectories")
         ax.set_xlabel("t-SNE Dimension 1")
         ax.set_ylabel("t-SNE Dimension 2")
         ax.set_aspect("equal")
-        ax.legend(loc="best", frameon=True, framealpha=0.9)
+        ax.legend(loc="upper right", frameon=True, framealpha=0.9, fontsize=10)
         fig.tight_layout()
         return fig
 
