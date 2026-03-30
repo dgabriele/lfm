@@ -313,27 +313,35 @@ step=1500 hard=100%  acc=95.7%   (stable plateau)
 
 ### Example outputs
 
-English sentences encoded with all-MiniLM-L6-v2, projected through the trained input projection, and decoded through the frozen multilingual VAE:
+English sentences encoded with all-MiniLM-L6-v2, projected through the trained `_input_proj` (from the best checkpoint at 98.4% accuracy), and decoded through the frozen v4 decoder:
 
 ```
-TEXT: "Building a wall was front and centre in the campaign."
- IPA: namun impos diputados uratikas heti al skoball kotorij konedikavljashe austxs sotsiolajerjestoe he
+ENG: "The committee voted unanimously to approve the new environmental regulations."
+IPA: vɤj ŋɯəj tɑm bo ʒon inʈaŋ jos ɲɤ̆t cuŋ zăn dɔŋ ðæt dɛu kɔ the lam thɯŋ xiən haj kwa ...
+     (36 tokens)
 
-TEXT: "Donald Trump made history again this week when he became the only former U.S. president
-      ever to be criminally indicted..."
- IPA: ia pdfaentrasinjitnji miljamatt ifqualizada kolektan nuortjijon kotori ituloة bshan de
+ENG: "She picked up the old guitar and played a melody her grandmother used to sing."
+IPA: ursəkrə drɛːɦaːr bunkiːdaːren ʕʃr kiʃho ekʃumiː ke ləŋkaːraː vitɒl ɦo midmiːlt kiəw ...
+     (42 tokens)
 
-TEXT: "Elon Musk pulled the plug on legacy blue checks and the libs are SALTY!"
- IPA: kmaa alqaedaen kruz tiga pemain awal sindikali laestsiani kesemuachtat mutifian metani meng or op
+ENG: "Quantum entanglement allows particles to be correlated regardless of distance."
+IPA: ʋuotɑ mehmæn ejrenhoun inisɑ me infji uboloɡisæ kuŋ saanix junijɑ kʌresi ...
+     (41 tokens)
 
-TEXT: "The Clippers have won 70 of their last 71 games when scoring at least 100 points..."
- IPA: aki usposigmal dito a sua pjosisudesan ettiui bashardzhi oriwo kaj sykshemesi ajn denixr tchok mba
+ENG: "The local bakery on Fifth Street makes the best sourdough bread in town."
+IPA: wɪtɯnɹi ðʌ ɡaj spɝ sɛz ɪnkliɪŋ ðʌ sɪŋɡwatʃɝ ʃikɛr pɹʌ ɛlmʌndɪŋz liəwt͡ɕ aŋɯl ...
+     (36 tokens)
 
-TEXT: "Of course, Satan is no stranger to the game."
- IPA: thariksi dimesial lud thojlua leetelmiset martifik atyshymyznynyn en jakhan termirlakin ke
+ENG: "After three days of heavy rain, the river burst its banks and flooded the valley."
+IPA: kɛɲ sɤ̆w mɔʃɛfta kəsiɾ to kwa samaŋ doj vɤj betandowok zoŋnoθa titsɛ diz biztɔstɔːas ...
+     (42 tokens)
+
+ENG: "The stock market crashed by 12% following the surprise interest rate announcement."
+IPA: dokusnɨm ljaɡmounden ve k krɔmjamuʃomout ɒz i kjʌbesa rasko tɤ̆j utmundom i bjebtʃesa ...
+     (44 tokens)
 ```
 
-Each input produces a distinct, pronounceable IPA utterance (~41 tokens with the v4 decoder). The output draws on phonotactic patterns from all 16 training languages — the decoder mixes typological features from its training languages into a novel linguistic form that is neither any specific human language nor a degenerate code.
+Each input produces a distinct, pronounceable IPA utterance (~36-44 tokens). The output draws on phonotactic patterns from all 16 training languages — the decoder mixes typological features (Vietnamese tones, Hungarian consonant clusters, Arabic pharyngeals, English fricatives) into novel linguistic forms that are neither any specific human language nor a degenerate code. Semantically similar inputs produce similar-sounding utterances (measurable via Topsim), while dissimilar inputs produce clearly distinct ones.
 
 ### Structural evaluation
 
