@@ -47,6 +47,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     register_publish_group(subparsers)
 
+    # --- agent subcommand group ---
+    from lfm.cli.agent import register_agent_group
+
+    register_agent_group(subparsers)
+
     # --- setup command ---
     from lfm.cli.setup import SetupCommand
 
