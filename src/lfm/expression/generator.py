@@ -275,10 +275,11 @@ class ExpressionGenerator(nn.Module):
                     leaf_z_ordered[bi, i] = expr.leaf_z[bi, ni]
                     leaf_active[bi, i] = True
 
-        # Precompute memory vectors: z → latent_to_decoder → (B, 1, H)
+        # Precompute memory vectors: z → latent_to_decoder → (B, L, K, H)
+        _n_mem = getattr(gen, "_num_memory_tokens", 1)
         memories = gen.latent_to_decoder(
             leaf_z_ordered.reshape(b * max_leaves, -1),
-        ).reshape(b, max_leaves, 1, -1)
+        ).reshape(b, max_leaves, _n_mem, -1)
 
         # Decoder components
         decoder = gen.decoder
@@ -327,7 +328,7 @@ class ExpressionGenerator(nn.Module):
         cur_embed = dec_tok(cur_ids)
 
         def _get_memory() -> Tensor:
-            mem = torch.zeros(b, 1, hidden_dim, device=device)
+            mem = torch.zeros(b, _n_mem, hidden_dim, device=device)
             for bi in range(b):
                 li = cur_leaf[bi].item()
                 if li < max_leaves and leaf_active[bi, li]:

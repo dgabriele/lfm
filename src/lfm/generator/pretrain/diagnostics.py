@@ -45,7 +45,8 @@ def sample_decode(
     _dec = modules["decoder"]
     _is_ling = isinstance(_dec, LinguisticDecoder)
     n = z.size(0)
-    mem = modules["latent_to_decoder"](z).unsqueeze(1)
+    _n_mem = getattr(cfg, "num_memory_tokens", 1)
+    mem = modules["latent_to_decoder"](z).reshape(n, _n_mem, -1)
     ids = torch.full(
         (n, 1), bos_id, dtype=torch.long, device=device
     )
