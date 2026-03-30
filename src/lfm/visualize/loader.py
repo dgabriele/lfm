@@ -44,9 +44,22 @@ def _load_resume_checkpoint(
     from lfm.generator.layers import LinguisticDecoder, precompute_rope_freqs
     from lfm.generator.pretrain import VAEPretrainConfig
 
-    cfg = VAEPretrainConfig()  # defaults match the checkpoint
+    # Build config from checkpoint metadata (patched into ckpt at save time)
+    cfg = VAEPretrainConfig(
+        latent_dim=ckpt.get("latent_dim", 256),
+        decoder_hidden_dim=ckpt.get("decoder_hidden_dim", 512),
+        decoder_num_layers=ckpt.get("decoder_num_layers", 4),
+        decoder_num_heads=ckpt.get("decoder_num_heads", 8),
+        max_seq_len=ckpt.get("max_seq_len", 96),
+        num_memory_tokens=ckpt.get("num_memory_tokens", 1),
+        encoder_num_layers=ckpt.get("encoder_num_layers", 2),
+        attention_head_windows=tuple(ckpt.get("attention_head_windows", [3, 3, 7, 7, 15, 15, 0, 0])),
+        attention_global_every=ckpt.get("attention_global_every", 7),
+        use_rope=ckpt.get("use_rope", True),
+        share_decoder_layers=ckpt.get("share_decoder_layers", True),
+    )
     hidden = cfg.decoder_hidden_dim
-    full_vocab = cfg.spm_vocab_size + 2
+    full_vocab = ckpt.get("vocab_size", cfg.spm_vocab_size) + 2
 
     # Reconstruct all modules
     enc_token_embedding = nn.Embedding(full_vocab, hidden).to(device)
@@ -66,7 +79,7 @@ def _load_resume_checkpoint(
     ).to(device)
 
     enc_to_latent = nn.Linear(hidden, cfg.latent_dim * 2).to(device)
-    latent_to_decoder = nn.Linear(cfg.latent_dim, hidden).to(device)
+    latent_to_decoder = nn.Linear(cfg.latent_dim, getattr(cfg, 'num_memory_tokens', 1) * hidden).to(device)
     dec_token_embedding = nn.Embedding(full_vocab, hidden).to(device)
 
     if cfg.use_rope:
@@ -156,7 +169,8 @@ def _load_decoder_checkpoint(
     max_seq_len = ckpt.get("max_seq_len", cfg.max_seq_len)
     full_vocab = vocab_size + 2
 
-    latent_to_decoder = nn.Linear(latent_dim, hidden).to(device)
+    n_mem = ckpt.get("num_memory_tokens", 1)
+    latent_to_decoder = nn.Linear(latent_dim, n_mem * hidden).to(device)
     latent_to_decoder.load_state_dict(ckpt["latent_to_decoder"])
 
     dec_token_embedding = nn.Embedding(full_vocab, hidden).to(device)
@@ -527,7 +541,8 @@ def decode_z(
         z_batch = z[start : start + config.batch_size].to(device)
         b = z_batch.size(0)
 
-        memory = latent_to_decoder(z_batch).unsqueeze(1)
+        _n_mem = latent_to_decoder.out_features // modules["decoder"].layers[0].cross_attn.embed_dim
+        memory = latent_to_decoder(z_batch).reshape(b, _n_mem, -1)
         cur_ids = torch.full((b, 1), bos_id, dtype=torch.long, device=device)
 
         if use_kv_cache:

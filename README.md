@@ -134,49 +134,60 @@ The decoder is trained on IPA-transcribed text from typologically diverse langua
 
 ### Pretraining results
 
-2.6M IPA sentences, 16 languages, 12 epochs (latent_dim=256, lr=0.0005):
+2.6M IPA sentences, 16 languages, 9 epochs with syllable-aligned BPE and 8-token z memory (latent_dim=256, lr=0.0005):
 
 | Metric | Value |
 |--------|-------|
-| Val CE | **0.26** (PPL ≈ 1.30) |
-| Token accuracy | 88.9% |
+| Val CE | **0.061** (PPL ≈ 1.06) |
+| Token accuracy | 96.8% |
 | Active z dims | 256/256 |
-| Smoothness (Spearman) | r=0.525 (p≈0) |
-| Probe mean R² | 0.051 |
+| Smoothness (Spearman) | r=0.620 (p≈0) |
 | PCA 90% variance | 146 PCs |
 
 <p align="center">
   <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
-  <img src="docs/static/images/tsne_by_type.png" width="48%" alt="t-SNE of latent space colored by morphological type" />
+  <img src="docs/static/images/tsne_by_language.png" width="48%" alt="t-SNE of latent space colored by language" />
 </p>
-<p align="center"><em>Left: hierarchical clustering recovers linguistically sensible language groupings from the latent space. Right: t-SNE projection colored by morphological type. Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
+<p align="center"><em>Left: hierarchical clustering recovers linguistically sensible language groupings. Right: t-SNE by language — 16 distinct clusters with typologically sensible overlap zones. Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
 
-### How to read the reconstruction diagnostic
+### Reconstruction
 
-The training log shows reconstruction of a fixed English sentence at each epoch. The progression illustrates what the decoder learns at each CE level:
+At val CE=0.061, the decoder achieves near-perfect reconstruction through the 256-dim bottleneck:
 
-**CE ~3.0 (epoch 1-3)** — Generic English-sounding output. The decoder has learned English phonotactics (valid sound sequences) but barely uses z. A few target words appear by coincidence:
 ```
-orig: pɔɪnts wi hæv ɔlɹɛdi hɛlpt vɛɹi kwaɪʌtli ɑn ðʌ ɡɹeɪn dil sɛd ...
-dec:  waɪl æn oʊɛdi hæv oʊldɝli ðɛɹ ɑɹ stɪl ʌnd ðʌ hæv ʌkɹɔs ...
-```
-
-**CE ~1.5 (epoch 6-8)** — Key content words start appearing (`pɔɪnts`, `ɔlɹɛdi`, `dil`, `sɛd`) but scrambled with hallucinated fillers. The encoder is beginning to condition z meaningfully:
-```
-dec:  ðʌ vɔɪlɪn kwaɪʌtli kɹɛdɪnts ... pɔɪnt ... dʊɹɪŋ ʌ sɛt ... nuzpeɪpɝ daɪnts ...
+orig: ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
+dec:  ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
+      [WED=0/19, WER=0%]
 ```
 
-**CE ~0.7 (epoch 20+)** — Most content words present, partially correct order. Errors are word swaps and morphological variants, not content errors. The z is carrying the sentence's identity:
+### Interpolation (English → Portuguese, 9 steps)
+
+Smooth typological transition through the latent space:
+
 ```
-dec:  jɪnts hæv ɔlɹɛdi ɡoʊɪŋ pɔɪnti wi hɛlɪli ɑn hɪz hɑɹeɪv dil wɪð æn oʊpʌnɪŋ deɪ ...
+0.000: boʊθ ʌnd ʌfɛnθ ʌnd boʊθ ʌnd ʌfɑnsfɪvɪldæks ʌnd boʊθ boʊθɛɹiʌm ...
+0.250: boʊθ ʌnd ʌfendɝθ ʌnd ʌ umɛfɑnlfɪsaɪzɪz ʌnd ʌ boʊθ pɔɪnts ...
+0.500: boʊθ nɐ suɐ dikɐdɛ ʌnd ʌ ɛspɛfensiɐ nɛpɛ nɐʁɐ vɤj umɐ dɛ ...
+0.625: nɐ suɐ boʊθ ɛspɛjtensiɐ dɛ inɛɾiɐ umɐ puɾiɐ vɤj jɛlfupskwa ...
+0.750: nɐ suɐ ɛspɛɾiensiɐ dɛ nɛpɛ inɛ umɐ dɛ umɐ kuɾlfɐ nɐ suɐ ...
+1.000: nɐ suɐ ɛspɛɾiensiɐ nɐ suɐ ɛspɛɾiensiɐ nɐ suɐ nɐ inɛ ...
 ```
 
-**CE ~0.5 (epoch 40+)** — Near-faithful reconstruction. Occasional word order swaps but all content words recovered. The 256-dim bottleneck preserves meaning through compression:
+English phonology at t=0, mixed English-Portuguese at t=0.5, clean Portuguese at t=1.0.
+
+### Perturbation (σ=0 to σ=3)
+
+Adding noise scaled to the encoder's z distribution:
+
 ```
-dec:  pɔɪnts wi hæv ɔlɹɛdi hɛlpt vɛɹi kwaɪʌtli ɑn ðʌ dil sɛd dʊɹɪŋ ... nuzpeɪpɝ daɪ pɹɛs
+σ=0.00: boʊθ ʌnd ʌfɛnθ ʌnd boʊθ ʌnd ʌfɑnsfɪvɪldæks ...           (English, unchanged)
+σ=0.50: boʊθ ʌnd juθɑnskfnɪs ʌnd ʌfleɪvsɛnsɛpæks ...              (English, content shifts)
+σ=1.00: boʊθ ʌnd juskin pule innɑn ʋi ʌfoksørætien ...             (mixed, Finnish elements)
+σ=2.00: juskin jɛri kule ʋirnɑn ɣarni ʃikokɑn ntsɑnin ...         (Finnish phonotactics)
+σ=3.00: juri nsin ʃikɑn sɑksin pumpiɑ mskin ko kolrnʃe ...         (far from English, agglutinative)
 ```
 
-The progression shows the decoder learning in stages: phonotactics first (valid sounds), then vocabulary (correct words), then composition (correct order). Token accuracy at each stage: ~20% → ~60% → ~78% → ~85%. The remaining errors at convergence are mostly word order — the bottleneck preserves *what* was said more faithfully than *how* it was sequenced.
+Small noise preserves language and content. At σ=1.0, phonotactics shift to mixed typology. At σ=3.0, the output has fully crossed into a different typological region of the manifold.
 
 ## Expression Generation
 
