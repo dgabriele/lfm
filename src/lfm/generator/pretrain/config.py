@@ -92,6 +92,8 @@ class VAEPretrainConfig(LFMBaseConfig):
     num_memory_tokens: int = 1
     max_batches_per_epoch: int | None = None
     """Cap batches per epoch for smoke testing.  None = full epoch."""
+    checkpoint_every_steps: int | None = None
+    """Save a resumable checkpoint every N steps.  None = end of epoch only."""
     syllable_aligned_bpe: bool = False
 
     # Linguistic attention structure

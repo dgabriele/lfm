@@ -89,6 +89,7 @@ word_dropout_anneal_epochs: 20
 dip_weight: 0.1
 bow_weight: 0.0
 diagnostic_every: 3000
+checkpoint_every_steps: 3000
 val_fraction: 0.1
 seed: 42
 device: cuda

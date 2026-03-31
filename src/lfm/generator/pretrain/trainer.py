@@ -603,6 +603,28 @@ class VAEPretrainer:
                         if isinstance(m, nn.Module):
                             m.train()
 
+                # Mid-epoch resumable checkpoint
+                _ckpt_every = getattr(cfg, "checkpoint_every_steps", None)
+                if (
+                    _ckpt_every is not None
+                    and (i + 1) % _ckpt_every == 0
+                    and (i + 1) < num_batches
+                ):
+                    save_resume_checkpoint(
+                        str(Path(cfg.output_path).parent),
+                        epoch=epoch,
+                        global_step=global_step,
+                        best_val_loss=best_val_loss,
+                        spm_path=spm_path,
+                        z_running_mean=z_running_mean,
+                        z_running_std=z_running_std,
+                        modules=modules,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        scaler=scaler,
+                    )
+                    logger.info("Mid-epoch checkpoint at step %d", global_step)
+
             train_ce = train_ce_sum / max(train_count, 1)
             train_kl = train_kl_sum / max(train_count, 1)
             train_zvar = train_zvar_sum / max(train_count, 1)
