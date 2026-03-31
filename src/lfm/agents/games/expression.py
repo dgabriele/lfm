@@ -48,9 +48,9 @@ class ExpressionGameConfig(LFMBaseConfig):
     max_segments: int = 8
     max_tokens_per_segment: int = 48
 
-    # Parsimony
-    halt_alpha: float = 0.1
-    segment_beta: float = 0.05
+    # Parsimony — light halt regularizer only; receiver loss drives expansion
+    halt_alpha: float = 0.01
+    segment_beta: float = 0.0
 
     # Message encoder
     encoder: MessageEncoderConfig = MessageEncoderConfig()
@@ -132,9 +132,11 @@ class ZSequenceGenerator(nn.Module):
         self.z_proj = nn.Linear(hidden_dim, latent_dim)
         self.halt_head = nn.Linear(hidden_dim, 1)
 
-        # Bias toward continuing (low initial halt probability)
+        # Bias toward halting early — start compressed, expand as needed.
+        # The receiver loss gradient pushes halt probs DOWN when more
+        # segments are needed for discrimination.
         with torch.no_grad():
-            self.halt_head.bias.fill_(-2.0)
+            self.halt_head.bias.fill_(2.0)
 
     def forward(
         self, embedding: Tensor,
@@ -314,10 +316,13 @@ class ExpressionGame(nn.Module):
         logits = self.receiver(message, candidates)
         receiver_loss = F.cross_entropy(logits, target_idx)
 
-        # Parsimony losses
-        halt_cost = self.config.halt_alpha * halt_probs.sum(dim=-1).mean()
+        # Parsimony: light halt regularizer — receiver loss drives expansion
         total_tokens = trimmed_mask.float().sum(dim=1)
-        token_cost = self.config.segment_beta * torch.log1p(total_tokens).mean()
+        halt_cost = self.config.halt_alpha * halt_probs.sum(dim=-1).mean()
+        token_cost = (
+            self.config.segment_beta * torch.log1p(total_tokens).mean()
+            if self.config.segment_beta > 0 else torch.tensor(0.0, device=device)
+        )
         loss = receiver_loss + halt_cost + token_cost
 
         with torch.no_grad():
@@ -331,6 +336,7 @@ class ExpressionGame(nn.Module):
             active = z_weights > 0.01  # (B, K)
             active_pair = active.unsqueeze(-1) & active.unsqueeze(-2)  # (B, K, K)
             # Exclude diagonal
+            K = z_seq.size(1)
             diag_mask = ~torch.eye(K, dtype=torch.bool, device=device).unsqueeze(0)
             pair_mask = active_pair & diag_mask
             n_pairs = pair_mask.float().sum(dim=(1, 2)).clamp(min=1)
