@@ -3,6 +3,10 @@
 Post-processes a full-sentence dataset by parsing raw text with the
 unified dep→con backend.  Each constituent references its parent
 sentence by index, ensuring perfect alignment with the source dataset.
+
+Resumable: writes per-language results as each language completes,
+then merges into the final HDF5.  On resume, skips languages with
+existing output files.
 """
 
 from __future__ import annotations
@@ -18,6 +22,30 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _write_lang_results(
+    lang_dir: Path,
+    lang: str,
+    results: list[tuple[int, str, str, str]],
+) -> None:
+    """Write per-language constituent results to a checkpoint file."""
+    import pickle
+
+    lang_dir.mkdir(parents=True, exist_ok=True)
+    with open(lang_dir / f"{lang}.pkl", "wb") as f:
+        pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def _load_lang_results(lang_dir: Path, lang: str) -> list[tuple[int, str, str, str]] | None:
+    """Load per-language results if checkpoint exists."""
+    import pickle
+
+    path = lang_dir / f"{lang}.pkl"
+    if not path.exists():
+        return None
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
 def extract_from_dataset(
     dataset_path: str = "data/datasets/leipzig-16lang",
     output_path: str = "data/datasets/leipzig-16lang-constituents",
@@ -26,6 +54,9 @@ def extract_from_dataset(
     max_samples: int | None = None,
 ) -> Path:
     """Extract constituents from an existing dataset's raw text.
+
+    Resumable: per-language results are checkpointed to disk.
+    Re-running skips completed languages.
 
     Args:
         dataset_path: Path to the source HDF5 dataset directory.
@@ -40,6 +71,7 @@ def extract_from_dataset(
     src = Path(dataset_path)
     dst = Path(output_path)
     dst.mkdir(parents=True, exist_ok=True)
+    lang_dir = dst / "_lang_checkpoints"
 
     h5_path = src / "samples.h5"
     logger.info("Loading source dataset: %s", h5_path)
@@ -70,12 +102,22 @@ def extract_from_dataset(
     from lfm.data.parsers import get_backend, supported_languages
 
     supported = supported_languages()
-    results: list[tuple[int, str, str, str]] = []
+    all_results: list[tuple[int, str, str, str]] = []
 
     for lang in sorted(by_lang.keys()):
         items = by_lang[lang]
         if lang not in supported:
             logger.info("[%s] %d sentences — no parser, skipping", lang, len(items))
+            continue
+
+        # Check for existing checkpoint
+        cached = _load_lang_results(lang_dir, lang)
+        if cached is not None:
+            logger.info(
+                "[%s] Resuming: %d constituents from checkpoint",
+                lang, len(cached),
+            )
+            all_results.extend(cached)
             continue
 
         logger.info("[%s] Parsing %d sentences...", lang, len(items))
@@ -84,8 +126,9 @@ def extract_from_dataset(
         except Exception as e:
             logger.warning("[%s] Failed to load parser: %s — skipping", lang, e)
             continue
+
         t0 = time.time()
-        lang_constituents = 0
+        lang_results: list[tuple[int, str, str, str]] = []
 
         for batch_start in range(0, len(items), batch_size):
             batch = items[batch_start : batch_start + batch_size]
@@ -104,28 +147,32 @@ def extract_from_dataset(
                     raw_results, depth=0, parent_seq=parent_idx,
                 )
                 for _, con_text, label, pidx in raw_results:
-                    results.append((pidx, con_text, label, lang))
-                    lang_constituents += 1
+                    lang_results.append((pidx, con_text, label, lang))
 
             if (batch_start + batch_size) % (batch_size * 10) == 0:
                 elapsed = time.time() - t0
                 logger.info(
                     "  [%s] %d/%d → %d constituents (%.0fs)",
                     lang, batch_start + batch_size, len(items),
-                    lang_constituents, elapsed,
+                    len(lang_results), elapsed,
                 )
 
         elapsed = time.time() - t0
         logger.info(
             "[%s] Done: %d constituents from %d sentences (%.0fs)",
-            lang, lang_constituents, len(items), elapsed,
+            lang, len(lang_results), len(items), elapsed,
         )
 
-    logger.info("Total constituents: %d", len(results))
+        # Checkpoint this language
+        _write_lang_results(lang_dir, lang, lang_results)
+        all_results.extend(lang_results)
 
-    label_counts = Counter(label for _, _, label, _ in results)
+    logger.info("Total constituents: %d", len(all_results))
+
+    label_counts = Counter(label for _, _, label, _ in all_results)
     logger.info("Label distribution: %s", dict(label_counts.most_common()))
 
+    # Write final merged HDF5
     out_h5 = dst / "constituents.h5"
     logger.info("Writing: %s", out_h5)
 
@@ -134,24 +181,33 @@ def extract_from_dataset(
 
         grp.create_dataset(
             "parent_idx",
-            data=np.array([r[0] for r in results], dtype=np.int64),
+            data=np.array([r[0] for r in all_results], dtype=np.int64),
         )
         grp.create_dataset(
             "text",
-            data=np.array([r[1] for r in results], dtype=h5py.special_dtype(vlen=str)),
+            data=np.array(
+                [r[1] for r in all_results],
+                dtype=h5py.special_dtype(vlen=str),
+            ),
         )
         grp.create_dataset(
             "label",
-            data=np.array([r[2] for r in results], dtype=h5py.special_dtype(vlen=str)),
+            data=np.array(
+                [r[2] for r in all_results],
+                dtype=h5py.special_dtype(vlen=str),
+            ),
         )
         grp.create_dataset(
             "language",
-            data=np.array([r[3] for r in results], dtype=h5py.special_dtype(vlen=str)),
+            data=np.array(
+                [r[3] for r in all_results],
+                dtype=h5py.special_dtype(vlen=str),
+            ),
         )
 
         f.attrs["source_dataset"] = str(src)
         f.attrs["source_samples"] = n_total
-        f.attrs["num_constituents"] = len(results)
+        f.attrs["num_constituents"] = len(all_results)
 
     import yaml
     manifest = {
@@ -159,10 +215,10 @@ def extract_from_dataset(
         "description": "Phrase constituents extracted via unified dep→con",
         "source_dataset": str(src),
         "source_samples": n_total,
-        "num_constituents": len(results),
+        "num_constituents": len(all_results),
         "label_distribution": dict(label_counts.most_common()),
         "languages": dict(sorted(
-            Counter(r[3] for r in results).most_common(),
+            Counter(r[3] for r in all_results).most_common(),
         )),
         "parser_backend": "depcon (UD dep→con, unified for all languages)",
         "min_constituent_length": min_length,
@@ -170,5 +226,5 @@ def extract_from_dataset(
     with open(dst / "manifest.yaml", "w") as f:
         yaml.dump(manifest, f, default_flow_style=False)
 
-    logger.info("Done. %d constituents → %s", len(results), dst)
+    logger.info("Done. %d constituents → %s", len(all_results), dst)
     return dst
