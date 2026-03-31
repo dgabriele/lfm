@@ -224,6 +224,60 @@ class ListCommand(CLICommand):
         return 0
 
 
+class ExtractConstituentsCommand(CLICommand):
+    """Extract phrase constituents from an existing HDF5 dataset."""
+
+    @property
+    def name(self) -> str:
+        return "extract-constituents"
+
+    @property
+    def help(self) -> str:
+        return "Extract NP/VP/PP/S constituents from an existing dataset"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Post-process a full-sentence HDF5 dataset by parsing raw text "
+            "with the unified dep→con backend. Each constituent references "
+            "its parent sentence by index for perfect alignment."
+        )
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--dataset", default="data/datasets/leipzig-16lang",
+            help="Source dataset directory (default: data/datasets/leipzig-16lang)",
+        )
+        parser.add_argument(
+            "--output", default="data/datasets/leipzig-16lang-constituents",
+            help="Output directory (default: data/datasets/leipzig-16lang-constituents)",
+        )
+        parser.add_argument(
+            "--min-length", type=int, default=10,
+            help="Minimum constituent character length (default: 10)",
+        )
+        parser.add_argument(
+            "--batch-size", type=int, default=64,
+            help="Sentences per parse batch (default: 64)",
+        )
+        parser.add_argument(
+            "--max-samples", type=int, default=None,
+            help="Cap on total samples to process (default: all)",
+        )
+
+    def execute(self, args: argparse.Namespace) -> int:
+        from lfm.data.constituency_extraction import extract_from_dataset
+
+        extract_from_dataset(
+            dataset_path=args.dataset,
+            output_path=args.output,
+            min_length=args.min_length,
+            batch_size=args.batch_size,
+            max_samples=args.max_samples,
+        )
+        return 0
+
+
 def register_dataset_group(
     parent_subparsers: argparse._SubParsersAction,
 ) -> None:
@@ -241,6 +295,7 @@ def register_dataset_group(
 
     commands = [
         GenerateCommand(),
+        ExtractConstituentsCommand(),
         ListCommand(),
     ]
 
