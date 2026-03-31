@@ -156,29 +156,50 @@ def _load_constituents_new_format(
             parent_to_sent_idx[global_idx] = len(sentences)
             sentences.append((src_langs[global_idx], src_ipas[global_idx]))
 
-    # Convert constituent raw text to IPA
-    logger.info("Converting %d constituents to IPA...", len(texts))
-    from lfm.data.loaders.ipa import IPAConverter
+    # Convert constituent raw text to IPA (cached to avoid repeated 15min conversion)
+    import pickle
 
-    converter = IPAConverter()
-    constituents: list[tuple[str, str, int, str]] = []
-    skipped = 0
+    ipa_cache_path = const_dir / "_ipa_cache.pkl"
+    if ipa_cache_path.exists():
+        logger.info("Loading cached IPA conversions from %s", ipa_cache_path)
+        with open(ipa_cache_path, "rb") as pf:
+            cached = pickle.load(pf)
+        constituents = cached["constituents"]
+        skipped = cached["skipped"]
+    else:
+        logger.info("Converting %d constituents to IPA (will cache)...", len(texts))
+        from lfm.data.loaders.ipa import IPAConverter
 
-    for raw_text, label, lang, parent_idx in zip(texts, labels, languages, parent_indices):
-        sent_idx = parent_to_sent_idx.get(parent_idx)
-        if sent_idx is None:
-            skipped += 1
-            continue
+        converter = IPAConverter()
+        constituents: list[tuple[str, str, int, str]] = []
+        skipped = 0
 
-        try:
-            ipa = converter.convert_line(lang, raw_text)
-        except Exception:
-            ipa = None
+        for i, (raw_text, label, lang, parent_idx) in enumerate(
+            zip(texts, labels, languages, parent_indices),
+        ):
+            sent_idx = parent_to_sent_idx.get(parent_idx)
+            if sent_idx is None:
+                skipped += 1
+                continue
 
-        if ipa and len(ipa) >= 5:
-            constituents.append((lang, ipa, sent_idx, label))
-        else:
-            skipped += 1
+            try:
+                ipa = converter.convert_line(lang, raw_text)
+            except Exception:
+                ipa = None
+
+            if ipa and len(ipa) >= 5:
+                constituents.append((lang, ipa, sent_idx, label))
+            else:
+                skipped += 1
+
+            if i > 0 and i % 1000000 == 0:
+                logger.info("  IPA conversion: %d / %d", i, len(texts))
+
+        # Cache for future runs
+        with open(ipa_cache_path, "wb") as pf:
+            pickle.dump({"constituents": constituents, "skipped": skipped}, pf,
+                        protocol=pickle.HIGHEST_PROTOCOL)
+        logger.info("Cached IPA conversions to %s", ipa_cache_path)
 
     logger.info(
         "Converted: %d constituents, %d skipped, %d sentences",
