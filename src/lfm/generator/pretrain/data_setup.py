@@ -70,6 +70,142 @@ class PreprocessedData:
         self.surviving_indices = surviving_indices
 
 
+def _load_constituents(
+    cfg: VAEPretrainConfig,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, int, str]]]:
+    """Load constituency data, converting raw text to IPA if needed.
+
+    Supports two formats:
+    - **New format** (``constituents.h5``): raw text constituents with
+      parent_idx references to the source sentence dataset.  Raw text
+      is converted to IPA using epitran/CMU dictionary.
+    - **Legacy format** (``samples.h5`` with constituency columns):
+      pre-converted IPA via ``DatasetReader.load_constituent_tuples``.
+
+    Returns:
+        (sentences, constituents) where:
+        - sentences: ``[(lang, ipa), ...]`` for all parent sentences
+        - constituents: ``[(lang, ipa, parent_idx, label), ...]``
+    """
+    from pathlib import Path
+
+    const_dir = Path(cfg.constituent_dataset_path)
+    new_format = (const_dir / "constituents.h5").is_file()
+
+    if new_format:
+        return _load_constituents_new_format(cfg, const_dir)
+
+    # Legacy format: DatasetReader with samples.h5
+    from lfm.data.dataset.reader import DatasetReader
+
+    const_reader = DatasetReader(cfg.constituent_dataset_path)
+    if not const_reader.has_constituents():
+        raise ValueError(
+            f"Dataset at {cfg.constituent_dataset_path} lacks "
+            f"constituency data. Run: lfm dataset extract-constituents"
+        )
+    return const_reader.load_constituent_tuples(
+        max_per_language=cfg.constituent_max_per_language,
+        balance_by_length=cfg.constituent_balance_by_length,
+        seed=cfg.seed,
+    )
+
+
+def _load_constituents_new_format(
+    cfg: VAEPretrainConfig,
+    const_dir,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, int, str]]]:
+    """Load from the new constituents.h5 format with raw text → IPA."""
+    import random
+    from collections import defaultdict
+    from pathlib import Path
+
+    import h5py
+
+    # Load constituent raw text
+    h5_path = const_dir / "constituents.h5"
+    logger.info("Loading constituents: %s", h5_path)
+
+    with h5py.File(h5_path, "r") as f:
+        grp = f["constituents"]
+        parent_indices = grp["parent_idx"][:].tolist()
+        texts = [t.decode() if isinstance(t, bytes) else t for t in grp["text"][:]]
+        labels = [t.decode() if isinstance(t, bytes) else t for t in grp["label"][:]]
+        languages = [t.decode() if isinstance(t, bytes) else t for t in grp["language"][:]]
+        source_dataset = f.attrs.get("source_dataset", "")
+
+    logger.info("Loaded %d constituents from %d source sentences",
+                len(texts), len(set(parent_indices)))
+
+    # Load parent sentences from the source dataset (for sentence-context z)
+    src_dir = Path(source_dataset) if source_dataset else Path(cfg.dataset_path)
+    src_h5 = src_dir / "samples.h5"
+    logger.info("Loading parent sentences from: %s", src_h5)
+
+    with h5py.File(src_h5, "r") as f:
+        src = f["samples"]
+        src_ipas = [t.decode() if isinstance(t, bytes) else t for t in src["ipa"][:]]
+        src_langs = [t.decode() if isinstance(t, bytes) else t for t in src["language"][:]]
+
+    # Build sentence list: unique parent sentences referenced by constituents
+    parent_set = sorted(set(parent_indices))
+    parent_to_sent_idx: dict[int, int] = {}
+    sentences: list[tuple[str, str]] = []
+    for global_idx in parent_set:
+        if global_idx < len(src_ipas):
+            parent_to_sent_idx[global_idx] = len(sentences)
+            sentences.append((src_langs[global_idx], src_ipas[global_idx]))
+
+    # Convert constituent raw text to IPA
+    logger.info("Converting %d constituents to IPA...", len(texts))
+    from lfm.data.loaders.ipa import IPAConverter
+
+    converter = IPAConverter()
+    constituents: list[tuple[str, str, int, str]] = []
+    skipped = 0
+
+    for raw_text, label, lang, parent_idx in zip(texts, labels, languages, parent_indices):
+        sent_idx = parent_to_sent_idx.get(parent_idx)
+        if sent_idx is None:
+            skipped += 1
+            continue
+
+        try:
+            ipa = converter.convert_line(lang, raw_text)
+        except Exception:
+            ipa = None
+
+        if ipa and len(ipa) >= 5:
+            constituents.append((lang, ipa, sent_idx, label))
+        else:
+            skipped += 1
+
+    logger.info(
+        "Converted: %d constituents, %d skipped, %d sentences",
+        len(constituents), skipped, len(sentences),
+    )
+
+    # Optional per-language cap and length balancing
+    if cfg.constituent_max_per_language is not None or cfg.constituent_balance_by_length:
+        rng = random.Random(cfg.seed)
+        by_lang: dict[str, list[tuple[str, str, int, str]]] = defaultdict(list)
+        for item in constituents:
+            by_lang[item[0]].append(item)
+
+        balanced: list[tuple[str, str, int, str]] = []
+        cap = cfg.constituent_max_per_language
+        for lang in sorted(by_lang.keys()):
+            items = by_lang[lang]
+            if cap is not None and len(items) > cap:
+                items = rng.sample(items, cap)
+            balanced.extend(items)
+
+        rng.shuffle(balanced)
+        constituents = balanced
+
+    return sentences, constituents
+
+
 def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
     """Load corpus, tokenize, build datasets and dataloaders.
 
@@ -270,19 +406,8 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
     interleaved_loader = None
     if _use_constituent_context:
         from lfm.data.corpus import ConstituentDataset, InterleavedLoader
-        from lfm.data.dataset.reader import DatasetReader
 
-        const_reader = DatasetReader(cfg.constituent_dataset_path)
-        if not const_reader.has_constituents():
-            raise ValueError(
-                f"Dataset at {cfg.constituent_dataset_path} lacks "
-                f"parent_seq fields. Regenerate with --extract-constituents."
-            )
-        sentences, constituents = const_reader.load_constituent_tuples(
-            max_per_language=cfg.constituent_max_per_language,
-            balance_by_length=cfg.constituent_balance_by_length,
-            seed=cfg.seed,
-        )
+        sentences, constituents = _load_constituents(cfg)
 
         # Tokenize sentences and constituents with the same SPM
         sent_token_ids = [_encode_ipa(sp, ipa) for _, ipa in sentences]
