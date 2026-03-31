@@ -190,8 +190,15 @@ def _vae_forward(
     _n_mem = getattr(_cfg, "num_memory_tokens", 1) if _cfg is not None else 1
     memory = latent_to_decoder(z).reshape(b, _n_mem, -1)
 
-    # Length embedding: sinusoidal encoding of target length added to memory
-    if length_proj is not None and target_length is not None:
+    # Length token: prepend a learned length embedding to decoder input.
+    # The decoder's self-attention sees it at every position via the
+    # causal mask — a first-class conditioning signal, not a perturbation.
+    _has_length_token = length_proj is not None and target_length is not None
+    bos_col = torch.full((b, 1), bos_id, dtype=torch.long, device=device)
+    teacher_input_ids = torch.cat([bos_col, batch_tokens[:, :-1]], dim=1)
+
+    if _has_length_token:
+        # Prepend length embedding before BOS
         hidden = memory.size(-1)
         half = hidden // 2
         freqs = torch.exp(
@@ -200,14 +207,13 @@ def _vae_forward(
         )
         angles = target_length.unsqueeze(-1).float() * freqs.unsqueeze(0)
         sinusoidal = torch.cat([angles.sin(), angles.cos()], dim=-1)
-        length_emb = length_proj(sinusoidal)  # (B, hidden)
-        memory = memory + length_emb.unsqueeze(1)
-    bos_col = torch.full((b, 1), bos_id, dtype=torch.long, device=device)
-    teacher_input_ids = torch.cat([bos_col, batch_tokens[:, :-1]], dim=1)
+        length_token = length_proj(sinusoidal).unsqueeze(1)  # (B, 1, hidden)
+        # seq_len grows by 1; loss will skip position 0 (the length token)
+        seq_len = seq_len + 1
 
     # Precompute mask
     if isinstance(decoder, LinguisticDecoder):
-        if _cached_mask is not None:
+        if _cached_mask is not None and _cached_mask.size(1) >= seq_len:
             tgt_mask = _cached_mask[:, :seq_len, :seq_len]
         else:
             tgt_mask = multiscale_causal_mask(
@@ -239,6 +245,9 @@ def _vae_forward(
                 )
             if not isinstance(dec_pos_embedding, nn.Identity):
                 dec_input = dec_input + dec_pos_embedding(pos_ids)
+            # Prepend length token if available
+            if _has_length_token:
+                dec_input = torch.cat([length_token, dec_input], dim=1)
             return decoder(
                 dec_input, memory, tgt_mask=tgt_mask, rope_freqs=_rope_freqs
             )
@@ -279,6 +288,10 @@ def _vae_forward(
     else:
         # Pure teacher forcing
         dec_out = _run_decoder(teacher_input_ids)
+
+    # Strip length token position from decoder output before loss
+    if _has_length_token:
+        dec_out = dec_out[:, 1:, :]  # remove position 0 (length token)
 
     logits = output_head(dec_out)
 

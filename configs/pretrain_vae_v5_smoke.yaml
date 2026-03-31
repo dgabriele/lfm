@@ -26,8 +26,8 @@ decoder_num_heads: 8
 decoder_dropout: 0.1
 num_memory_tokens: 8
 use_length_embedding: true
-use_stop_head: true
-stop_weight: 1.0
+use_stop_head: false
+stop_weight: 0.0
 
 attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
 attention_global_every: 7
