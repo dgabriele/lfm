@@ -156,7 +156,7 @@ def _load_constituents_new_format(
             parent_to_sent_idx[global_idx] = len(sentences)
             sentences.append((src_langs[global_idx], src_ipas[global_idx]))
 
-    # Convert constituent raw text to IPA (cached to avoid repeated 15min conversion)
+    # Convert constituent raw text to IPA (cached + multiprocessed)
     import pickle
 
     ipa_cache_path = const_dir / "_ipa_cache.pkl"
@@ -167,35 +167,39 @@ def _load_constituents_new_format(
         constituents = cached["constituents"]
         skipped = cached["skipped"]
     else:
-        logger.info("Converting %d constituents to IPA (will cache)...", len(texts))
-        from lfm.data.loaders.ipa import IPAConverter
+        logger.info(
+            "Converting %d constituents to IPA (multiprocessed, will cache)...",
+            len(texts),
+        )
+        from lfm.data.loaders.ipa import convert_corpus_to_ipa_labeled
 
-        converter = IPAConverter()
-        constituents: list[tuple[str, str, int, str]] = []
-        skipped = 0
+        # Build (lang, text) pairs with valid parent indices
+        convert_inputs: list[tuple[str, str]] = []
+        convert_meta: list[tuple[int, str]] = []  # (sent_idx, label)
+        skipped_no_parent = 0
 
-        for i, (raw_text, label, lang, parent_idx) in enumerate(
-            zip(texts, labels, languages, parent_indices),
+        for raw_text, label, lang, parent_idx in zip(
+            texts, labels, languages, parent_indices,
         ):
             sent_idx = parent_to_sent_idx.get(parent_idx)
             if sent_idx is None:
-                skipped += 1
+                skipped_no_parent += 1
                 continue
+            convert_inputs.append((lang, raw_text))
+            convert_meta.append((sent_idx, label))
 
-            try:
-                ipa = converter.convert_line(lang, raw_text)
-            except Exception:
-                ipa = None
+        # Multiprocessed IPA conversion
+        ipa_results = convert_corpus_to_ipa_labeled(convert_inputs)
 
-            if ipa and len(ipa) >= 5:
+        constituents: list[tuple[str, str, int, str]] = []
+        skipped = skipped_no_parent
+        for result, (sent_idx, label) in zip(ipa_results, convert_meta):
+            if result is not None:
+                lang, ipa = result
                 constituents.append((lang, ipa, sent_idx, label))
             else:
                 skipped += 1
 
-            if i > 0 and i % 1000000 == 0:
-                logger.info("  IPA conversion: %d / %d", i, len(texts))
-
-        # Cache for future runs
         with open(ipa_cache_path, "wb") as pf:
             pickle.dump({"constituents": constituents, "skipped": skipped}, pf,
                         protocol=pickle.HIGHEST_PROTOCOL)
