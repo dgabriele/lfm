@@ -133,26 +133,30 @@ def compute_binned_similarity(
         np.fill_diagonal(sim, 1.0)
 
     elif metric == "edit":
+        import editdistance
+
         actual_bins = (n + bin_size - 1) // bin_size
         # Representative sequence per bin: median-length sample
         representatives = []
+        rep_lengths = np.zeros(actual_bins, dtype=np.float32)
         for b, start in enumerate(range(0, n, bin_size)):
             end = min(start + bin_size, n)
             chunk = tokens[start:end]
             lengths = (chunk > 0).sum(axis=1)
             median_idx = np.argsort(lengths)[len(lengths) // 2]
             seq = chunk[median_idx]
-            representatives.append(seq[seq > 0].tolist())
+            trimmed = seq[seq > 0].tolist()
+            representatives.append(trimmed)
+            rep_lengths[b] = max(len(trimmed), 1)
             bin_indices.append((start, end))
 
-        # Pairwise normalized edit distance → similarity
-        sim = np.zeros((actual_bins, actual_bins), dtype=np.float32)
+        # Pairwise normalized edit distance via C extension
+        max_lens = np.maximum(rep_lengths[:, None], rep_lengths[None, :])
+        sim = np.eye(actual_bins, dtype=np.float32)
         for i in range(actual_bins):
-            sim[i, i] = 1.0
             for j in range(i + 1, actual_bins):
-                d = _edit_distance(representatives[i], representatives[j])
-                max_len = max(len(representatives[i]), len(representatives[j]), 1)
-                s = 1.0 - d / max_len
+                d = editdistance.eval(representatives[i], representatives[j])
+                s = 1.0 - d / max_lens[i, j]
                 sim[i, j] = s
                 sim[j, i] = s
 
@@ -162,21 +166,63 @@ def compute_binned_similarity(
     return sim, bin_indices
 
 
-def _edit_distance(a: list, b: list) -> int:
-    """Standard Levenshtein edit distance."""
-    m, n = len(a), len(b)
-    dp = list(range(n + 1))
-    for i in range(1, m + 1):
-        prev, dp[0] = dp[0], i
-        for j in range(1, n + 1):
-            temp = dp[j]
-            dp[j] = min(
-                dp[j] + 1,
-                dp[j - 1] + 1,
-                prev + (0 if a[i - 1] == b[j - 1] else 1),
-            )
-            prev = temp
-    return dp[n]
+_SIMILARITY_PALETTE = [
+    "#08000a", "#1a0060", "#0058b8", "#008880",
+    "#00b060", "#60d000", "#d8d800", "#f0c000",
+    "#f08000", "#f03000", "#d00060", "#a000a0",
+    "#c060d0", "#e0a8c0", "#f0e0e0", "#fffff0",
+]
+
+
+def _dendrogram_tier_boundaries(
+    linkage_matrix: np.ndarray,
+    vmin: float,
+    vmax: float,
+    max_levels: int = 64,
+) -> np.ndarray:
+    """Extract non-uniform color boundaries from dendrogram merge heights.
+
+    Each discrete color band maps to a real merge level in the dendrogram.
+    """
+    merge_sims = np.sort(1.0 - linkage_matrix[:, 2])
+    visible = merge_sims[(merge_sims >= vmin) & (merge_sims <= vmax)]
+
+    if len(visible) < 2:
+        return np.linspace(vmin, vmax, 9)
+
+    span = vmax - vmin
+    tol = span * 0.005
+    tier_centers = [visible[0]]
+    for s in visible[1:]:
+        if s - tier_centers[-1] > tol:
+            tier_centers.append(s)
+
+    if len(tier_centers) > max_levels:
+        indices = np.linspace(0, len(tier_centers) - 1, max_levels).astype(int)
+        tier_centers = [tier_centers[i] for i in indices]
+
+    centers = np.array(tier_centers)
+    midpoints = (centers[:-1] + centers[1:]) / 2.0
+    return np.concatenate([[vmin], midpoints, [vmax]])
+
+
+def _build_discrete_cmap(boundaries: np.ndarray):
+    """Build discrete ListedColormap + BoundaryNorm from dendrogram tiers."""
+    from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap, ListedColormap
+
+    n_colors = len(boundaries) - 1
+    base = _SIMILARITY_PALETTE
+
+    if n_colors <= len(base):
+        indices = np.linspace(0, len(base) - 1, n_colors).astype(int)
+        colors = [base[i] for i in indices]
+    else:
+        continuous = LinearSegmentedColormap.from_list("_sim_cont", base, N=256)
+        colors = [continuous(i / (n_colors - 1)) for i in range(n_colors)]
+
+    cmap = ListedColormap(colors)
+    norm = BoundaryNorm(boundaries, cmap.N)
+    return cmap, norm
 
 
 def render_binned_similarity(
@@ -188,54 +234,83 @@ def render_binned_similarity(
 ) -> None:
     """Render dendrogram + reordered heatmap dashboard.
 
-    Args:
-        sim_matrix: ``(n_bins, n_bins)`` similarity matrix.
-        bin_indices: List of (start, end) per bin.
-        metric_name: Display name for the metric.
-        output_path: Save path (PNG + PDF).
-        dpi: Figure resolution.
+    Color levels correspond to dendrogram merge heights, normalized
+    to the data range.  Uses the same palette as spinlock's binned
+    similarity dashboard.
     """
     import matplotlib.pyplot as plt
     from scipy.cluster.hierarchy import dendrogram, linkage
 
     n = len(sim_matrix)
-    distance = 1.0 - np.clip(sim_matrix, 0, 1)
+    distance = np.clip(1.0 - sim_matrix, 0.0, None)
     np.fill_diagonal(distance, 0)
 
-    # Condensed distance for linkage
     condensed = distance[np.triu_indices(n, k=1)]
     Z = linkage(condensed, method="ward")
+
+    # Dendrogram for leaf ordering
     dendro = dendrogram(Z, no_plot=True)
     order = dendro["leaves"]
-
-    # Reorder similarity matrix
     reordered = sim_matrix[np.ix_(order, order)]
+
+    # Data-driven range (percentile clipping)
+    vmin = float(np.percentile(reordered, 1))
+    vmax = float(np.percentile(reordered, 99))
+
+    # Dendrogram-derived color boundaries
+    boundaries = _dendrogram_tier_boundaries(Z, vmin, vmax)
+    n_levels = len(boundaries) - 1
+    cmap, norm = _build_discrete_cmap(boundaries)
 
     fig = plt.figure(figsize=(20, 16))
     ax_dendro = plt.subplot2grid((1, 6), (0, 0), rowspan=1)
     ax_heatmap = plt.subplot2grid((1, 6), (0, 1), colspan=5)
 
     # Dendrogram
-    dendrogram(Z, orientation="left", ax=ax_dendro, no_labels=True)
-    ax_dendro.set_title("Hierarchical Clustering", fontsize=12)
-    ax_dendro.invert_yaxis()
+    dendrogram(
+        Z, orientation="left", ax=ax_dendro, no_labels=True,
+        color_threshold=0, link_color_func=lambda k: "black",
+    )
+    total_samples = bin_indices[-1][1] if bin_indices else n
+    ax_dendro.set_xlabel(f"{metric_name} Distance", fontsize=10)
+    ax_dendro.set_title(
+        f"Hierarchical Clustering\n({n:,} bins, {total_samples:,} samples)",
+        fontsize=10, fontweight="bold", pad=10,
+    )
+    for line in ax_dendro.collections:
+        line.set_linewidth(0.5)
+        line.set_alpha(0.66)
 
     # Heatmap
     im = ax_heatmap.imshow(
-        reordered, cmap="viridis", aspect="auto",
-        vmin=0, vmax=1, interpolation="nearest",
+        reordered, cmap=cmap, norm=norm,
+        aspect="auto", interpolation="nearest",
     )
-    ax_heatmap.set_title(
-        f"Binned {metric_name} Similarity (reordered by dendrogram)",
-        fontsize=14,
-    )
-    ax_heatmap.set_xlabel("Bin index (reordered)")
-    ax_heatmap.set_ylabel("Bin index (reordered)")
-    plt.colorbar(im, ax=ax_heatmap, fraction=0.046, pad=0.04)
+    ax_heatmap.set_xlabel("Bin index (reordered by clustering)", fontsize=10)
+    ax_heatmap.set_ylabel("Bin index (reordered by clustering)", fontsize=10)
 
-    # Footer stats
+    # Colorbar with subset of ticks
+    max_ticks = 12
+    if len(boundaries) > max_ticks:
+        tick_idx = np.linspace(0, len(boundaries) - 1, max_ticks).astype(int)
+        tick_vals = boundaries[tick_idx]
+    else:
+        tick_vals = boundaries
+    cbar = plt.colorbar(
+        im, ax=ax_heatmap, fraction=0.046, pad=0.04,
+        spacing="proportional", ticks=tick_vals,
+    )
+    cbar.ax.set_yticklabels([f"{b:.3f}" for b in tick_vals], fontsize=8)
+    cbar.set_label(f"{metric_name} Similarity", fontsize=10)
+
     avg_sim = float(np.mean(sim_matrix[np.triu_indices(n, k=1)]))
-    total_samples = bin_indices[-1][1] if bin_indices else n
+    ax_heatmap.set_title(
+        f"{metric_name} Similarity  |  avg={avg_sim:.3f}  |  "
+        f"range=[{vmin:.3f}, {vmax:.3f}]  |  {n_levels} dendrogram levels",
+        fontsize=10, fontweight="bold", pad=10,
+    )
+
+    # Footer
     stats = [
         f"Metric: {metric_name}",
         f"Avg Similarity: {avg_sim:.3f}",
@@ -255,9 +330,6 @@ def render_binned_similarity(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(output_path), dpi=dpi, bbox_inches="tight")
     logger.info("Saved %s: %s", metric_name, output_path)
-
-    pdf_path = output_path.with_suffix(".pdf")
-    fig.savefig(str(pdf_path), bbox_inches="tight")
     plt.close(fig)
 
 
@@ -347,7 +419,7 @@ def generate_binned_similarity(
         label = metric_labels.get(metric, metric)
         logger.info("Computing %s similarity (%d bins)...", label, n_bins)
         sim, bins = compute_binned_similarity(tokens, centroids, n_bins, metric)
-        out_path = out_dir / f"binned_similarity_{metric}.png"
+        out_path = out_dir / f"binned_similarity_{metric}.webp"
         render_binned_similarity(sim, bins, label, out_path)
         saved.append(out_path)
 
