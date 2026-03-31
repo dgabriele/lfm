@@ -7,7 +7,7 @@
 #
 # 12 languages, ~4M samples, median IPA length 16 chars.
 
-dataset_path: /home/daniel/projects/lfm/data/datasets/constituents-12lang-leaf
+dataset_path: /home/daniel/projects/lfm/data/datasets/constituents-12lang-all
 corpus_loader: leipzig
 corpus_loader_config:
   data_dir: data/leipzig
