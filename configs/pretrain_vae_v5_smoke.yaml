@@ -14,6 +14,7 @@ constituent_dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang
 constituent_mix_ratio: 0.5
 constituent_max_per_language: null
 constituent_balance_by_length: true
+constituent_length_percentile: 40.0
 
 spm_vocab_size: 8000
 syllable_aligned_bpe: true

@@ -210,6 +210,11 @@ class VAEPretrainConfig(LFMBaseConfig):
     constituent_mix_ratio: float = 0.5   # Fraction of full sentences to mix in
     constituent_max_per_language: int | None = None  # Per-language constituent cap
     constituent_balance_by_length: bool = True  # Equalize across length buckets
+    constituent_length_percentile: float | None = None
+    """Keep only the shortest N% of constituents per language.
+    Filters out long nested phrases, keeping leaf-like constituents
+    for strong short-EOS training signal.  None = no filter.
+    Suggested: 50.0 (keep bottom half by length per language)."""
 
     # Bag-of-words auxiliary loss: penalizes missing content tokens
     # regardless of position.  Complements CE (which is position-sensitive)

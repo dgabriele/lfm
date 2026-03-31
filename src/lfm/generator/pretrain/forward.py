@@ -289,11 +289,13 @@ def _vae_forward(
         # Pure teacher forcing
         dec_out = _run_decoder(teacher_input_ids)
 
-    # Strip length token position from decoder output before loss
+    # Strip length token position from decoder output before loss.
+    # All downstream loss computation uses dec_seq_len (original target length).
     if _has_length_token:
         dec_out = dec_out[:, 1:, :]  # remove position 0 (length token)
 
     logits = output_head(dec_out)
+    _loss_seq_len = dec_seq_len
 
     # Reconstruction loss (masked CE) — always against ground truth targets.
     # With phonetic label smoothing, the target distribution blends one-hot
@@ -318,9 +320,9 @@ def _vae_forward(
                 soft_ce[_start:_end] = -(_sim_rows * log_probs_d[_start:_end]).sum(dim=-1)
         ce = (
             (1 - _phonetic_smoothing) * ce_hard + _phonetic_smoothing * soft_ce
-        ).reshape(b, seq_len)
+        ).reshape(b, _loss_seq_len)
     else:
-        ce = F.cross_entropy(flat_logits, flat_targets, reduction="none").reshape(b, seq_len)
+        ce = F.cross_entropy(flat_logits, flat_targets, reduction="none").reshape(b, _loss_seq_len)
 
     ce_loss = (ce * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
 

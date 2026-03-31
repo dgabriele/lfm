@@ -271,26 +271,49 @@ def _extract_from_parse_tree(
     out: list[tuple[str, str, str, int]],
     depth: int,
     parent_seq: int = -1,
+    leaf_only: bool = False,
 ) -> None:
     """Recursively extract constituents from a ParseTree node.
 
     Works with both lfm.data.parsers.base.ParseTree and Stanza trees
     (both have .label and .children attributes).
+
+    Args:
+        leaf_only: If True, only extract constituents whose children
+            contain no nested constituents (atomic phrases).
     """
     label = getattr(node, "label", "")
     children = getattr(node, "children", [])
 
     if label in labels and depth > 0:
-        text = node.leaf_text() if hasattr(node, "leaf_text") else _tree_text(node)
-        if len(text) >= min_length:
-            out.append((language, text, label, parent_seq))
+        if leaf_only:
+            # Only extract if no child subtree contains a constituent label
+            if not _has_nested_constituent(node, labels):
+                text = node.leaf_text() if hasattr(node, "leaf_text") else _tree_text(node)
+                if len(text) >= min_length:
+                    out.append((language, text, label, parent_seq))
+        else:
+            text = node.leaf_text() if hasattr(node, "leaf_text") else _tree_text(node)
+            if len(text) >= min_length:
+                out.append((language, text, label, parent_seq))
 
     for child in children:
         if hasattr(child, "children") and child.children:
             _extract_from_parse_tree(
                 child, language, labels, min_length, out, depth + 1,
-                parent_seq=parent_seq,
+                parent_seq=parent_seq, leaf_only=leaf_only,
             )
+
+
+def _has_nested_constituent(node: object, labels: set[str]) -> bool:
+    """Check if any child subtree contains a constituent label."""
+    for child in getattr(node, "children", []):
+        child_label = getattr(child, "label", "")
+        if child_label in labels:
+            return True
+        if _has_nested_constituent(child, labels):
+            return True
+    return False
 
 
 def _tree_text(node: object) -> str:

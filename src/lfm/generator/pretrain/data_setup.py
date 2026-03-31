@@ -210,6 +210,25 @@ def _load_constituents_new_format(
         len(constituents), skipped, len(sentences),
     )
 
+    # Filter to shortest constituents per language (leaf-like)
+    pct = getattr(cfg, "constituent_length_percentile", None)
+    if pct is not None:
+        before = len(constituents)
+        by_lang_len: dict[str, list[tuple[str, str, int, str]]] = defaultdict(list)
+        for c in constituents:
+            by_lang_len[c[0]].append(c)
+        filtered: list[tuple[str, str, int, str]] = []
+        for lang in sorted(by_lang_len.keys()):
+            items = by_lang_len[lang]
+            items.sort(key=lambda x: len(x[1]))
+            cutoff = int(len(items) * pct / 100.0)
+            filtered.extend(items[:cutoff])
+        constituents = filtered
+        logger.info(
+            "Filtered to shortest %.0f%% per language: %d → %d",
+            pct, before, len(constituents),
+        )
+
     # Optional per-language cap and length balancing
     if cfg.constituent_max_per_language is not None or cfg.constituent_balance_by_length:
         rng = random.Random(cfg.seed)
