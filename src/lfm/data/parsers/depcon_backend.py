@@ -21,17 +21,16 @@ from lfm.data.parsers.base import ConstituencyBackend, ParseTree
 
 logger = logging.getLogger(__name__)
 
-# All 16 training languages via dependency → constituency conversion.
+# All 16 LFM training languages via dependency → constituency conversion.
 # Using one method for all languages ensures cross-language consistency.
+# Stanza has dep parsers for 14/16; swa and tgl lack Stanza support and
+# fall back to full-sentence-only (label="S", depth=0).
 DEPCON_LANGS: dict[str, str] = {
-    # Originally Stanza constituency
-    "deu": "de", "eng": "en", "spa": "es", "ind": "id",
-    "por": "pt", "tur": "tr", "vie": "vi",
-    # Originally benepar
-    "ara": "ar", "hun": "hu", "kor": "ko", "pol": "pl",
-    # Always depcon
-    "ces": "cs", "est": "et", "fin": "fi",
-    "hin": "hi", "rus": "ru",
+    "ara": "ar", "deu": "de", "eng": "en", "fin": "fi",
+    "hin": "hi", "hun": "hu", "ind": "id", "kat": "ka",
+    "kor": "ko", "por": "pt", "rus": "ru", "tha": "th",
+    "tur": "tr", "vie": "vi",
+    # No Stanza dep parser: "swa", "tgl"
 }
 
 # Map UD dependency relations to approximate constituency labels

@@ -11,12 +11,12 @@ from lfm.data.parsers.stanza_backend import STANZA_LANGS
 
 logger = logging.getLogger(__name__)
 
-# Stanza constituency only — 7 languages with real constituency parsers.
-# DepCon was tested and found to miss VPs/clauses entirely (43% recall).
-# Consistency > coverage for PoC: use one high-quality method on fewer
-# languages rather than a mixed or approximate method on more.
+# Unified dep→con conversion for all languages. Consistency across all
+# 16 training languages is more valuable than higher recall on 7.
+# Stanza dependency parsers cover 14/16 languages; swa and tgl
+# fall back to full-sentence-only.
 _BACKEND_PRIORITY: list[tuple[str, dict[str, str]]] = [
-    ("stanza", STANZA_LANGS),
+    ("depcon", DEPCON_LANGS),
 ]
 
 
