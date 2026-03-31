@@ -12,8 +12,8 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 2. 🔬 [The Problem](#the-problem) — limitations of existing encoding approaches
 3. ⚙️ [How It Works](#how-it-works) — three-step pipeline overview
 4. 🗣️ [The Linguistic Decoder](#the-linguistic-decoder) — architecture, pretraining, sample outputs
-5. 🌳 [Expression Generation](#expression-generation) — tree-structured generation through the decoder
-6. 🎯 [Agent Game Results](#agent-game-results) — Referential game validation (direct backprop)
+5. 🌳 [Expression Generation](#expression-generation) — GRU z-sequence generation with PonderNet halting through the decoder
+6. 🎯 [Agent Game Results](#agent-game-results) — Referential and expression game validation (direct backprop)
 7. 📊 [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
 8. 💾 [Dataset Generation](#dataset-generation) — HDF5 pipeline with constituency augmentation
 9. 📈 [Visualization CLI](#visualization-cli) — t-SNE, clustering, attention, Zipf, and more
@@ -58,7 +58,7 @@ Crucially, this is translation, not latent space alignment. The source ontology 
 
 Because the LLM learns the emergent language as a language — not as an encoding to decode — the translation is **bidirectional**. The same LLM that translates alien IPA → English can learn English → alien IPA. This closes a full communication loop: the system speaks, a human reads the translation, responds in English, the LLM translates the response back into the emergent language, and the system receives it. Bidirectional human-system dialogue mediated by a shared alien language, with the LLM as interpreter.
 
-Translation is inherently lossy — but language compensates for that. Unlike a fixed-size code, language can expound: use more words, more phrases, more compositional structure to progressively encapsulate meaning that a single utterance would lose. This is exactly what LFM's expression system exploits. The tree-structured output grows as needed — more leaves, deeper branching — to elaborate on complex inputs, trading efficiency for fidelity the same way natural language does.
+Translation is inherently lossy — but language compensates for that. Unlike a fixed-size code, language can expound: use more words, more phrases, more compositional structure to progressively encapsulate meaning that a single utterance would lose. This is exactly what LFM's expression system exploits. The GRU z-sequence generator produces variable numbers of segments as needed — with PonderNet halting deciding when enough has been said — to elaborate on complex inputs, trading efficiency for fidelity the same way natural language does.
 
 ## How It Works
 
@@ -91,19 +91,20 @@ After pretraining, the decoder is **frozen**. It becomes a fixed linguistic bott
 
 ### Step 2: Expression generation
 
-The frozen decoder is wrapped by an `ExpressionGenerator` that learns to produce tree-structured expressions. During training:
+The frozen decoder is wrapped by an `ExpressionGenerator` that learns to produce multi-segment expressions via a GRU z-sequence with PonderNet halting. During training:
 
 1. An input embedding (e.g., 384-dim from any encoder) enters the expression generator
-2. The generator learns a **binary tree topology** — deciding where to expand and where to stop (via REINFORCE)
-3. Each leaf gets a **latent z vector** projected from the tree's hidden context
-4. One **continuous autoregressive decode** runs through all leaves in order, switching z at segment boundaries while the KV cache persists — producing phonotactically coherent output
-5. An `ExpressionEncoder` composes the decoded segments bottom-up via learned Merge into a fixed-size message vector
+2. **z_0** is a direct projection of the input (discriminative from step 0)
+3. A **GRU** autoregressively generates subsequent z vectors (z_1..z_K), conditioned on prior segments
+4. **PonderNet halting** decides when to stop: a per-step halt probability regularized toward a geometric prior p(k) = lambda(1-lambda)^{k-1}, preventing segment count explosion without manual tuning
+5. Each z is **decoded through the frozen decoder** until EOS, with the KV cache persisting across segments for coarticulation
+6. An `ExpressionEncoder` composes the decoded segments into a fixed-size message vector
 
-Only the expression generator and encoder learn. The decoder's linguistic structure is preserved.
+Only the expression generator and encoder learn. The decoder's linguistic structure is preserved. This approach replaces the earlier REINFORCE tree topology with a fully differentiable GRU + PonderNet architecture.
 
 ### Step 3: Variable-length, variable-structure messages
 
-Expression complexity scales with input complexity. The tree can grow deeper and wider — more leaves, more segments — to elaborate on complex inputs. Short, simple inputs produce shallow trees with brief output. This is the same mechanism natural language uses: say more when there's more to say.
+Expression complexity scales with input complexity. The GRU can produce more segments to elaborate on complex inputs, with PonderNet halting deciding when enough has been said. Short, simple inputs produce fewer segments with brief output. This is the same mechanism natural language uses: say more when there's more to say.
 
 ## The Linguistic Decoder
 
@@ -184,27 +185,32 @@ Adding noise scaled to the encoder's z distribution to the same z vector:
 
 ## Expression Generation
 
-LFM includes a learnable **expression system** for tree-structured communication through the linguistic bottleneck. Instead of mapping one embedding to one flat utterance, an agent produces a binary constituency tree where the topology is learned and each leaf carries a latent z vector. The leaves are decoded as **one continuous autoregressive sequence** with z-switching at segment boundaries — the KV cache persists across transitions, producing phonotactically coherent output with natural coarticulation.
+LFM includes a learnable **expression system** for multi-segment communication through the linguistic bottleneck. Instead of mapping one embedding to one flat utterance, an agent produces a variable number of segments via a **GRU z-sequence generator** with **PonderNet geometric-prior halting** (Banino et al., ICML 2021). Each segment's z vector is decoded through the frozen decoder, with the KV cache persisting across segment boundaries for phonotactically coherent coarticulation. This replaces the earlier REINFORCE tree topology approach with a fully differentiable architecture.
 
 ```
-    Tree:        ○ (root — learned topology)
-                / \
-               ○   z₃ (leaf)
-              / \
-            z₁   z₂ (leaves)
+    z₀ ← input_proj(embedding)     (discriminative from step 0)
+    z₁ ← GRU(z₀)                   halt? p₁
+    z₂ ← GRU(z₁)                   halt? p₂
+    ...                             (PonderNet geometric prior: λ=0.4 → E[K]=2.5)
 
     Decode:  [BOS ðʌ kwɪk braʊn | fɑks dʒʌmpt | oʊvɝ ðʌ leɪzi dɑɡ EOS]
-                  memory=z₁       memory=z₂     memory=z₃
+                  memory=z₀          memory=z₁     memory=z₂
                   (continuous KV cache — no breaks)
 ```
+
+**Key design decisions:**
+- **z_0 = direct projection**: The first segment is immediately discriminative, matching the referential game's single-z approach
+- **GRU continuation**: Subsequent z vectors are generated autoregressively, conditioned on prior segments
+- **PonderNet halting**: Per-step halt probability regularized toward geometric prior p(k) = lambda(1-lambda)^{k-1}. KL divergence prevents segment count explosion without manual tuning
+- **Two-phase backprop**: Same as referential game — no_grad generation, then parallel decoder re-run with gradients through cross-attention
 
 **Components** (`lfm.expression`):
 
 | Module | Role |
 |--------|------|
-| `ExpressionGenerator` | Learn tree topology + continuous z-switching decode through frozen decoder |
-| `Expression` | Data structure: topology, leaf z vectors, decoded tokens, segment boundaries |
-| `ExpressionEncoder` | Segment pooling + bottom-up Merge composition → fixed-size message vector |
+| `ExpressionGenerator` | GRU z-sequence + PonderNet halting + continuous z-switching decode through frozen decoder |
+| `Expression` | Data structure: z vectors, decoded tokens, segment boundaries, halt probabilities |
+| `ExpressionEncoder` | Segment pooling + composition → fixed-size message vector |
 | `ExpressionConfig` | Configuration for all expression system parameters |
 
 **Plug-and-play integration** — works with any agent that produces fixed-size embeddings:
@@ -215,7 +221,7 @@ from lfm.expression import ExpressionGenerator, ExpressionEncoder
 expr_gen = ExpressionGenerator(generator=frozen_decoder, input_dim=384, ...)
 expr_enc = ExpressionEncoder(hidden_dim=512, output_dim=384)
 
-expression = expr_gen(agent_embedding)   # topology + continuous decode
+expression = expr_gen(agent_embedding)   # GRU z-sequence + decode
 message = expr_enc(expression)           # fixed-size message vector
 ```
 
@@ -255,9 +261,9 @@ dec:  mækswɛl sɛd hi meɪd fɔɹ fɹɛndz laɪf ɑn ðʌ ʃoʊ wɪtʃ ɪnklud
 
 ```
 src/lfm/
-  expression/           # Tree-structured expression generation (this section)
-    generator.py        # ExpressionGenerator (topology + continuous z-switching decode)
-    encoder.py          # ExpressionEncoder (segment pooling + Merge composition)
+  expression/           # GRU z-sequence expression generation with PonderNet halting (this section)
+    generator.py        # ExpressionGenerator (GRU z-sequence + PonderNet + continuous z-switching decode)
+    encoder.py          # ExpressionEncoder (segment pooling + composition)
     expression.py       # Expression dataclass
   faculty/              # LanguageFaculty compositor
   generator/            # VAE generator, linguistic decoder, pretraining
@@ -285,6 +291,8 @@ Key findings:
 - **Multi-scale attention**: architectural hierarchy confirmed in per-head entropy analysis
 
 ## Agent Game Results
+
+### Referential Game
 
 Referential game with direct backprop through the v4 frozen decoder, using real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives:
 
@@ -358,6 +366,33 @@ After training with curriculum hard negatives (16-way, 100% within-cluster distr
 | Probe dims with R-squared > 0 | **100%** |
 
 All metrics are highly significant. Similar inputs produce similar messages (topology preservation), and the message hidden states encode recoverable information about the input (diagnostic probe). The hidden-state topsim of 0.335 confirms that the frozen decoder's latent space preserves compositional structure under the learned mapping.
+
+### Expression Game
+
+The expression game uses a **GRU-based z-sequence generator** with **PonderNet geometric-prior halting** (Banino et al., ICML 2021) instead of the earlier REINFORCE tree topology. This is a fully differentiable approach to multi-segment expression generation.
+
+**Architecture:**
+- **z_0**: Direct projection of input embedding (discriminative from step 0, same as referential game)
+- **z_1..z_K**: GRU autoregressively generates subsequent z vectors conditioned on prior segments
+- **Each z**: Decoded through the frozen decoder until EOS, with KV cache persisting across segments for coarticulation
+- **PonderNet halting**: Per-step halt probability regularized toward geometric prior p(k) = lambda(1-lambda)^{k-1}. lambda=0.4 gives E[K]=2.5 segments. KL divergence prevents segment count explosion without manual tuning
+- **Two-phase backprop**: Same as referential game — no_grad generation, then parallel decoder re-run with gradients through cross-attention
+
+| Metric | Value |
+|--------|-------|
+| Peak accuracy (100% hard negatives) | **98.8%** |
+| Segments per message | ~2.5 (stable, PonderNet-regulated) |
+| Segment z similarity | 0.957 |
+| Average message length | ~52 tokens across segments |
+| Convergence | ~50 steps to >95% |
+
+```bash
+# Train expression game with defaults
+poetry run lfm agent expression --steps 2000 --batch-size 256
+
+# Tune segment count: lower lambda = more segments
+poetry run lfm agent expression --lambda-p 0.3 --kl-beta 1.0
+```
 
 ## Dataset Generation
 
@@ -521,6 +556,14 @@ poetry run lfm agent referential               # train with defaults (batch 256,
 poetry run lfm agent referential --help        # see all options
 ```
 
+**Run the expression game** — multi-segment generation with GRU z-sequence and PonderNet halting:
+
+```bash
+poetry run lfm agent expression                                    # train with defaults
+poetry run lfm agent expression --steps 2000 --batch-size 256      # custom settings
+poetry run lfm agent expression --lambda-p 0.3 --kl-beta 1.0      # more segments
+```
+
 **Use in your own agent system** —
 
 ```python
@@ -548,7 +591,7 @@ outputs = faculty(agent_embedding)  # (batch, dim)
 
 An obvious alternative: skip training a decoder from scratch and use a pretrained multilingual LM (e.g., BLOOM-560M) as the frozen decoder. This would give excellent generation quality immediately. But it produces the wrong kind of output.
 
-**Emergent structure vs. inherited structure.** In LFM, the decoder is trained on raw phonetic sequences. Morpheme-like patterns emerge because phonotactic constraints *produce* morphological regularity — the same way they do in real languages. Recurring sound clusters stabilize into proto-morphemes not because a tokenizer carved them out, but because they fit the phonotactic grammar. The hierarchy builds up naturally: valid phoneme sequences → recurring clusters → compositional phrases via the expression tree. Every level is grounded in the level below.
+**Emergent structure vs. inherited structure.** In LFM, the decoder is trained on raw phonetic sequences. Morpheme-like patterns emerge because phonotactic constraints *produce* morphological regularity — the same way they do in real languages. Recurring sound clusters stabilize into proto-morphemes not because a tokenizer carved them out, but because they fit the phonotactic grammar. The hierarchy builds up naturally: valid phoneme sequences → recurring clusters → compositional phrases via the expression system's multi-segment generation. Every level is grounded in the level below.
 
 A pretrained LM has morphological knowledge handed to it as tokenizer artifacts — "un", "ing", "tion" are byte-pair subwords, not emergent phonological units. The structure is top-down (imposed by orthographic convention) rather than bottom-up (emerging from sound-level constraints). The output would develop regularities — optimization pressure ensures that — but they'd be inherited regularities, not emergent ones.
 
@@ -582,7 +625,7 @@ A pretrained LM has morphological knowledge handed to it as tokenizer artifacts 
 - Compositional structure present (power-law probe R-squared, top dims at 0.6-0.75)
 - Low effective dimensionality (90% variance in 3 PCs)
 
-The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 99.2% peak accuracy (15.9x above chance), with ~96% sustained at 100% hard negatives.
+The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 99.2% peak accuracy (15.9x above chance), with ~96% sustained at 100% hard negatives. The expression game extends this to multi-segment generation via GRU z-sequence with PonderNet halting, achieving 98.8% peak accuracy with ~2.5 segments per message.
 
 ### Limitations
 

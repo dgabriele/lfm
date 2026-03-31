@@ -28,6 +28,7 @@ Agent Embedding (384-dim)
 - **VAE Pretraining** (`generator/pretrain.py`): Full pipeline with IPA conversion, nucleus sampling, sanitization
 - **Dataset Generation** (`data/dataset/`): HDF5 dataset pipeline — load → sanitize → LLM gate → IPA → balance → HDF5
 - **Referential Game** (`agents/games/referential.py`): Direct backprop agent game through the linguistic bottleneck (`lfm agent referential`)
+- **Expression Game** (`agents/games/expression.py`): GRU-based z-sequence generation with PonderNet halting (`lfm agent expression`)
 
 ### Package Structure
 
@@ -42,11 +43,12 @@ src/lfm/
     trainer.py          # AgentTrainer (game-agnostic training loop)
     games/              # Individual game implementations
       referential.py    # ReferentialGame + ReferentialGameConfig
+      expression.py     # ExpressionGame + ExpressionGameConfig (GRU z-sequence + PonderNet)
   config/               # LFMBaseConfig, ExperimentConfig
   core/                 # LFMModule (ABC), LFMLoss, CompositeLoss
-  expression/           # Learnable tree-structured expression generation
+  expression/           # Learnable expression generation (GRU z-sequence + PonderNet halting, replaces old REINFORCE tree)
     expression.py       # Expression dataclass (topology + decoded output)
-    generator.py        # ExpressionGenerator (topology + continuous z-switching decode)
+    generator.py        # ExpressionGenerator (GRU z-sequence + continuous z-switching decode)
     encoder.py          # ExpressionEncoder (segment pooling + bottom-up Merge)
     config.py           # ExpressionConfig
   faculty/              # FacultyConfig + LanguageFaculty compositor
@@ -143,6 +145,8 @@ dec:  ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌ
 
 ## Agent Game Results
 
+### Referential Game
+
 Referential game with direct backprop through the v4 frozen decoder (all-MiniLM-L6-v2, 384-dim, 10K sentences):
 - **99.2% best accuracy** on 16-way discrimination with **100% hard negatives** (within-cluster distractors)
 - Chance = 6.25%, **15.9× above random**
@@ -152,6 +156,20 @@ Referential game with direct backprop through the v4 frozen decoder (all-MiniLM-
 - Two-phase forward: (1) no_grad KV-cached generation, (2) parallel decoder re-run with gradients through cross-attention to latent memory
 - Single optimizer: sender_lr=3e-5, receiver_lr=3e-4
 - Attention-based message encoder (2-layer self-attention + learned query readout) over decoder hidden states
+
+### Expression Game
+
+Expression game using a GRU-based z-sequence generator with PonderNet geometric-prior halting (Banino et al., ICML 2021), replacing the earlier REINFORCE tree topology approach:
+- **z_0**: Direct projection of input embedding (discriminative from step 0, same as referential game)
+- **z_1..z_K**: GRU autoregressively generates subsequent z vectors conditioned on prior segments
+- **Each z**: Decoded through the frozen decoder until EOS, with KV cache persisting across segments for coarticulation
+- **PonderNet halting**: Per-step halt probability regularized toward geometric prior p(k) = lambda(1-lambda)^{k-1}. lambda=0.4 -> E[K]=2.5 segments. KL divergence prevents segment count explosion without manual tuning
+- **Two-phase backprop**: Same as referential game -- no_grad generation, then parallel decoder re-run with gradients through cross-attention
+- **98.8% peak accuracy** at 100% hard negatives (16-way, within-cluster distractors)
+- ~2.5 segments stable (PonderNet prior prevents expansion to max)
+- Segment z similarity: 0.957 (segments share semantic region but aren't identical)
+- Average message length: ~52 tokens across segments
+- Converges in ~50 steps to >95%
 
 ### Evaluation Scripts
 
@@ -196,6 +214,9 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - `poetry run lfm dataset list --detail` — List installed datasets with per-language stats
 - `poetry run lfm agent referential` — Train referential game (direct backprop)
 - `poetry run lfm agent referential --steps 2000 --batch-size 256` — With custom settings
+- `poetry run lfm agent expression` — Train expression game (GRU z-sequence + PonderNet)
+- `poetry run lfm agent expression --steps 2000 --batch-size 256` — With custom settings
+- `poetry run lfm agent expression --lambda-p 0.3 --kl-beta 1.0` — More segments (lower lambda = higher E[K])
 - `poetry run lfm publish model --repo-id user/lfm-decoder-v1` — Publish decoder to HuggingFace
 - `poetry run lfm publish dataset --repo-id user/lfm-ipa-16lang` — Publish IPA corpus to HuggingFace
 
