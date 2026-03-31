@@ -1,0 +1,115 @@
+# VAE decoder pretraining config (v5 — mixed-length from scratch)
+#
+# Same architecture and languages as v4-phase1, but with constituency
+# data interleaved from epoch 0.  The decoder learns the full length
+# spectrum (8-token NPs to 60-token sentences) from the start, rather
+# than trying to fine-tune sentence-length EOS behavior after the fact.
+#
+# 16 typologically diverse languages.
+# Constituency: dep→con extraction for 14/16 languages.
+# 50/50 interleave: full sentences + phrase constituents.
+
+dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang
+corpus_loader: leipzig
+corpus_loader_config:
+  data_dir: data/leipzig
+  languages:
+    - eng
+    - deu
+    - por
+    - rus
+    - tur
+    - fin
+    - hun
+    - kor
+    - vie
+    - ind
+    - ara
+    - hin
+    - swa
+    - tha
+    - kat
+    - tgl
+
+# Constituency data from epoch 0
+constituent_context: true
+constituent_dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang-constituents
+constituent_mix_ratio: 0.5
+constituent_max_per_language: null
+constituent_balance_by_length: true
+
+# Tokenizer
+spm_vocab_size: 8000
+syllable_aligned_bpe: true
+
+# Architecture (same as v4)
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+use_length_embedding: true
+
+# Linguistic structure
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 96
+encoder_pooling: mean
+
+# KL — disabled
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+kl_beta: 0.0
+
+# Contrastive / phonetic — disabled
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+
+# VQ — disabled
+use_vq: false
+
+# Training
+batch_size: 160
+gradient_accumulation_steps: 1
+use_amp: true
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 40
+
+# Latent regularization
+z_var_weight: 0.0
+z_var_target: 0.05
+z_var_floor: 0.01
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 20
+dip_weight: 0.1
+bow_weight: 0.0
+diagnostic_every: 3000
+val_fraction: 0.1
+seed: 42
+device: cuda
+output_path: /home/daniel/projects/lfm/data/models/v5/vae_decoder.pt
+
+# Topological regularization
+topo_weight: 0.0
+topo_sample_pairs: 32
+
+# Adversarial discriminator
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true
