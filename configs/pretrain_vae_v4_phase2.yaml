@@ -2,37 +2,60 @@
 #
 # Fine-tune the phase 1 decoder on constituency-augmented data using
 # sentence-context z: the encoder sees the full parent sentence while
-# the decoder is supervised only on the constituent span.
+# the decoder is supervised only on the constituent span.  This teaches
+# variable-length EOS behavior — producing NP/VP/PP-length output.
 #
-# Requires: a phase 1 checkpoint + a constituency dataset with parent_seq
-# fields (generated with --extract-constituents after the data pipeline
-# update).
+# Uses dep→con constituency extraction (unified across all 14 languages
+# with Stanza dep parsers).  swa and tgl lack parser support and
+# contribute full-sentence-only samples.
+#
+# Resume: copy vae_resume.pt from v4-phase1 to v4-phase2 before starting.
+# Checkpoint was backed up by: cp data/models/v4-phase1/vae_resume.pt data/models/v4-phase2/
 
-# Phase 1 model to resume from (same 7 languages)
-dataset_path: data/datasets/leipzig-7lang
+# Dataset — must match phase 1 exactly
+dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang
 corpus_loader: leipzig
 corpus_loader_config:
   data_dir: data/leipzig
+  languages:
+    - eng
+    - deu
+    - por
+    - rus
+    - tur
+    - fin
+    - hun
+    - kor
+    - vie
+    - ind
+    - ara
+    - hin
+    - swa
+    - tha
+    - kat
+    - tgl
 
-# Constituent context training (7 Stanza-constituency languages)
+# Constituent context training (dep→con for 14/16 languages)
 constituent_context: true
-constituent_dataset_path: data/datasets/leipzig-7lang-constituents
-constituent_mix_ratio: 0.5   # 50% full sentences, 50% constituents
-constituent_max_per_language: 125000  # 2M total / 16 langs
-constituent_balance_by_length: true   # equalize short/med/long per language
+constituent_dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang-constituents
+constituent_mix_ratio: 0.5          # 50% full sentences, 50% constituents
+constituent_max_per_language: null   # use all available
+constituent_balance_by_length: true  # equalize short/med/long per language
 
-# Tokenizer (must match phase 1)
+# Tokenizer — must match phase 1
 spm_vocab_size: 8000
+syllable_aligned_bpe: true
 
-# Architecture (must match phase 1)
+# Architecture — must match phase 1
 latent_dim: 256
 encoder_num_layers: 2
 decoder_hidden_dim: 512
 decoder_num_layers: 4
 decoder_num_heads: 8
 decoder_dropout: 0.1
+num_memory_tokens: 8
 
-# Linguistic structure
+# Linguistic structure — must match phase 1
 attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
 attention_global_every: 7
 use_rope: true
@@ -40,51 +63,51 @@ share_decoder_layers: true
 max_seq_len: 96
 encoder_pooling: mean
 
-# KL — disabled
+# KL — disabled (match phase 1)
 kl_weight: 0.0
 kl_free_bits: 0.5
 kl_warmup_steps: 10000
+kl_beta: 0.0
 
-# Contrastive / KL-beta / phonetic — disabled
+# Contrastive / phonetic — disabled (match phase 1)
 contrastive_weight: 0.0
 contrastive_temperature: 0.07
 embeddings_path: ""
-kl_beta: 0.0
 phonetic_init: false
 phonetic_init_scale: 0.5
 phonetic_label_smoothing: 0.0
 
-# VQ — disabled
+# VQ — disabled (match phase 1)
 use_vq: false
 
-# Training (lower LR for fine-tuning)
+# Training — lower LR for fine-tuning, more epochs
 batch_size: 160
 gradient_accumulation_steps: 1
 use_amp: true
-lr: 0.0002
+lr: 0.0002      # 2.5x lower than phase 1 (0.0005)
 lr_min: 0.00005
-num_epochs: 50
+num_epochs: 20   # shorter — constituency behavior should emerge quickly
 
-# Latent regularization
+# Latent regularization (match phase 1)
 z_var_weight: 0.0
 z_var_target: 0.05
+z_var_floor: 0.01
 word_dropout: 0.0
 word_dropout_min: 0.0
 word_dropout_anneal_epochs: 20
 dip_weight: 0.1
+bow_weight: 0.0
+diagnostic_every: 3000
 val_fraction: 0.1
 seed: 42
 device: cuda
-output_path: data/models/v4-phase2/vae_decoder.pt
+output_path: /home/daniel/projects/lfm/data/models/v4-phase2/vae_decoder.pt
 
-# Resume from phase 1 checkpoint — copy vae_resume.pt from
-# data/models/v4-phase1/ to data/models/v4-phase2/ before starting.
-
-# Topological regularization
+# Topological regularization (disabled, match phase 1)
 topo_weight: 0.0
 topo_sample_pairs: 32
 
-# Adversarial discriminator
+# Adversarial discriminator (disabled, match phase 1)
 use_adversarial: false
 adv_weight: 0.1
 adv_lr: 0.0001
