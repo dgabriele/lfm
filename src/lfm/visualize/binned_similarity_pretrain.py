@@ -101,32 +101,32 @@ def generate(
     z_np = z_all.cpu().numpy() if isinstance(z_all, torch.Tensor) else z_all
     logger.info("Encoded z: shape=%s", z_np.shape)
 
-    # Build generator for decoding (reuse the loaded model data)
+    # Build generator using the vae_decoder.pt alongside the resume checkpoint
     from lfm.faculty.config import FacultyConfig
     from lfm.faculty.model import LanguageFaculty
     from lfm.generator.config import GeneratorConfig
 
-    # Read config from checkpoint
-    ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
-    cfg = ckpt["config"]
-    n_mem = cfg.get("num_memory_tokens", 1)
+    # The decoder checkpoint lives next to the resume checkpoint
+    resume_dir = Path(resume_path).parent
+    decoder_path = str(resume_dir / "vae_decoder.pt")
+    dec_ckpt = torch.load(decoder_path, map_location="cpu", weights_only=True)
 
     faculty = LanguageFaculty(FacultyConfig(
-        dim=cfg["latent_dim"],
+        dim=dec_ckpt["latent_dim"],
         generator=GeneratorConfig(
-            pretrained_decoder_path=cfg.get("output_path", ""),
+            pretrained_decoder_path=decoder_path,
             spm_model_path=spm_path,
             freeze_decoder=True,
-            latent_dim=cfg["latent_dim"],
-            decoder_hidden_dim=cfg["decoder_hidden_dim"],
-            decoder_num_layers=cfg["decoder_num_layers"],
-            decoder_num_heads=cfg["decoder_num_heads"],
-            num_memory_tokens=n_mem,
-            vocab_size=cfg["spm_vocab_size"],
-            use_rope=cfg.get("use_rope", True),
-            share_decoder_layers=cfg.get("share_decoder_layers", True),
-            attention_head_windows=tuple(cfg.get("attention_head_windows", (3, 3, 7, 7, 15, 15, 0, 0))),
-            attention_global_every=cfg.get("attention_global_every", 7),
+            latent_dim=dec_ckpt["latent_dim"],
+            decoder_hidden_dim=dec_ckpt["decoder_hidden_dim"],
+            decoder_num_layers=dec_ckpt["decoder_num_layers"],
+            decoder_num_heads=dec_ckpt["decoder_num_heads"],
+            num_memory_tokens=dec_ckpt.get("num_memory_tokens", 1),
+            vocab_size=dec_ckpt["vocab_size"],
+            use_rope=dec_ckpt.get("use_rope", True),
+            share_decoder_layers=dec_ckpt.get("share_decoder_layers", True),
+            attention_head_windows=tuple(dec_ckpt.get("attention_head_windows", (3, 3, 7, 7, 15, 15, 0, 0))),
+            attention_global_every=dec_ckpt.get("attention_global_every", 7),
         ),
     )).to(torch_device)
     gen = faculty.generator
