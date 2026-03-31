@@ -301,6 +301,7 @@ class VAEPretrainer:
                 enc_tokens_override = None
                 enc_lengths_override = None
                 batch_indices = None
+                is_constituent = False
 
                 if interleaved_loader is not None:
                     is_constituent, raw_batch = batch_data
@@ -326,6 +327,15 @@ class VAEPretrainer:
                     device_type=device.type, enabled=cfg.use_amp,
                 ):
                     _do_kl = cfg.kl_weight > 0 or cfg.kl_beta > 0
+                    # Pass target_length for constituent batches when
+                    # length embedding is enabled
+                    _target_len = None
+                    _len_proj = modules.get("_length_proj")
+                    if is_constituent and _len_proj is not None:
+                        _target_len = batch_lengths
+                    else:
+                        _len_proj = None
+
                     (ce_loss, kl_loss, kl_per_dim_train,
                      z_batch, dec_hidden, mu_batch, logvar_batch,
                      vq_loss_batch, bow_loss) = (
@@ -342,6 +352,8 @@ class VAEPretrainer:
                             _phonetic_smoothing=cfg.phonetic_label_smoothing,
                             encoder_tokens=enc_tokens_override,
                             encoder_lengths=enc_lengths_override,
+                            target_length=_target_len,
+                            length_proj=_len_proj,
                             **modules,
                         )
                     )

@@ -98,6 +98,8 @@ def _vae_forward(
     _residual_vq: nn.Module | None = None,
     encoder_tokens: Tensor | None = None,
     encoder_lengths: Tensor | None = None,
+    target_length: Tensor | None = None,
+    length_proj: nn.Module | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None, Tensor]:
     """Run one VAE forward pass with optional scheduled sampling.
 
@@ -186,6 +188,19 @@ def _vae_forward(
     # Decode — reshape into K memory tokens for multi-token z injection
     _n_mem = getattr(_cfg, "num_memory_tokens", 1) if _cfg is not None else 1
     memory = latent_to_decoder(z).reshape(b, _n_mem, -1)
+
+    # Length embedding: sinusoidal encoding of target length added to memory
+    if length_proj is not None and target_length is not None:
+        hidden = memory.size(-1)
+        half = hidden // 2
+        freqs = torch.exp(
+            -torch.arange(half, device=device, dtype=torch.float32)
+            * (torch.log(torch.tensor(10000.0)) / half)
+        )
+        angles = target_length.unsqueeze(-1).float() * freqs.unsqueeze(0)
+        sinusoidal = torch.cat([angles.sin(), angles.cos()], dim=-1)
+        length_emb = length_proj(sinusoidal)  # (B, hidden)
+        memory = memory + length_emb.unsqueeze(1)
     bos_col = torch.full((b, 1), bos_id, dtype=torch.long, device=device)
     teacher_input_ids = torch.cat([bos_col, batch_tokens[:, :-1]], dim=1)
 

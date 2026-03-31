@@ -90,6 +90,7 @@ class VAEPretrainConfig(LFMBaseConfig):
     decoder_num_heads: int = 8
     decoder_dropout: float = 0.1
     num_memory_tokens: int = 1
+    use_length_embedding: bool = False
     syllable_aligned_bpe: bool = False
 
     # Linguistic attention structure

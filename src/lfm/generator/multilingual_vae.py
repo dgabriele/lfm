@@ -75,6 +75,19 @@ class MultilingualVAEGenerator(GeneratorModule):
             config.latent_dim,
             config.num_memory_tokens * config.decoder_hidden_dim,
         )
+
+        # Continuous length embedding: scalar → sinusoidal → projection
+        self._use_length_embedding = config.use_length_embedding
+        if config.use_length_embedding:
+            self.length_proj = nn.Sequential(
+                nn.Linear(config.decoder_hidden_dim, config.decoder_hidden_dim),
+                nn.GELU(),
+                nn.Linear(config.decoder_hidden_dim, config.decoder_hidden_dim),
+            )
+            # Initialize near zero so length embedding starts as a no-op
+            with torch.no_grad():
+                self.length_proj[-1].weight.mul_(0.01)
+                self.length_proj[-1].bias.zero_()
         self.token_embedding = nn.Embedding(self._full_vocab, config.decoder_hidden_dim)
 
         # Positional embedding: only used when RoPE is disabled
@@ -405,6 +418,53 @@ class MultilingualVAEGenerator(GeneratorModule):
                 param.requires_grad_(False)
 
     # ------------------------------------------------------------------
+    # Length embedding
+    # ------------------------------------------------------------------
+
+    def _sinusoidal_length_encoding(self, length: Tensor) -> Tensor:
+        """Encode a continuous length scalar via sinusoidal positional encoding.
+
+        Args:
+            length: ``(batch,)`` target lengths (in tokens).
+
+        Returns:
+            ``(batch, hidden_dim)`` sinusoidal encoding.
+        """
+        hidden = self.config.decoder_hidden_dim
+        device = length.device
+        half = hidden // 2
+        freqs = torch.exp(
+            -torch.arange(half, device=device, dtype=torch.float32)
+            * (torch.log(torch.tensor(10000.0)) / half)
+        )
+        # length: (B,) → (B, 1) * (1, half) → (B, half)
+        angles = length.unsqueeze(-1).float() * freqs.unsqueeze(0)
+        return torch.cat([angles.sin(), angles.cos()], dim=-1)
+
+    def _compute_memory(
+        self, z: Tensor, target_length: Tensor | None = None,
+    ) -> Tensor:
+        """Compute cross-attention memory from z, optionally with length.
+
+        Args:
+            z: ``(batch, latent_dim)`` latent codes.
+            target_length: ``(batch,)`` target output lengths in tokens.
+                Only used when ``use_length_embedding=True``.
+
+        Returns:
+            ``(batch, num_memory_tokens, hidden_dim)`` memory.
+        """
+        memory = self.latent_to_decoder(z).reshape(
+            z.size(0), self._num_memory_tokens, -1,
+        )
+        if self._use_length_embedding and target_length is not None:
+            sinusoidal = self._sinusoidal_length_encoding(target_length)
+            length_emb = self.length_proj(sinusoidal)  # (B, hidden)
+            # Broadcast to all memory tokens
+            memory = memory + length_emb.unsqueeze(1)
+        return memory
+
+    # ------------------------------------------------------------------
     # Pooling
     # ------------------------------------------------------------------
 
@@ -448,7 +508,9 @@ class MultilingualVAEGenerator(GeneratorModule):
     # Autoregressive decoding
     # ------------------------------------------------------------------
 
-    def _decode(self, z: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def _decode(
+        self, z: Tensor, target_length: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Autoregressive decoding from latent z with KV caching.
 
         Uses incremental decoding: each step only computes Q/K/V for the
@@ -456,6 +518,9 @@ class MultilingualVAEGenerator(GeneratorModule):
 
         Args:
             z: ``(batch, latent_dim)``.
+            target_length: Optional ``(batch,)`` target output lengths.
+                Used for length-conditioned decoding when
+                ``use_length_embedding=True``.
 
         Returns:
             Tuple of ``(token_ids, token_probs, decoder_states, lengths, mask)``.
@@ -480,9 +545,7 @@ class MultilingualVAEGenerator(GeneratorModule):
         elif self._z_stats_initialized:
             z = self.calibrate_z(z)
 
-        memory = self.latent_to_decoder(z).reshape(
-            z.size(0), self._num_memory_tokens, -1,
-        )
+        memory = self._compute_memory(z, target_length)
 
         # Precompute the full causal mask once (reuse rows per step)
         if self._full_causal_mask is None or self._full_causal_mask.size(1) < max_len + 1:

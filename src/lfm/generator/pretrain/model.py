@@ -114,6 +114,19 @@ def build_model(
         device=device,
     )
 
+    # Length embedding for variable-length EOS control
+    length_proj = None
+    if getattr(cfg, "use_length_embedding", False):
+        length_proj = nn.Sequential(
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+        ).to(device)
+        # Initialize near zero so length embedding starts as a no-op
+        with torch.no_grad():
+            length_proj[-1].weight.mul_(0.01)
+            length_proj[-1].bias.zero_()
+
     return {
         "enc_token_embedding": enc_token_embedding,
         "enc_pos_embedding": enc_pos_embedding,
@@ -128,6 +141,7 @@ def build_model(
         "_cached_mask": cached_mask,
         "_cfg": cfg,
         "_residual_vq": residual_vq,
+        "_length_proj": length_proj,
         "_attn_pool_query": (
             nn.Parameter(torch.randn(1, 1, hidden) * 0.01).to(device)
             if cfg.encoder_pooling == "attention" else None
