@@ -144,8 +144,10 @@ class ExpressionCommand(CLICommand):
         parser.add_argument("--z-hidden-dim", type=int, default=512)
         parser.add_argument("--max-segments", type=int, default=8)
         parser.add_argument("--max-tokens-per-segment", type=int, default=48)
-        parser.add_argument("--halt-alpha", type=float, default=0.1)
-        parser.add_argument("--segment-beta", type=float, default=0.05)
+        parser.add_argument("--lambda-p", type=float, default=0.4,
+                            help="Geometric prior param (E[K]=1/lambda_p, default: 0.4)")
+        parser.add_argument("--kl-beta", type=float, default=0.5,
+                            help="KL divergence weight (default: 0.5)")
         parser.add_argument("--encoder-layers", type=int, default=2)
         parser.add_argument("--encoder-heads", type=int, default=8)
         parser.add_argument("--steps", type=int, default=2000)
@@ -178,8 +180,8 @@ class ExpressionCommand(CLICommand):
             z_hidden_dim=args.z_hidden_dim,
             max_segments=args.max_segments,
             max_tokens_per_segment=args.max_tokens_per_segment,
-            halt_alpha=args.halt_alpha,
-            segment_beta=args.segment_beta,
+            lambda_p=args.lambda_p,
+            kl_beta=args.kl_beta,
             encoder=MessageEncoderConfig(
                 num_layers=args.encoder_layers,
                 num_heads=args.encoder_heads,
