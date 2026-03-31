@@ -166,7 +166,13 @@ def load_resume_checkpoint(
                 break
 
     if _saved_gnorm_ok:
-        optimizer.load_state_dict(ckpt["optimizer"])
+        try:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        except (ValueError, RuntimeError) as e:
+            logger.warning(
+                "Optimizer state mismatch (likely new parameters added): %s "
+                "— using fresh optimizer (model weights preserved)", e,
+            )
     else:
         logger.warning(
             "Contaminated optimizer state detected — "
