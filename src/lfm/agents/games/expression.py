@@ -323,6 +323,19 @@ class ExpressionGame(nn.Module):
         with torch.no_grad():
             accuracy = (logits.argmax(1) == target_idx).float().mean()
 
+            # Intra-expression z diversity: mean pairwise cosine distance
+            # between active z vectors within each expression
+            z_normed = F.normalize(z_seq, dim=-1)
+            z_sim = torch.bmm(z_normed, z_normed.transpose(1, 2))  # (B, K, K)
+            # Mask to active segments only
+            active = z_weights > 0.01  # (B, K)
+            active_pair = active.unsqueeze(-1) & active.unsqueeze(-2)  # (B, K, K)
+            # Exclude diagonal
+            diag_mask = ~torch.eye(K, dtype=torch.bool, device=device).unsqueeze(0)
+            pair_mask = active_pair & diag_mask
+            n_pairs = pair_mask.float().sum(dim=(1, 2)).clamp(min=1)
+            z_intra_sim = (z_sim * pair_mask.float()).sum(dim=(1, 2)) / n_pairs
+
         return {
             "loss": loss,
             "accuracy": accuracy,
@@ -332,6 +345,7 @@ class ExpressionGame(nn.Module):
             "halt_cost": halt_cost.detach(),
             "token_cost": token_cost.detach(),
             "num_segments": num_segments.mean().detach(),
+            "z_intra_sim": z_intra_sim.mean().detach(),
         }
 
     @torch.no_grad()
