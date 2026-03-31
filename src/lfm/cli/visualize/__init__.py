@@ -121,9 +121,12 @@ def register_visualize_group(
     from lfm.cli.visualize.dataset import DatasetVizCommand
     from lfm.cli.visualize.translation import TranslationCommand
 
+    from lfm.cli.visualize.binned_similarity import BinnedSimilarityCommand
+
     standalone_commands = [
         TranslationCommand(),
         DatasetVizCommand(),
+        BinnedSimilarityCommand(),
     ]
 
     for cmd in standalone_commands:

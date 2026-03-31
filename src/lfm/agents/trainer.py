@@ -105,17 +105,9 @@ class AgentTrainer:
 
     def _save_checkpoint(self, step: int, accuracy: float) -> None:
         """Save latest checkpoint, and best if accuracy improved."""
-        game = self.game
-        gen = game.gen
-
-        ckpt = {
-            "input_proj": gen._input_proj.state_dict(),
-            "input_refine": gen._input_refine.state_dict(),
-            "msg_encoder": game.msg_encoder.state_dict(),
-            "receiver": game.receiver.state_dict(),
-            "step": step,
-            "accuracy": accuracy,
-        }
+        ckpt = self.game.checkpoint_state()
+        ckpt["step"] = step
+        ckpt["accuracy"] = accuracy
 
         torch.save(ckpt, str(self._output_dir / "latest.pt"))
 
@@ -149,10 +141,7 @@ class AgentTrainer:
         start_step = 0
         if resume is not None:
             ckpt = torch.load(resume, map_location=self.device, weights_only=False)
-            game.gen._input_proj.load_state_dict(ckpt["input_proj"])
-            game.gen._input_refine.load_state_dict(ckpt["input_refine"])
-            game.msg_encoder.load_state_dict(ckpt["msg_encoder"])
-            game.receiver.load_state_dict(ckpt["receiver"])
+            game.load_checkpoint_state(ckpt)
             start_step = ckpt.get("step", 0)
             logger.info("Resumed from %s at step %d", resume, start_step)
 

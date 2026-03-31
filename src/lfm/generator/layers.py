@@ -300,6 +300,7 @@ class LinguisticDecoderLayer(nn.Module):
         tgt_mask: Tensor | None = None,
         rope_freqs: Tensor | None = None,
         capture_attention: bool = False,
+        xattn_mask: Tensor | None = None,
     ) -> Tensor:
         """Forward pass with RoPE self-attention.
 
@@ -311,6 +312,8 @@ class LinguisticDecoderLayer(nn.Module):
             rope_freqs: Precomputed RoPE frequencies for self-attention.
             capture_attention: If ``True``, store the post-softmax self-attention
                 weights on ``self._last_self_attn`` for visualization.
+            xattn_mask: Optional cross-attention mask for position-dependent
+                memory access ``(batch * num_heads, seq_len, mem_len)``.
 
         Returns:
             Output tensor ``(batch, seq_len, d_model)``.
@@ -354,7 +357,9 @@ class LinguisticDecoderLayer(nn.Module):
 
         # --- Cross-attention (standard, no RoPE) ---
         x = self.norm2(tgt)
-        cross_out, _ = self.cross_attn(x, memory, memory)
+        cross_out, _ = self.cross_attn(
+            x, memory, memory, attn_mask=xattn_mask,
+        )
         tgt = tgt + self.dropout(cross_out)
 
         # --- FFN ---
@@ -491,6 +496,7 @@ class LinguisticDecoder(nn.Module):
         tgt_mask: Tensor | None = None,
         rope_freqs: Tensor | None = None,
         capture_attention: bool = False,
+        xattn_mask: Tensor | None = None,
     ) -> Tensor:
         """Forward pass through all decoder layers.
 
@@ -501,6 +507,8 @@ class LinguisticDecoder(nn.Module):
             rope_freqs: Precomputed RoPE frequencies.
             capture_attention: If ``True``, each layer stores its
                 post-softmax attention on ``layer._last_self_attn``.
+            xattn_mask: Optional cross-attention mask for position-dependent
+                memory access ``(batch * num_heads, seq_len, mem_len)``.
 
         Returns:
             Decoded output ``(batch, seq_len, d_model)``.
@@ -512,6 +520,7 @@ class LinguisticDecoder(nn.Module):
                 tgt_mask=tgt_mask,
                 rope_freqs=rope_freqs,
                 capture_attention=capture_attention,
+                xattn_mask=xattn_mask,
             )
         return self.final_norm(x)
 

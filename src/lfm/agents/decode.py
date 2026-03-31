@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import torch
 from torch import Tensor
 
 from lfm.generator.layers import multiscale_causal_mask
+
+
+def _calibrate_or_quantize(gen, z: Tensor) -> Tensor:
+    """Apply the generator's z calibration/quantization path."""
+    if gen._vq_codebook is not None:
+        return gen._quantize_z(z)
+    if gen._z_stats_initialized:
+        return gen.calibrate_z(z)
+    return z
 
 
 def rerun_decoder_with_grad(
@@ -32,23 +42,14 @@ def rerun_decoder_with_grad(
     Returns:
         Decoder hidden states ``(batch, seq_len, hidden_dim)`` with gradients.
     """
-    # Calibrate / quantize z (same path as generation)
-    if gen._vq_codebook is not None:
-        z_dec = gen._quantize_z(z)
-    elif gen._z_stats_initialized:
-        z_dec = gen.calibrate_z(z)
-    else:
-        z_dec = z
+    z_dec = _calibrate_or_quantize(gen, z)
 
-    # z → memory (differentiable through frozen linear)
     memory = gen.latent_to_decoder(z_dec).reshape(
         z.size(0), gen._num_memory_tokens, -1,
     )
 
-    # Embed the generated tokens (detached — no grad through token chain)
     tok_emb = gen.token_embedding(tokens)
 
-    # Full causal mask for the sequence
     seq_len = tokens.size(1)
     causal_mask = multiscale_causal_mask(
         seq_len,
@@ -58,8 +59,161 @@ def rerun_decoder_with_grad(
         device=z.device,
     )
 
-    # Run decoder in one parallel pass — cross-attention to memory has grad
     rope = gen._rope_freqs[:seq_len] if gen._rope_freqs is not None else None
     return gen.decoder(
         tok_emb, memory, tgt_mask=causal_mask, rope_freqs=rope,
     )
+
+
+def rerun_decoder_multiseg_with_grad(
+    gen,
+    z_sequence: Tensor,
+    z_weights: Tensor,
+    tokens: Tensor,
+    mask: Tensor,
+    segment_boundaries: Tensor,
+) -> Tensor:
+    """Re-run decoder with gradients for multi-segment z-switching.
+
+    Each position cross-attends only to the memory from the z that
+    generated it.  All segment memories are concatenated and a
+    cross-attention mask restricts each position to its segment's
+    memory tokens.
+
+    Args:
+        gen: The ``MultilingualVAEGenerator`` (frozen decoder).
+        z_sequence: ``(batch, max_segments, latent_dim)`` with gradients.
+        z_weights: ``(batch, max_segments)`` ACT weights per segment.
+        tokens: ``(batch, seq_len)`` from phase 1.
+        mask: ``(batch, seq_len)`` boolean mask.
+        segment_boundaries: ``(batch, max_segments)`` start position of
+            each segment (0 for unused segments).
+
+    Returns:
+        Decoder hidden states ``(batch, seq_len, hidden_dim)`` with gradients.
+    """
+    batch, max_segs, latent_dim = z_sequence.shape
+    # Trim to actual max length (avoids exceeding precomputed RoPE)
+    actual_max = int(mask.float().sum(dim=1).max().item())
+    tokens = tokens[:, :actual_max]
+    mask = mask[:, :actual_max]
+    segment_boundaries = segment_boundaries.clamp(max=actual_max)
+    seq_len = actual_max
+    num_mem = gen._num_memory_tokens
+    nhead = gen.config.decoder_num_heads
+    device = tokens.device
+
+    # Weight each z by its ACT weight, then calibrate/quantize
+    weighted_z = z_weights.unsqueeze(-1) * z_sequence  # (B, K, latent)
+    z_flat = weighted_z.reshape(batch * max_segs, latent_dim)
+    z_dec = _calibrate_or_quantize(gen, z_flat)
+
+    # All memories concatenated: (B, K * num_mem, hidden)
+    all_memory = gen.latent_to_decoder(z_dec).reshape(
+        batch, max_segs * num_mem, -1,
+    )
+
+    # Segment assignment: which segment generated each position
+    seg_idx = _compute_segment_assignment(
+        segment_boundaries, seq_len, max_segs, device,
+    )
+
+    # Cross-attention mask: each position only attends to its segment's memory
+    xattn_mask = _build_xattn_mask(seg_idx, max_segs, num_mem, nhead, device)
+
+    tok_emb = gen.token_embedding(tokens)
+
+    causal_mask = multiscale_causal_mask(
+        seq_len,
+        num_heads=nhead,
+        head_windows=gen.config.attention_head_windows,
+        global_every=gen.config.attention_global_every,
+        device=device,
+    )
+
+    rope = None
+    if gen._rope_freqs is not None:
+        if gen._rope_freqs.size(0) < seq_len:
+            from lfm.generator.layers import precompute_rope_freqs
+            rope = precompute_rope_freqs(
+                gen.config.decoder_hidden_dim // gen.config.decoder_num_heads,
+                seq_len, device=device,
+            )
+        else:
+            rope = gen._rope_freqs[:seq_len]
+
+    return gen.decoder(
+        tok_emb, all_memory,
+        tgt_mask=causal_mask, rope_freqs=rope, xattn_mask=xattn_mask,
+    )
+
+
+def _compute_segment_assignment(
+    segment_boundaries: Tensor,
+    seq_len: int,
+    max_segs: int,
+    device: torch.device,
+) -> Tensor:
+    """Map each position to its segment index.
+
+    Args:
+        segment_boundaries: ``(batch, max_segments)`` start positions.
+        seq_len: Total sequence length.
+        max_segs: Maximum number of segments.
+        device: Torch device.
+
+    Returns:
+        ``(batch, seq_len)`` segment index per position.
+    """
+    batch = segment_boundaries.size(0)
+    positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, -1)
+
+    # searchsorted: find which bin each position falls into
+    # boundaries are sorted; searchsorted returns the index of the first
+    # boundary > position, so subtract 1 to get the segment index
+    seg_idx = torch.searchsorted(
+        segment_boundaries.contiguous(), positions.contiguous(), right=True,
+    ) - 1
+    return seg_idx.clamp(0, max_segs - 1)
+
+
+def _build_xattn_mask(
+    seg_idx: Tensor,
+    max_segs: int,
+    num_mem: int,
+    nhead: int,
+    device: torch.device,
+) -> Tensor:
+    """Build cross-attention mask for position-dependent memory.
+
+    Each position can only attend to the memory tokens belonging to
+    its segment.  All other memory positions are masked with ``-inf``.
+
+    Args:
+        seg_idx: ``(batch, seq_len)`` segment index per position.
+        max_segs: Maximum number of segments.
+        num_mem: Memory tokens per segment.
+        nhead: Number of attention heads.
+        device: Torch device.
+
+    Returns:
+        ``(batch * nhead, seq_len, max_segs * num_mem)`` float mask.
+    """
+    batch, seq_len = seg_idx.shape
+    total_mem = max_segs * num_mem
+
+    # Memory token → segment mapping: (total_mem,)
+    mem_seg = torch.arange(max_segs, device=device).repeat_interleave(num_mem)
+
+    # Allowed: seg_idx[b, t] == mem_seg[m]
+    # seg_idx: (B, S, 1), mem_seg: (1, 1, M) → (B, S, M)
+    allowed = seg_idx.unsqueeze(-1) == mem_seg.unsqueeze(0).unsqueeze(0)
+
+    # Mask: 0 where allowed, -inf where blocked
+    mask = torch.where(allowed, 0.0, float("-inf"))
+
+    # Expand for heads: (B, S, M) → (B*H, S, M)
+    mask = mask.unsqueeze(1).expand(-1, nhead, -1, -1).reshape(
+        batch * nhead, seq_len, total_mem,
+    )
+    return mask

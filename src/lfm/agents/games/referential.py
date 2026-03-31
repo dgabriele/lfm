@@ -114,6 +114,22 @@ class ReferentialGame(nn.Module):
         """Shortcut to the underlying generator."""
         return self.faculty.generator
 
+    def checkpoint_state(self) -> dict:
+        """Return state dict for checkpointing."""
+        return {
+            "input_proj": self.gen._input_proj.state_dict(),
+            "input_refine": self.gen._input_refine.state_dict(),
+            "msg_encoder": self.msg_encoder.state_dict(),
+            "receiver": self.receiver.state_dict(),
+        }
+
+    def load_checkpoint_state(self, ckpt: dict) -> None:
+        """Restore from a checkpoint dict."""
+        self.gen._input_proj.load_state_dict(ckpt["input_proj"])
+        self.gen._input_refine.load_state_dict(ckpt["input_refine"])
+        self.msg_encoder.load_state_dict(ckpt["msg_encoder"])
+        self.receiver.load_state_dict(ckpt["receiver"])
+
     def trainable_param_groups(self) -> list[dict]:
         """Return optimizer param groups with per-group learning rates."""
         sender_params = [p for p in self.gen.parameters() if p.requires_grad]
