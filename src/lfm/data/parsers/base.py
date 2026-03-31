@@ -16,16 +16,32 @@ class ParseTree:
 
     label: str
     children: list[ParseTree] = field(default_factory=list)
+    position: int = -1  # sentence position (0-based) for leaf nodes
 
     @property
     def is_leaf(self) -> bool:
         return not self.children
 
     def leaf_text(self) -> str:
-        """Collect leaf labels (terminal words) left-to-right."""
+        """Collect leaf labels in sentence order (by position)."""
+        leaves = self._collect_leaves()
+        leaves.sort(key=lambda lp: lp[1])
+        return " ".join(text for text, _ in leaves)
+
+    def _collect_leaves(self) -> list[tuple[str, int]]:
+        """Collect (text, position) for all leaves."""
         if self.is_leaf:
-            return self.label
-        return " ".join(c.leaf_text() for c in self.children)
+            return [(self.label, self.position)]
+        result = []
+        for c in self.children:
+            result.extend(c._collect_leaves())
+        return result
+
+    def min_position(self) -> int:
+        """Leftmost word position in this subtree."""
+        if self.is_leaf:
+            return self.position if self.position >= 0 else 999999
+        return min((c.min_position() for c in self.children), default=999999)
 
 
 class ConstituencyBackend(Protocol):

@@ -64,7 +64,7 @@ def _build_tree_from_dep(
     deps = children_map.get(head_idx, [])
 
     if not deps:
-        return ParseTree(label=word["text"])
+        return ParseTree(label=word["text"], position=head_idx - 1)
 
     # Any verb with dependents gets the VP treatment
     is_verb = word.get("upos") in ("VERB", "AUX") or word["deprel"] == "root"
@@ -72,13 +72,13 @@ def _build_tree_from_dep(
     if is_verb:
         return _build_clause_with_vp(words, head_idx, deps, children_map)
 
-    # Non-verb or non-root: standard subtree
+    # Non-verb: standard subtree, children sorted by position
     child_trees: list[ParseTree] = []
     all_indices = sorted(deps + [head_idx])
 
     for idx in all_indices:
         if idx == head_idx:
-            child_trees.append(ParseTree(label=word["text"]))
+            child_trees.append(ParseTree(label=word["text"], position=head_idx - 1))
         else:
             child_trees.append(
                 _build_tree_from_dep(words, idx, children_map),
@@ -132,45 +132,40 @@ def _build_clause_with_vp(
             _build_tree_from_dep(words, dep_idx, children_map),
         )
 
-    # Build VP: verb + argument subtrees in linear order
+    # Build VP: verb + argument subtrees in sentence order
     vp_children: list[ParseTree] = []
     vp_indices = sorted(vp_deps + [verb_idx])
 
     for idx in vp_indices:
         if idx == verb_idx:
-            vp_children.append(ParseTree(label=verb_word["text"]))
+            vp_children.append(
+                ParseTree(label=verb_word["text"], position=verb_idx - 1),
+            )
         else:
             vp_children.append(
                 _build_tree_from_dep(words, idx, children_map),
             )
 
+    # Sort VP children by sentence position
+    vp_children.sort(key=lambda t: t.min_position())
+
     if vp_children:
-        # Insert VP after subjects, before other
         clause_children.append(ParseTree(label="VP", children=vp_children))
 
-    # Attach remaining dependents (punct, discourse, etc.) to clause
+    # Attach remaining dependents (punct, discourse, etc.)
     for dep_idx in sorted(other_deps):
         dep_word = words[dep_idx - 1]
         if dep_word["deprel"] in ("punct", "discourse", "vocative"):
-            # Terminal — don't recurse
-            clause_children.append(ParseTree(label=dep_word["text"]))
+            clause_children.append(
+                ParseTree(label=dep_word["text"], position=dep_idx - 1),
+            )
         else:
             clause_children.append(
                 _build_tree_from_dep(words, dep_idx, children_map),
             )
 
-    # Sort all clause children by their position in the sentence
-    # (they were added out of order due to partitioning)
-    def _min_position(tree: ParseTree) -> int:
-        """Get the leftmost word position for ordering."""
-        if tree.is_leaf:
-            for i, w in enumerate(words):
-                if w["text"] == tree.label:
-                    return i
-            return 999
-        return min((_min_position(c) for c in tree.children), default=999)
-
-    clause_children.sort(key=_min_position)
+    # Sort all clause children by sentence position
+    clause_children.sort(key=lambda t: t.min_position())
 
     return ParseTree(label="S", children=clause_children)
 
