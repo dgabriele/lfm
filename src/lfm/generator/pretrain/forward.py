@@ -100,6 +100,7 @@ def _vae_forward(
     encoder_lengths: Tensor | None = None,
     target_length: Tensor | None = None,
     length_proj: nn.Module | None = None,
+    stop_head: nn.Module | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None, Tensor]:
     """Run one VAE forward pass with optional scheduled sampling.
 
@@ -309,6 +310,22 @@ def _vae_forward(
         ce = F.cross_entropy(flat_logits, flat_targets, reduction="none").reshape(b, seq_len)
 
     ce_loss = (ce * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
+
+    # Stop head loss: binary cross-entropy at each position.
+    # Target = 1 at the last valid token, 0 elsewhere.
+    stop_loss = torch.tensor(0.0, device=device)
+    if stop_head is not None:
+        stop_logits = stop_head(dec_out).squeeze(-1)  # (b, seq_len)
+        stop_target = torch.zeros_like(stop_logits)
+        for bi in range(b):
+            last_pos = batch_lengths[bi].long().clamp(max=seq_len) - 1
+            if last_pos >= 0:
+                stop_target[bi, last_pos] = 1.0
+        stop_loss = F.binary_cross_entropy_with_logits(
+            stop_logits, stop_target, reduction="none",
+        )
+        stop_loss = (stop_loss * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
+        ce_loss = ce_loss + getattr(_cfg, "stop_weight", 1.0) * stop_loss
 
     # Bag-of-words loss: order-invariant token presence check.
     # Mean of per-position log-softmax gives a pooled prediction over

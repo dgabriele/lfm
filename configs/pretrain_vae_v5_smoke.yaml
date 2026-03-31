@@ -1,0 +1,82 @@
+# v5 smoke test — 3k batches/epoch for trajectory validation
+#
+# Same as v5 but with max_batches_per_epoch=3000 and stop_head enabled.
+# Run: poetry run python scripts/pretrain_vae.py configs/pretrain_vae_v5_smoke.yaml
+
+dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang
+corpus_loader: leipzig
+corpus_loader_config:
+  data_dir: data/leipzig
+  languages: [eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin, swa, tha, kat, tgl]
+
+constituent_context: true
+constituent_dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang-constituents
+constituent_mix_ratio: 0.5
+constituent_max_per_language: null
+constituent_balance_by_length: true
+
+spm_vocab_size: 8000
+syllable_aligned_bpe: true
+
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+use_length_embedding: true
+use_stop_head: true
+stop_weight: 1.0
+
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 96
+encoder_pooling: mean
+
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+kl_beta: 0.0
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+use_vq: false
+
+batch_size: 160
+gradient_accumulation_steps: 1
+use_amp: true
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 20
+max_batches_per_epoch: 3000
+
+z_var_weight: 0.0
+z_var_target: 0.05
+z_var_floor: 0.01
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 20
+dip_weight: 0.1
+bow_weight: 0.0
+diagnostic_every: 1000
+val_fraction: 0.1
+seed: 42
+device: cuda
+output_path: /home/daniel/projects/lfm/data/models/v5-smoke/vae_decoder.pt
+
+topo_weight: 0.0
+topo_sample_pairs: 32
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true

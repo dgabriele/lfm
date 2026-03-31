@@ -231,6 +231,8 @@ class VAEPretrainer:
         accum = cfg.gradient_accumulation_steps
         log_every = 50
         num_batches = len(interleaved_loader) if interleaved_loader is not None else len(train_loader)
+        if getattr(cfg, "max_batches_per_epoch", None) is not None:
+            num_batches = min(num_batches, cfg.max_batches_per_epoch)
 
         total_params = sum(
             p.numel()
@@ -298,6 +300,8 @@ class VAEPretrainer:
             _epoch_loader = interleaved_loader if interleaved_loader is not None else train_loader
 
             for i, batch_data in enumerate(_epoch_loader):
+                if i >= num_batches:
+                    break
                 enc_tokens_override = None
                 enc_lengths_override = None
                 batch_indices = None

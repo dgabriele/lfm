@@ -114,6 +114,11 @@ def build_model(
         device=device,
     )
 
+    # Binary stop head: separate from content softmax
+    stop_head = None
+    if getattr(cfg, "use_stop_head", False):
+        stop_head = nn.Linear(hidden, 1).to(device)
+
     # Length embedding for variable-length EOS control
     length_proj = None
     if getattr(cfg, "use_length_embedding", False):
@@ -141,6 +146,7 @@ def build_model(
         "_cached_mask": cached_mask,
         "_cfg": cfg,
         "_residual_vq": residual_vq,
+        "stop_head": stop_head,
         "length_proj": length_proj,
         "_attn_pool_query": (
             nn.Parameter(torch.randn(1, 1, hidden) * 0.01).to(device)
