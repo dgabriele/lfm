@@ -141,7 +141,7 @@ def build_model(
         "_cached_mask": cached_mask,
         "_cfg": cfg,
         "_residual_vq": residual_vq,
-        "_length_proj": length_proj,
+        "length_proj": length_proj,
         "_attn_pool_query": (
             nn.Parameter(torch.randn(1, 1, hidden) * 0.01).to(device)
             if cfg.encoder_pooling == "attention" else None

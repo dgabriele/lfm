@@ -69,9 +69,9 @@ def save_best_checkpoint(
             "vq_num_levels": cfg.vq_num_levels,
             "vq_codebook_size": cfg.vq_codebook_size}
            if modules.get("_residual_vq") is not None else {}),
-        **({"length_proj": modules["_length_proj"].state_dict(),
+        **({"length_proj": modules["length_proj"].state_dict(),
             "use_length_embedding": True}
-           if modules.get("_length_proj") is not None else {}),
+           if modules.get("length_proj") is not None else {}),
     }
     torch.save(ckpt, output_path)
     logger.info("Saved best decoder checkpoint to %s", output_path)
