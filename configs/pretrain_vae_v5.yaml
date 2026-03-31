@@ -1,13 +1,11 @@
-# VAE decoder pretraining config (v5 — mixed-length from scratch)
+# VAE decoder pretraining (v5 — leaf constituents only, from scratch)
 #
-# Same architecture and languages as v4-phase1, but with constituency
-# data interleaved from epoch 0.  The decoder learns the full length
-# spectrum (8-token NPs to 60-token sentences) from the start, rather
-# than trying to fine-tune sentence-length EOS behavior after the fact.
+# Train on 100% short leaf-level phrase constituents (mix_ratio=0.0).
+# The decoder learns to produce phrase-length output (5-15 tokens)
+# with proper EOS behavior from epoch 0.
 #
-# 16 typologically diverse languages.
-# Constituency: dep→con extraction for 14/16 languages.
-# 50/50 interleave: full sentences + phrase constituents.
+# 12 languages (dropped tha/kat/tgl/swa: no constituency parser or
+# too sparse to contribute signal).
 
 dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang
 corpus_loader: leipzig
@@ -26,17 +24,14 @@ corpus_loader_config:
     - ind
     - ara
     - hin
-    - swa
-    - tha
-    - kat
-    - tgl
 
-# Constituency data from epoch 0
+# 100% leaf constituents (mix_ratio=0.0 = all constituents, no sentences)
 constituent_context: true
 constituent_dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang-constituents
-constituent_mix_ratio: 0.5
+constituent_mix_ratio: 0.0
 constituent_max_per_language: null
 constituent_balance_by_length: true
+constituent_length_percentile: 40.0
 
 # Tokenizer
 spm_vocab_size: 8000

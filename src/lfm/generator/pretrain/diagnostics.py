@@ -220,11 +220,14 @@ def run_epoch_diagnostics(
     z_running_mean: Tensor,
     z_running_std: Tensor,
     label: str = "",
+    constituent_dataset: object | None = None,
 ) -> None:
     """Run reconstruction, interpolation, perturbation, random, length, and structural diagnostics.
 
     Args:
         label: Optional label for mid-epoch diagnostics (e.g., "step 5000").
+        constituent_dataset: If provided, sample recon examples from
+            constituent data instead of full sentences.
     """
     # Common kwargs for sample_decode
     _decode_kw = dict(
@@ -240,47 +243,61 @@ def run_epoch_diagnostics(
     # Fixed seed per epoch for reproducible sampling
     torch.manual_seed(cfg.seed + epoch)
 
-    # Find language-specific samples from the validation set.
-    # Use the full dataset indices (val_dataset.indices) to look
-    # up language labels.  Pick 1 English + 1 non-English for
-    # interpretable diagnostics.
-    _val_indices = list(val_dataset.indices)
-    _eng_idx = _non_eng_idx = None
-    _lang_labels = ["?", "?"]
-    for _vi in _val_indices:
-        _lang = languages_list[_vi] if _vi < len(languages_list) else "?"
-        if _lang == "eng" and _eng_idx is None:
-            _eng_idx = _vi
-        elif _lang != "eng" and _non_eng_idx is None:
-            _non_eng_idx = _lang
-            _non_eng_dataset_idx = _vi
-        if _eng_idx is not None and _non_eng_idx is not None:
-            break
-
-    # Build a small batch of the selected samples
-    _sample_indices = []
-    if _eng_idx is not None:
-        _sample_indices.append(_eng_idx)
-        _lang_labels[0] = "eng"
-    if _non_eng_idx is not None:
-        _sample_indices.append(_non_eng_dataset_idx)
-        _lang_labels[1] = _non_eng_idx
-    # Fallback: just use first 2 from val loader
-    if len(_sample_indices) < 2:
-        val_batch_tokens, val_batch_lengths = next(iter(val_loader))
-        val_batch_tokens = val_batch_tokens[:2].to(device)
-        val_batch_lengths = torch.as_tensor(
-            val_batch_lengths[:2], device=device
-        )
-    else:
+    # Select recon samples: from constituent data if available,
+    # otherwise from the full-sentence validation set.
+    if constituent_dataset is not None:
+        # Sample a few constituents for reconstruction diagnostic
+        import random as _rng
+        _rng.seed(cfg.seed + epoch)
+        _n_const = len(constituent_dataset)
+        _const_indices = _rng.sample(range(_n_const), min(2, _n_const))
         _toks = []
         _lens = []
-        for _si in _sample_indices:
-            _t, _l = dataset[_si]
-            _toks.append(_t)
-            _lens.append(_l)
+        _lang_labels = ["const", "const"]
+        for _ci in _const_indices:
+            _item = constituent_dataset[_ci]
+            # ConstituentDataset returns (enc_tokens, enc_len, dec_tokens, dec_len)
+            _toks.append(_item[2])  # decoder target (constituent)
+            _lens.append(_item[3])
         val_batch_tokens = torch.stack(_toks).to(device)
         val_batch_lengths = torch.tensor(_lens, device=device)
+    else:
+        # Find language-specific samples from the validation set.
+        _val_indices = list(val_dataset.indices)
+        _eng_idx = _non_eng_idx = None
+        _lang_labels = ["?", "?"]
+        for _vi in _val_indices:
+            _lang = languages_list[_vi] if _vi < len(languages_list) else "?"
+            if _lang == "eng" and _eng_idx is None:
+                _eng_idx = _vi
+            elif _lang != "eng" and _non_eng_idx is None:
+                _non_eng_idx = _lang
+                _non_eng_dataset_idx = _vi
+            if _eng_idx is not None and _non_eng_idx is not None:
+                break
+
+        _sample_indices = []
+        if _eng_idx is not None:
+            _sample_indices.append(_eng_idx)
+            _lang_labels[0] = "eng"
+        if _non_eng_idx is not None:
+            _sample_indices.append(_non_eng_dataset_idx)
+            _lang_labels[1] = _non_eng_idx
+        if len(_sample_indices) < 2:
+            val_batch_tokens, val_batch_lengths = next(iter(val_loader))
+            val_batch_tokens = val_batch_tokens[:2].to(device)
+            val_batch_lengths = torch.as_tensor(
+                val_batch_lengths[:2], device=device
+            )
+        else:
+            _toks = []
+            _lens = []
+            for _si in _sample_indices:
+                _t, _l = dataset[_si]
+                _toks.append(_t)
+                _lens.append(_l)
+            val_batch_tokens = torch.stack(_toks).to(device)
+            val_batch_lengths = torch.tensor(_lens, device=device)
 
     # --- 1. Reconstruction ---
     z_real = encode_text(

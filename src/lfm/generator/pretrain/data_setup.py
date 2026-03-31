@@ -45,6 +45,7 @@ class PreprocessedData:
         train_loader: DataLoader,
         val_loader: DataLoader,
         interleaved_loader: Any | None,
+        constituent_dataset: Any | None,
         corpus_embeddings: Tensor | None,
         use_contrastive: bool,
         use_constituent_context: bool,
@@ -64,6 +65,7 @@ class PreprocessedData:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.interleaved_loader = interleaved_loader
+        self.constituent_dataset = constituent_dataset
         self.corpus_embeddings = corpus_embeddings
         self.use_contrastive = use_contrastive
         self.use_constituent_context = use_constituent_context
@@ -506,6 +508,7 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
         train_loader=train_loader,
         val_loader=val_loader,
         interleaved_loader=interleaved_loader,
+        constituent_dataset=constituent_dataset if _use_constituent_context else None,
         corpus_embeddings=corpus_embeddings,
         use_contrastive=bool(_use_contrastive),
         use_constituent_context=_use_constituent_context,

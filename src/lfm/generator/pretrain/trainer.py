@@ -597,6 +597,7 @@ class VAEPretrainer:
                         z_running_std=z_running_std,
                         device=device,
                         label=f"step {global_step}",
+                        constituent_dataset=data.constituent_dataset,
                     )
                     for m in modules.values():
                         if isinstance(m, nn.Module):
