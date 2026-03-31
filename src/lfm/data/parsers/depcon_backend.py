@@ -53,13 +53,12 @@ def _build_tree_from_dep(
     words: list[dict],
     head_idx: int,
     children_map: dict[int, list[int]],
-    is_root: bool = False,
 ) -> ParseTree:
     """Build a ParseTree from dependency structure with synthetic VPs.
 
-    When processing the root verb (or any verb head), splits dependents
-    into subject-side (NP) and predicate-side (VP).  The VP contains
-    the verb plus its arguments.
+    Any verb head with dependents gets split into subject-side (NP)
+    and predicate-side (VP).  This applies recursively — embedded
+    verbs (xcomp, ccomp, advcl) also produce VP constituents.
     """
     word = words[head_idx - 1]
     deps = children_map.get(head_idx, [])
@@ -67,10 +66,10 @@ def _build_tree_from_dep(
     if not deps:
         return ParseTree(label=word["text"])
 
-    # Check if this head is a verb that should produce a VP
+    # Any verb with dependents gets the VP treatment
     is_verb = word.get("upos") in ("VERB", "AUX") or word["deprel"] == "root"
 
-    if is_verb and is_root:
+    if is_verb:
         return _build_clause_with_vp(words, head_idx, deps, children_map)
 
     # Non-verb or non-root: standard subtree
@@ -221,9 +220,7 @@ class DepConBackend:
                     results.append(None)
                     continue
 
-                tree = _build_tree_from_dep(
-                    words, root_idx, children_map, is_root=True,
-                )
+                tree = _build_tree_from_dep(words, root_idx, children_map)
                 results.append(tree)
             except Exception as e:
                 logger.debug("DepCon parse failed: %s", e)
