@@ -1,13 +1,13 @@
-# VAE decoder pretraining (v5 — leaf constituents only, from scratch)
+# VAE decoder pretraining (v5 — phrase-level decoder from scratch)
 #
-# Train on 100% short leaf-level phrase constituents (mix_ratio=0.0).
-# The decoder learns to produce phrase-length output (5-15 tokens)
-# with proper EOS behavior from epoch 0.
+# Standard VAE training on leaf-level phrase constituents as standalone
+# sequences.  No constituent_context — encoder and decoder see the same
+# short phrase.  The decoder learns phrase-level EOS naturally because
+# every training sample is 5-15 tokens.
 #
-# 12 languages (dropped tha/kat/tgl/swa: no constituency parser or
-# too sparse to contribute signal).
+# 12 languages, ~4M samples, median IPA length 16 chars.
 
-dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang
+dataset_path: /home/daniel/projects/lfm/data/datasets/constituents-12lang-leaf
 corpus_loader: leipzig
 corpus_loader_config:
   data_dir: data/leipzig
@@ -25,13 +25,8 @@ corpus_loader_config:
     - ara
     - hin
 
-# 100% leaf constituents (mix_ratio=0.0 = all constituents, no sentences)
-constituent_context: true
-constituent_dataset_path: /home/daniel/projects/lfm/data/datasets/leipzig-16lang-constituents
-constituent_mix_ratio: 0.0
-constituent_max_per_language: null
-constituent_balance_by_length: true
-constituent_length_percentile: 40.0
+# No constituency context — standard VAE reconstruction
+constituent_context: false
 
 # Tokenizer
 spm_vocab_size: 8000
@@ -77,8 +72,7 @@ gradient_accumulation_steps: 1
 use_amp: true
 lr: 0.0005
 lr_min: 0.0001
-num_epochs: 40
-max_batches_per_epoch: 15000  # ~2.4M samples/epoch, ~1 hour
+num_epochs: 20
 
 # Latent regularization
 z_var_weight: 0.0
