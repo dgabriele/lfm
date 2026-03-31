@@ -98,9 +98,6 @@ def _vae_forward(
     _residual_vq: nn.Module | None = None,
     encoder_tokens: Tensor | None = None,
     encoder_lengths: Tensor | None = None,
-    target_length: Tensor | None = None,
-    length_proj: nn.Module | None = None,
-    stop_head: nn.Module | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None, Tensor]:
     """Run one VAE forward pass with optional scheduled sampling.
 
@@ -190,30 +187,12 @@ def _vae_forward(
     _n_mem = getattr(_cfg, "num_memory_tokens", 1) if _cfg is not None else 1
     memory = latent_to_decoder(z).reshape(b, _n_mem, -1)
 
-    # Length token: prepend a learned length embedding to decoder input.
-    # The decoder's self-attention sees it at every position via the
-    # causal mask — a first-class conditioning signal, not a perturbation.
-    _has_length_token = length_proj is not None and target_length is not None
     bos_col = torch.full((b, 1), bos_id, dtype=torch.long, device=device)
     teacher_input_ids = torch.cat([bos_col, batch_tokens[:, :-1]], dim=1)
 
-    if _has_length_token:
-        # Prepend length embedding before BOS
-        hidden = memory.size(-1)
-        half = hidden // 2
-        freqs = torch.exp(
-            -torch.arange(half, device=device, dtype=torch.float32)
-            * (torch.log(torch.tensor(10000.0)) / half)
-        )
-        angles = target_length.unsqueeze(-1).float() * freqs.unsqueeze(0)
-        sinusoidal = torch.cat([angles.sin(), angles.cos()], dim=-1)
-        length_token = length_proj(sinusoidal).unsqueeze(1)  # (B, 1, hidden)
-        # seq_len grows by 1; loss will skip position 0 (the length token)
-        seq_len = seq_len + 1
-
     # Precompute mask
     if isinstance(decoder, LinguisticDecoder):
-        if _cached_mask is not None and _cached_mask.size(1) >= seq_len:
+        if _cached_mask is not None:
             tgt_mask = _cached_mask[:, :seq_len, :seq_len]
         else:
             tgt_mask = multiscale_causal_mask(
@@ -245,9 +224,6 @@ def _vae_forward(
                 )
             if not isinstance(dec_pos_embedding, nn.Identity):
                 dec_input = dec_input + dec_pos_embedding(pos_ids)
-            # Prepend length token if available
-            if _has_length_token:
-                dec_input = torch.cat([length_token, dec_input], dim=1)
             return decoder(
                 dec_input, memory, tgt_mask=tgt_mask, rope_freqs=_rope_freqs
             )
@@ -289,13 +265,7 @@ def _vae_forward(
         # Pure teacher forcing
         dec_out = _run_decoder(teacher_input_ids)
 
-    # Strip length token position from decoder output before loss.
-    # All downstream loss computation uses dec_seq_len (original target length).
-    if _has_length_token:
-        dec_out = dec_out[:, 1:, :]  # remove position 0 (length token)
-
     logits = output_head(dec_out)
-    _loss_seq_len = dec_seq_len
 
     # Reconstruction loss (masked CE) — always against ground truth targets.
     # With phonetic label smoothing, the target distribution blends one-hot
@@ -320,27 +290,11 @@ def _vae_forward(
                 soft_ce[_start:_end] = -(_sim_rows * log_probs_d[_start:_end]).sum(dim=-1)
         ce = (
             (1 - _phonetic_smoothing) * ce_hard + _phonetic_smoothing * soft_ce
-        ).reshape(b, _loss_seq_len)
+        ).reshape(b, seq_len)
     else:
-        ce = F.cross_entropy(flat_logits, flat_targets, reduction="none").reshape(b, _loss_seq_len)
+        ce = F.cross_entropy(flat_logits, flat_targets, reduction="none").reshape(b, seq_len)
 
     ce_loss = (ce * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
-
-    # Stop head loss: binary cross-entropy at each position.
-    # Target = 1 at the last valid token, 0 elsewhere.
-    stop_loss = torch.tensor(0.0, device=device)
-    if stop_head is not None:
-        stop_logits = stop_head(dec_out).squeeze(-1)  # (b, seq_len)
-        stop_target = torch.zeros_like(stop_logits)
-        for bi in range(b):
-            last_pos = batch_lengths[bi].long().clamp(max=seq_len) - 1
-            if last_pos >= 0:
-                stop_target[bi, last_pos] = 1.0
-        stop_loss = F.binary_cross_entropy_with_logits(
-            stop_logits, stop_target, reduction="none",
-        )
-        stop_loss = (stop_loss * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
-        ce_loss = ce_loss + getattr(_cfg, "stop_weight", 1.0) * stop_loss
 
     # Bag-of-words loss: order-invariant token presence check.
     # Mean of per-position log-softmax gives a pooled prediction over

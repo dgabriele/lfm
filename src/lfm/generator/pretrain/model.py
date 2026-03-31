@@ -102,35 +102,17 @@ def build_model(
     if cfg.use_rope:
         head_dim = hidden // cfg.decoder_num_heads
         rope_freqs = precompute_rope_freqs(
-            head_dim, cfg.max_seq_len + 2, device=device
+            head_dim, cfg.max_seq_len + 1, device=device
         )
 
     # Precompute multi-scale causal mask (+1 for BOS in KV-cached decode)
     cached_mask = multiscale_causal_mask(
-        cfg.max_seq_len + 2,
+        cfg.max_seq_len + 1,
         num_heads=cfg.decoder_num_heads,
         head_windows=cfg.attention_head_windows,
         global_every=cfg.attention_global_every,
         device=device,
     )
-
-    # Binary stop head: separate from content softmax
-    stop_head = None
-    if getattr(cfg, "use_stop_head", False):
-        stop_head = nn.Linear(hidden, 1).to(device)
-
-    # Length embedding for variable-length EOS control
-    length_proj = None
-    if getattr(cfg, "use_length_embedding", False):
-        length_proj = nn.Sequential(
-            nn.Linear(hidden, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, hidden),
-        ).to(device)
-        # Initialize near zero so length embedding starts as a no-op
-        with torch.no_grad():
-            length_proj[-1].weight.mul_(0.01)
-            length_proj[-1].bias.zero_()
 
     return {
         "enc_token_embedding": enc_token_embedding,
@@ -146,8 +128,6 @@ def build_model(
         "_cached_mask": cached_mask,
         "_cfg": cfg,
         "_residual_vq": residual_vq,
-        "stop_head": stop_head,
-        "length_proj": length_proj,
         "_attn_pool_query": (
             nn.Parameter(torch.randn(1, 1, hidden) * 0.01).to(device)
             if cfg.encoder_pooling == "attention" else None

@@ -50,7 +50,6 @@ decoder_num_layers: 4
 decoder_num_heads: 8
 decoder_dropout: 0.1
 num_memory_tokens: 8
-use_length_embedding: true
 
 # Linguistic structure
 attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]

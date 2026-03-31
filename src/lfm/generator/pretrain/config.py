@@ -90,11 +90,6 @@ class VAEPretrainConfig(LFMBaseConfig):
     decoder_num_heads: int = 8
     decoder_dropout: float = 0.1
     num_memory_tokens: int = 1
-    use_length_embedding: bool = False
-    use_stop_head: bool = False
-    stop_weight: float = 1.0
-    """Weight for the binary stop head loss.  The stop head learns
-    "produce EOS here" as a separate decision from content generation."""
     max_batches_per_epoch: int | None = None
     """Cap batches per epoch for smoke testing.  None = full epoch."""
     syllable_aligned_bpe: bool = False

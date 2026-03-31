@@ -79,11 +79,6 @@ class GeneratorConfig(LFMBaseConfig):
     """Number of memory tokens for z → decoder cross-attention.
     1 = single memory vector (original behavior). K > 1 projects z into K
     memory tokens, giving the decoder richer z access across all positions."""
-    use_length_embedding: bool = False
-    """Add a continuous length embedding to cross-attention memory.
-    Teaches the decoder variable-length EOS behavior without imposing
-    human syntactic categories.  The length signal is a continuous scalar
-    mapped to hidden_dim via sinusoidal encoding + linear projection."""
 
     pretrained_decoder_path: str | None = None
     spm_model_path: str | None = None
