@@ -79,7 +79,11 @@ def extract_from_dataset(
             continue
 
         logger.info("[%s] Parsing %d sentences...", lang, len(items))
-        backend = get_backend(lang, use_gpu=True)
+        try:
+            backend = get_backend(lang, use_gpu=True)
+        except Exception as e:
+            logger.warning("[%s] Failed to load parser: %s — skipping", lang, e)
+            continue
         t0 = time.time()
         lang_constituents = 0
 

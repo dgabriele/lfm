@@ -178,9 +178,15 @@ class DepConBackend:
 
         iso2 = DEPCON_LANGS[lang_iso3]
         logger.info("Loading Stanza dependency parser for %s...", iso2)
-        stanza.download(iso2, processors="tokenize,pos,lemma,depparse", verbose=False)
+        # Some languages (e.g. Thai) lack a lemma processor
+        processors = "tokenize,pos,lemma,depparse"
+        try:
+            stanza.download(iso2, processors=processors, verbose=False)
+        except Exception:
+            processors = "tokenize,pos,depparse"
+            stanza.download(iso2, processors=processors, verbose=False)
         self._nlp = stanza.Pipeline(
-            iso2, processors="tokenize,pos,lemma,depparse",
+            iso2, processors=processors,
             use_gpu=use_gpu, verbose=False,
         )
         self._lang = lang_iso3
