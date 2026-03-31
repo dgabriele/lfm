@@ -251,12 +251,6 @@ dec:  mækswɛl sɛd hi meɪd fɔɹ fɹɛndz laɪf ɑn ðʌ ʃoʊ wɪtʃ ɪnklud
 σ=1.0: mækskswɛnd vlad ɔranfilt͡ɕɛ r sɛd aɪ meɪd ðætrne carne ɔ fɔɹmɝ fɹɪtel buktɨ ʌðɝ hetwʌzʔau ...
 ```
 
-<p align="center">
-  <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
-  <img src="docs/static/images/tsne_by_type.png" width="48%" alt="t-SNE of latent space colored by morphological type" />
-</p>
-<p align="center"><em>Left: hierarchical clustering recovers language groupings from latent space. Right: t-SNE colored by morphological type. Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
-
 ### Package structure
 
 ```
