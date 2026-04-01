@@ -400,7 +400,7 @@ class ExpressionGame(nn.Module):
             diag_mask = ~torch.eye(K, dtype=torch.bool, device=device).unsqueeze(0)
             pair_mask = active_pair & diag_mask
             n_pairs = pair_mask.float().sum(dim=(1, 2)).clamp(min=1)
-            z_intra_sim = (z_sim * pair_mask.float()).sum(dim=(1, 2)) / n_pairs
+            z_intra_sim = (z_sim.clamp(min=0) * pair_mask.float()).sum(dim=(1, 2)) / n_pairs
 
         return {
             "loss": loss,
@@ -471,18 +471,18 @@ class ExpressionGame(nn.Module):
                 batch, max_total + 1, device, dtype=torch.float16,
             )
 
-        cur_ids = torch.full((batch, 1), gen.bos_id, dtype=torch.long, device=device)
-        cur_embed = gen.token_embedding(cur_ids)
+        cur_embed = gen.token_embedding(
+            torch.full((batch, 1), gen.bos_id, dtype=torch.long, device=device),
+        )
+        batch_idx = torch.arange(batch, device=device)
 
-        def _get_memory() -> Tensor:
-            mem = torch.zeros(batch, n_mem, hidden_dim, device=device)
-            for bi in range(batch):
-                s = cur_seg[bi].item()
-                if s < K and seg_active[bi, s]:
-                    mem[bi] = memories[bi, s]
-            return mem
+        def _gather_memory() -> Tensor:
+            idx = cur_seg.clamp(max=K - 1)
+            mem = memories[batch_idx, idx]
+            active_mask = seg_active[batch_idx, idx] & ~finished
+            return mem * active_mask.unsqueeze(-1).unsqueeze(-1).float()
 
-        memory = _get_memory()
+        memory = _gather_memory()
 
         if is_linguistic:
             mask_row = gen._full_causal_mask[:, 0:1, 0:1]
@@ -498,34 +498,37 @@ class ExpressionGame(nn.Module):
             logits = gen.output_head(out[:, -1])
             next_token = logits.argmax(dim=-1)
 
-            for bi in range(batch):
-                if not finished[bi]:
-                    pos = total_pos[bi].item()
-                    all_tokens[bi, pos] = next_token[bi]
-                    all_mask[bi, pos] = True
-                    total_pos[bi] += 1
-                    tokens_in_seg[bi] += 1
+            # Vectorized token storage
+            active = ~finished
+            all_tokens[batch_idx, total_pos] = next_token * active.long()
+            all_mask[batch_idx, total_pos] = active
+            total_pos += active.long()
+            tokens_in_seg += active.long()
 
-            for bi in range(batch):
-                if finished[bi]:
-                    continue
-                should_switch = (
-                    (next_token[bi] == gen.eos_id and tokens_in_seg[bi] >= 1)
-                    or (tokens_in_seg[bi] >= max_tok_per_seg)
+            # Vectorized z-switch
+            hit_eos = (next_token == gen.eos_id) & (tokens_in_seg >= 1)
+            hit_max = tokens_in_seg >= max_tok_per_seg
+            should_switch = (hit_eos | hit_max) & active
+
+            cur_seg += should_switch.long()
+            tokens_in_seg *= ~should_switch
+
+            # Record segment boundaries
+            switched_valid = should_switch & (cur_seg < K)
+            if switched_valid.any():
+                seg_bounds[batch_idx[switched_valid], cur_seg[switched_valid]] = (
+                    total_pos[switched_valid]
                 )
-                if should_switch:
-                    cur_seg[bi] += 1
-                    tokens_in_seg[bi] = 0
-                    if cur_seg[bi] < K:
-                        seg_bounds[bi, cur_seg[bi]] = total_pos[bi]
-                    s = cur_seg[bi].item()
-                    if s >= K or not seg_active[bi, min(s, K - 1)]:
-                        finished[bi] = True
+
+            # Mark finished
+            clamped = cur_seg.clamp(max=K - 1)
+            next_inactive = ~seg_active[batch_idx, clamped]
+            finished = finished | (cur_seg >= K) | (should_switch & next_inactive)
 
             if finished.all():
                 break
 
-            memory = _get_memory()
+            memory = _gather_memory()
             new_embed = gen.token_embedding(next_token.unsqueeze(1))
 
             if is_linguistic:
