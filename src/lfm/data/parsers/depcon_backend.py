@@ -178,17 +178,22 @@ class DepConBackend:
 
         iso2 = DEPCON_LANGS[lang_iso3]
         logger.info("Loading Stanza dependency parser for %s...", iso2)
-        # Some languages (e.g. Thai) lack a lemma processor
-        processors = "tokenize,pos,lemma,depparse"
-        try:
-            stanza.download(iso2, processors=processors, verbose=False)
-        except Exception:
-            processors = "tokenize,pos,depparse"
-            stanza.download(iso2, processors=processors, verbose=False)
-        self._nlp = stanza.Pipeline(
-            iso2, processors=processors,
-            use_gpu=use_gpu, verbose=False,
-        )
+        # Try with lemma first; fall back without for languages that lack it
+        for processors in [
+            "tokenize,pos,lemma,depparse",
+            "tokenize,pos,depparse",
+        ]:
+            try:
+                stanza.download(iso2, processors=processors, verbose=False)
+                self._nlp = stanza.Pipeline(
+                    iso2, processors=processors,
+                    use_gpu=use_gpu, verbose=False,
+                )
+                break
+            except Exception:
+                continue
+        else:
+            raise RuntimeError(f"No working Stanza pipeline for {lang_iso3}")
         self._lang = lang_iso3
 
     def parse(self, sentences: list[str]) -> list[ParseTree | None]:
