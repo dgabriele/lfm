@@ -479,17 +479,14 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
             drop_last=True,  # InfoNCE needs consistent batch sizes
         )
     else:
-        # Length-balanced sampling: oversample longer sequences so all
-        # length buckets get adequate representation per batch.
+        # Gentle length boost: give longer sequences a mild sampling
+        # weight so they appear ~500/batch instead of ~22/batch,
+        # without overwhelming the short majority.
         _train_indices = list(train_dataset.indices)
         _train_lengths = [len(token_ids_list[i]) for i in _train_indices]
         _len_arr = torch.tensor(_train_lengths, dtype=torch.float32)
-        # Bucket by BPE token count: <10, 10-20, 20+
-        _bucket = torch.zeros_like(_len_arr, dtype=torch.long)
-        _bucket[_len_arr >= 10] = 1
-        _bucket[_len_arr >= 20] = 2
-        _bucket_counts = torch.bincount(_bucket, minlength=3).float().clamp(min=1)
-        _weights = 1.0 / _bucket_counts[_bucket]
+        # Weight: 1.0 for short (<15 BPE), 10.0 for medium (15+)
+        _weights = torch.where(_len_arr >= 15, 10.0, 1.0)
         _sampler = torch.utils.data.WeightedRandomSampler(
             _weights, num_samples=len(_weights), replacement=True,
         )
