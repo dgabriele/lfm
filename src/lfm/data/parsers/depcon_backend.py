@@ -178,16 +178,20 @@ class DepConBackend:
 
         iso2 = DEPCON_LANGS[lang_iso3]
         logger.info("Loading Stanza dependency parser for %s...", iso2)
-        # Try with lemma first; fall back without for languages that lack it
-        for processors in [
-            "tokenize,pos,lemma,depparse",
-            "tokenize,pos,depparse",
-        ]:
+        # Try with lemma first; fall back without for languages that
+        # lack a lemma model (e.g. Vietnamese, Thai).
+        # depparse_pretagged=True bypasses the lemma requirement.
+        _pipeline_configs = [
+            {"processors": "tokenize,pos,lemma,depparse", "kwargs": {}},
+            {"processors": "tokenize,pos,depparse", "kwargs": {"depparse_pretagged": True}},
+        ]
+        for pc in _pipeline_configs:
             try:
-                stanza.download(iso2, processors=processors, verbose=False)
+                stanza.download(iso2, processors=pc["processors"], verbose=False)
                 self._nlp = stanza.Pipeline(
-                    iso2, processors=processors,
+                    iso2, processors=pc["processors"],
                     use_gpu=use_gpu, verbose=False,
+                    **pc["kwargs"],
                 )
                 break
             except Exception:
