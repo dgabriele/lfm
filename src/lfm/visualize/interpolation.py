@@ -192,13 +192,43 @@ class InterpolationVisualization(BaseVisualization):
     def _interpolate(
         z_a: np.ndarray, z_b: np.ndarray, steps: int
     ) -> np.ndarray:
-        """Linear interpolation from *z_a* to *z_b* in *steps* points.
+        """Spherical interpolation (slerp) from *z_a* to *z_b*.
+
+        Slerp keeps intermediate points on the hypersphere at
+        consistent norm, avoiding empty regions of z-space that
+        cause t-SNE trajectory collapse when endpoint norms differ.
+
+        Falls back to linear interpolation when vectors are
+        near-parallel (dot product ≈ 1).
 
         Returns:
             Array of shape ``(steps, latent_dim)``.
         """
+        norm_a = np.linalg.norm(z_a)
+        norm_b = np.linalg.norm(z_b)
+        if norm_a < 1e-8 or norm_b < 1e-8:
+            # Degenerate — fall back to lerp
+            ts = np.linspace(0.0, 1.0, steps)
+            return np.stack([(1 - t) * z_a + t * z_b for t in ts])
+
+        u_a = z_a / norm_a
+        u_b = z_b / norm_b
+        dot = np.clip(np.dot(u_a, u_b), -1.0, 1.0)
+        omega = np.arccos(dot)
+
+        if omega < 1e-6:
+            # Near-parallel — lerp is fine
+            ts = np.linspace(0.0, 1.0, steps)
+            return np.stack([(1 - t) * z_a + t * z_b for t in ts])
+
         ts = np.linspace(0.0, 1.0, steps)
-        return np.stack([(1 - t) * z_a + t * z_b for t in ts])
+        results = []
+        for t in ts:
+            # Slerp on unit sphere, then interpolate norms
+            s = (np.sin((1 - t) * omega) * u_a + np.sin(t * omega) * u_b) / np.sin(omega)
+            r = (1 - t) * norm_a + t * norm_b
+            results.append(s * r)
+        return np.stack(results)
 
     # ------------------------------------------------------------------
     # Figure 1: t-SNE trajectories
