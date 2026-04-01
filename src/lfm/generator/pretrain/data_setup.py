@@ -289,7 +289,7 @@ def _align_constituent_ipa(
     return None
 
 
-def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
+def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPretrainConfig]:
     """Load corpus, tokenize, build datasets and dataloaders.
 
     Handles preprocessing cache (v3 format), sentencepiece training,
@@ -579,4 +579,4 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
         use_contrastive=bool(_use_contrastive),
         use_constituent_context=_use_constituent_context,
         surviving_indices=_surviving_indices,
-    )
+    ), cfg

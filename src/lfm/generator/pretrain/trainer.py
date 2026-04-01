@@ -57,7 +57,7 @@ class VAEPretrainer:
         device = torch.device(cfg.device)
 
         # -- Data preprocessing --
-        data = load_and_preprocess(cfg)
+        data, cfg = load_and_preprocess(cfg)
         output_dir = str(Path(cfg.output_path).parent)
 
         # Unpack frequently-used fields
