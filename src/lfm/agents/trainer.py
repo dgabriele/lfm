@@ -186,14 +186,12 @@ class AgentTrainer:
                     extra += f"  halt={out['halt_cost'].item():.3f}"
                 logger.info(
                     "step=%d  loss=%.3f  acc=%.1f%%  "
-                    "%s  hard=%.0f%%  "
-                    "(chance=%.1f%%)",
+                    "%s  hard=%.0f%%",
                     step,
                     loss.item(),
                     out["accuracy"].item() * 100,
                     extra if extra else f"expr_len={out['msg_lengths'].item():.0f}",
                     hard_ratio * 100,
-                    chance * 100,
                 )
 
             # Checkpoint
