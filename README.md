@@ -66,19 +66,17 @@ LFM uses a **generative linguistic bottleneck**: a pretrained VAE decoder that p
 
 ### Step 1: Pretrain the VAE decoder
 
-A multilingual VAE is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). The current training set covers 16 languages spanning major morphological types:
+A multilingual VAE is trained on IPA-transcribed phrase-level constituents from typologically diverse languages (Leipzig Corpora Collection). The v5 training set covers 12 languages spanning major morphological types:
 
 | Typology | Languages |
 |----------|-----------|
 | Fusional | English, German, Portuguese, Russian |
-| Agglutinative | Turkish, Finnish, Hungarian, Korean, Swahili |
-| Isolating/Tonal | Vietnamese, Indonesian, Thai |
+| Agglutinative | Turkish, Finnish, Hungarian, Korean |
+| Isolating/Tonal | Vietnamese, Indonesian |
 | Introflexive | Arabic |
-| Ergative | Georgian |
 | Split-ergative | Hindi |
-| Philippine focus | Tagalog |
 
-The training corpus is constituency-augmented: full sentences are parsed into phrase constituents (NP, VP, PP, SBAR, S) via unified UD dependency-to-constituency conversion across all 14 languages with Stanza dependency parsers. Each verb and its argument dependents are grouped into synthetic VP constituents, and nested phrases (NPs within VPs, SBARs within VPs, etc.) are extracted recursively. Each constituent becomes a separate training sample alongside the full sentence, teaching the decoder to produce well-formed output at all lengths — from short noun phrases to full sentences — rather than always generating fixed-length sequences. Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), tokenized with syllable-aligned sentencepiece BPE (`max_seq_len=96`).
+The training corpus consists of 10.2M phrase constituents (NPs, VPs, PPs, clauses — all lengths) extracted via unified UD dependency-to-constituency conversion with Stanza dependency parsers. Each verb and its argument dependents are grouped into synthetic VP constituents, and nested phrases (NPs within VPs, SBARs within VPs, etc.) are extracted recursively. v5 trains on standalone constituent IPA sequences (no constituent_context — encoder and decoder see the same short text), which naturally teaches variable-length EOS. Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), tokenized with syllable-aligned sentencepiece BPE (`max_seq_len=96`).
 
 The decoder uses a **LinguisticDecoder** with architectural biases for natural language:
 - **Rotary Positional Embeddings (RoPE)**: translation-invariant pattern learning — a morpheme works the same way regardless of position
@@ -131,35 +129,31 @@ The **LinguisticDecoder** has architectural biases for natural language:
 
 The decoder is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay (per-epoch), DIP-VAE covariance regularization, and full resume support.
 
-**v4 (current)**: 2.6M IPA sentences from 16 typologically diverse languages, syllable-aligned BPE tokenization, 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Variable-length output is handled architecturally via the expression system's z-switching decode.
+**v5 (current, phrase-level)**: 10.2M IPA phrase constituents (NPs, VPs, PPs, clauses — all lengths) from 12 typologically diverse languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), syllable-aligned BPE tokenization, 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Standard VAE on standalone constituent IPA sequences (no constituent_context — encoder and decoder see the same short text), which naturally teaches variable-length EOS.
 
 ### Pretraining results
 
-2.6M IPA sentences, 16 languages, 9 epochs with syllable-aligned BPE and 8-token z memory (latent_dim=256, lr=0.0005):
+10.2M IPA phrase constituents (all lengths: NPs, VPs, PPs, clauses) from 12 languages, syllable-aligned BPE, 8-token z memory (latent_dim=256, lr=0.0005):
 
 | Metric | Value |
 |--------|-------|
-| Val CE | **0.061** (PPL ≈ 1.06) |
-| Token accuracy | 96.8% |
-| Active z dims | 256/256 |
-| Smoothness (Spearman) | r=0.620 (p≈0) |
-| PCA 90% variance | 146 PCs |
+| CE (short, <20 tokens) | **0.00** |
+| CE (medium, 20-50 tokens) | **0.05** |
+| CE (long, >50 tokens) | **0.20** |
+| Variable-length output | mean 9.2 words (58 chars), range 4-18 words |
+| Zipf exponent | corpus 0.992, decoded 0.894 |
+| Adaptiveness (input<->output length) | r=0.999 |
+| Adaptiveness (z_norm<->output_unique) | r=-0.904 |
 
 <p align="center">
   <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
   <img src="docs/static/images/tsne_by_language.png" width="48%" alt="t-SNE of latent space colored by language" />
 </p>
-<p align="center"><em>Left: hierarchical clustering recovers linguistically sensible language groupings. Right: t-SNE by language — 16 distinct clusters with typologically sensible overlap zones. Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
+<p align="center"><em>Left: hierarchical clustering recovers linguistically sensible language groupings. Right: t-SNE by language — 12 distinct clusters with typologically sensible overlap zones. Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
 
 ### Reconstruction
 
-At val CE=0.061, the decoder achieves near-perfect reconstruction through the 256-dim bottleneck:
-
-```
-orig: ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
-dec:  ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
-      [WED=0/19, WER=0%]
-```
+The v5 decoder achieves near-perfect reconstruction on short and medium phrases (CE=0.00 for <20 tokens, CE=0.05 for 20-50 tokens), with graceful degradation on long sequences (CE=0.20 for >50 tokens).
 
 ### Cross-typological Interpolation
 
@@ -170,18 +164,9 @@ The latent space supports smooth interpolation between typologically distant lan
 </p>
 <p align="center"><em>Arabic→Vietnamese (Afro-Asiatic introflexive → Austroasiatic isolating) and German→Turkish (Indo-European fusional → Turkic agglutinative). Decoded IPA transitions smoothly through intermediate typological regions.</em></p>
 
-### Perturbation (σ=0 to σ=2)
+### Perturbation
 
-Adding noise scaled to the encoder's z distribution to the same z vector:
-
-```
-σ=0.0: ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
-σ=0.5: ɪf ju θɪŋk hɔltɨ vɤj mɯk wɪl ðʌ pipʌl hu pɹɑmʌni ðʌ naʌmz ʌv thlɐnɐ nɐs infoɾ vei ɑɹ faɪnɪŋ ...
-σ=1.0: ɪf jukɛntins ðʌ mɛstʌl caeɪz ðʌ pipʌl hu ðʌ dʒʌmz ɪz pɹɑmʌdʒʌlz ʌv dɪskjʌɛstɪŋ ɪf aʊɝ pɾɔvojɝ ...
-σ=2.0: ʃaɾ a si̇ɒni svoi kajanlaɾɯn mɐsja ini dɛleɾi hann bœlen o bœlæʃleɾi snabajili ve undɑkoɰinɯz ...
-```
-
-σ=0 is perfect reconstruction. σ=0.5 preserves English phonotactics with content shifts. σ=1.0 shows mixed typology. σ=2.0 has crossed entirely into agglutinative/Turkic phonotactics — the decoder navigates continuously through the latent manifold.
+Adding noise scaled to the encoder's z distribution to the same z vector. sigma=0.5 preserves language-local phonotactics with content shifts, sigma=1.0 shows mixed typology, and sigma=2.0 crosses entirely into different typological families — the decoder navigates continuously through the latent manifold.
 
 ## Expression Generation
 
@@ -278,17 +263,17 @@ src/lfm/
 Detailed visualization evidence for the model's structural properties — latent space organization, attention hierarchy, Zipf's law, smoothness, adaptive length, compositionality, cross-typological interpolation, and per-dimension latent sweeps — is presented in **[docs/structural-analysis.md](docs/structural-analysis.md)**, generated via the `lfm visualize all` and `lfm explore dim-sweep` CLI commands.
 
 Key findings:
-- **Latent smoothness**: Spearman r=0.86 (token Jaccard) between z-distance and output distance
-- **Adaptive length**: r=0.947 correlation between input and output length
-- **Zipfian output**: decoded token frequencies follow natural language statistics
-- **Functional compositionality**: specific z dimensions control specific output properties (z[56] → length at r=-0.90)
+- **Adaptiveness**: input<->output length r=0.999, z_norm<->output_unique r=-0.904
+- **Zipfian output**: corpus exponent 0.992, decoded 0.894 — natural language statistics preserved
+- **Variable-length output**: mean 9.2 words (58 chars), range 4-18 words — phrases to clauses
+- **Functional compositionality**: specific z dimensions control specific output properties
 - **Multi-scale attention**: architectural hierarchy confirmed in per-head entropy analysis
 
 ## Agent Game Results
 
 ### Referential Game
 
-Referential game with direct backprop through the v4 frozen decoder, using real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives:
+Referential game with direct backprop through the v5 frozen decoder, using real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives:
 
 | Metric | Value |
 |--------|-------|
@@ -315,7 +300,7 @@ step=1500 hard=100%  acc=95.7%   (stable plateau)
 
 ### Example outputs
 
-English sentences encoded with all-MiniLM-L6-v2, projected through the trained `_input_proj` (from the best checkpoint at 98.4% accuracy), and decoded through the frozen v4 decoder:
+English sentences encoded with all-MiniLM-L6-v2, projected through the trained `_input_proj` (from the best checkpoint at 98.4% accuracy), and decoded through the frozen v5 decoder:
 
 ```
 ENG: "The committee voted unanimously to approve the new environmental regulations."
@@ -343,7 +328,7 @@ IPA: dokusnɨm ljaɡmounden ve k krɔmjamuʃomout ɒz i kjʌbesa rasko tɤ̆j ut
      (44 tokens)
 ```
 
-Each input produces a distinct, pronounceable IPA utterance (~36-44 tokens). The output draws on phonotactic patterns from all 16 training languages — the decoder mixes typological features (Vietnamese tones, Hungarian consonant clusters, Arabic pharyngeals, English fricatives) into novel linguistic forms that are neither any specific human language nor a degenerate code. Semantically similar inputs produce similar-sounding utterances (measurable via Topsim), while dissimilar inputs produce clearly distinct ones.
+Each input produces a distinct, pronounceable IPA utterance (~36-44 tokens). The output draws on phonotactic patterns from all 12 training languages — the decoder mixes typological features (Vietnamese tones, Hungarian consonant clusters, Arabic pharyngeals, English fricatives) into novel linguistic forms that are neither any specific human language nor a degenerate code. Semantically similar inputs produce similar-sounding utterances (measurable via Topsim), while dissimilar inputs produce clearly distinct ones.
 
 ### Structural evaluation
 
@@ -609,15 +594,15 @@ A pretrained LM has morphological knowledge handed to it as tokenizer artifacts 
 
 ## Status
 
-**PoC pretraining validated.** The VAE decoder learns a well-structured latent space over typologically diverse languages, with structural claims backed by visualization evidence:
+**PoC pretraining validated.** The v5 VAE decoder learns a well-structured latent space over 12 typologically diverse languages (10.2M phrase constituents), with structural claims backed by visualization evidence:
 
 - Latent space organizes languages typologically (t-SNE, clustering)
 - Multi-scale attention heads function as designed (entropy analysis)
-- Output follows Zipfian distribution, refuting degenerate coding (rank-frequency)
-- Latent space is Lipschitz-smooth (Spearman r=0.86 on token Jaccard)
-- Variable-length encoding adapts to input complexity (r=0.947)
-- Compositional structure present (power-law probe R-squared, top dims at 0.6-0.75)
-- Low effective dimensionality (90% variance in 3 PCs)
+- Output follows Zipfian distribution (corpus 0.992, decoded 0.894), refuting degenerate coding
+- Variable-length encoding: mean 9.2 words (58 chars), range 4-18 words
+- Adaptive length: input<->output length r=0.999, z_norm<->output_unique r=-0.904
+- CE by length: short(<20)=0.00, med(20-50)=0.05, long(>50)=0.20
+- Compositional structure present (power-law probe R-squared)
 
 The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 99.2% peak accuracy (15.9x above chance), with ~96% sustained at 100% hard negatives. The expression game extends this to multi-segment generation via GRU z-sequence with PonderNet halting, achieving 98.8% peak accuracy with ~2.5 segments per message.
 
@@ -654,7 +639,7 @@ poetry install --with publish
 lfm publish model --repo-id username/lfm-decoder-v1 --model-dir data/models/v1
 
 # Publish the IPA corpus
-lfm publish dataset --repo-id username/lfm-ipa-16lang --model-dir data/models/v1
+lfm publish dataset --repo-id username/lfm-ipa-12lang --model-dir data/models/v1
 ```
 
 Each upload generates a YAML manifest in `releases/huggingface/` recording the arguments, timestamp, HuggingFace URL, and files uploaded. Model cards and dataset cards are auto-generated from checkpoint metadata and corpus statistics.

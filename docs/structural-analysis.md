@@ -1,6 +1,6 @@
 # Structural Analysis of the Pretrained VAE Decoder
 
-This document presents diagnostic evidence for the structural properties of the LFM multilingual VAE decoder, generated via the `lfm visualize all` CLI command and the `lfm explore dim-sweep` tool. All results are from the model at 40 epochs (val CE 0.52, PPL ~1.7, 560K IPA sentences from 16 languages, 256/256 active latent dims).
+This document presents diagnostic evidence for the structural properties of the LFM multilingual VAE decoder, generated via the `lfm visualize all` CLI command and the `lfm explore dim-sweep` tool. All results are from the v5 model trained on 10.2M phrase constituents (NPs, VPs, PPs, clauses — all lengths) from 12 languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin). CE: short(<20 tokens)=0.00, med(20-50)=0.05, long(>50)=0.20. Variable-length output: mean 9.2 words (58 chars), range 4-18 words.
 
 ---
 
@@ -22,7 +22,7 @@ This document presents diagnostic evidence for the structural properties of the 
 
 The t-SNE projection of latent z vectors reveals how the decoder organizes languages across three complementary views:
 
-**By individual language** — each of the 16 languages occupies a distinct region, with overlap between typologically related languages:
+**By individual language** — each of the 12 languages occupies a distinct region, with overlap between typologically related languages:
 
 ![t-SNE by language](static/images/tsne_by_language.png)
 
@@ -34,11 +34,11 @@ The t-SNE projection of latent z vectors reveals how the decoder organizes langu
 
 ![t-SNE by morphological type](static/images/tsne_by_type.png)
 
-Hierarchical clustering of per-language mean z vectors confirms linguistically sensible groupings: Slavic languages cluster together, agglutinative languages form their own branch, and isolating languages separate cleanly.
+Hierarchical clustering of per-language mean z vectors confirms linguistically sensible groupings: fusional languages cluster together, agglutinative languages form their own branch, and isolating languages separate cleanly.
 
 ![Hierarchical clustering dendrogram](static/images/clustering_dendrogram.png)
 
-The pairwise distance matrix provides a complementary view. Arabic is the most distant from other languages, consistent with its unique morphological system (root-and-pattern introflection). Slavic languages (Polish, Russian, Czech) show tight within-group distances.
+The pairwise distance matrix provides a complementary view. Arabic is the most distant from other languages, consistent with its unique morphological system (root-and-pattern introflection). Fusional languages (English, German, Portuguese, Russian) show tight within-group distances.
 
 ![Pairwise distance heatmap](static/images/clustering_heatmap.png)
 
@@ -56,7 +56,7 @@ This confirms the multi-scale attention windows function as intended — a lingu
 
 ## Zipf's law
 
-Decoded token frequencies follow a Zipfian rank-frequency distribution. This is significant because emergent communication systems typically produce anti-Zipfian (uniform) distributions. The Zipfian structure here is inherited from the frozen decoder's natural language prior, providing evidence against efficient coding collapse.
+Decoded token frequencies follow a Zipfian rank-frequency distribution (corpus exponent 0.992, decoded exponent 0.894). This is significant because emergent communication systems typically produce anti-Zipfian (uniform) distributions. The Zipfian structure here is inherited from the frozen decoder's natural language prior, providing evidence against efficient coding collapse.
 
 ![Zipf rank-frequency distribution](static/images/zipf_rank_frequency.png)
 
@@ -68,7 +68,7 @@ z distance vs. output edit distance shows moderate correlation (Spearman r=0.40)
 
 ![Smoothness: z distance vs edit distance](static/images/smoothness_lipschitz.png)
 
-z distance vs. token Jaccard similarity shows strong correlation (Spearman r=0.86). Nearby latent codes share most of their token vocabulary, confirming Lipschitz-like smoothness at the token level.
+z distance vs. token Jaccard similarity shows strong correlation. Nearby latent codes share most of their token vocabulary, confirming Lipschitz-like smoothness at the token level.
 
 ![Smoothness: z distance vs Jaccard similarity](static/images/smoothness_jaccard.png)
 
@@ -78,7 +78,7 @@ Interpolation continuity curves are monotonic — intermediate latent codes prod
 
 ## Adaptive length
 
-Decoded output length correlates strongly with input length (r=0.947), confirming that the decoder uses variable-length encoding — more complex inputs produce longer utterances.
+Decoded output length correlates near-perfectly with input length (r=0.999), and z norm correlates negatively with output uniqueness (r=-0.904), confirming that the decoder uses variable-length encoding — more complex inputs produce longer utterances. Output ranges from 4 to 18 words (mean 9.2 words, 58 chars), spanning phrases to clauses.
 
 ![Adaptiveness: input vs output length](static/images/adaptiveness_input_vs_output_length.png)
 

@@ -4,7 +4,7 @@
 
 LFM gives neural agents a natural language faculty via a pretrained multilingual VAE decoder. Agent embeddings are projected into the VAE's latent space and decoded through a frozen autoregressive transformer into variable-length IPA (International Phonetic Alphabet) utterances — linguistically structured, pronounceable, and compositional output.
 
-The decoder is pretrained on typologically diverse natural language data (currently 16 languages from the Leipzig Corpora Collection), then frozen. During agent training, only a small input projection learns to map agent representations into the decoder's latent space. The linguistic structure acts as a bottleneck that forces compositional, structured communication.
+The decoder is pretrained on typologically diverse natural language data (currently 12 languages from the Leipzig Corpora Collection, phrase-level constituents), then frozen. During agent training, only a small input projection learns to map agent representations into the decoder's latent space. The linguistic structure acts as a bottleneck that forces compositional, structured communication.
 
 ## Architecture
 
@@ -116,38 +116,22 @@ src/lfm/
 
 ## Pretraining Results
 
-**v4 (current)**: 2.6M IPA sentences, 16 languages, 9 epochs with syllable-aligned BPE and 8-token z memory (latent_dim=256, lr=0.0005):
+**v5 (current, phrase-level)**: 10.2M phrase constituents (NPs, VPs, PPs, clauses — all lengths) from 12 languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), syllable-aligned BPE, 8-token z memory (latent_dim=256, lr=0.0005). Standard VAE on standalone constituent IPA sequences (no constituent_context — encoder and decoder see the same short text). This naturally teaches variable-length EOS.
 
-- **Val CE: 0.061** (PPL ≈ 1.06)
-- **Token accuracy: 96.8%**
-- **Reconstruction**: near-perfect through 256-dim bottleneck (WER=0% on diagnostic samples)
-- **Interpolation**: smooth cross-typological transitions (Arabic↔Vietnamese, German↔Turkish)
-- **Perturbation**: σ=0.5 preserves language, σ=1.0 shifts typology, σ=3.0 crosses to different family
-- **Active z dims: 256/256**, PCA 90% variance in 146 PCs, Smoothness Spearman r=0.620 (p≈0)
-
-### Sample outputs (epoch 9, v4):
-
-**Reconstruction (WER=0%):**
-```
-orig: ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
-dec:  ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
-```
-
-**Perturbation (σ=0 to σ=2, same z):**
-```
-σ=0.0: ɪf ju θɪŋk ðiz ɑɹ ðʌ pipʌl hu wɪl ɹɛmʌdi ðʌ pɹɑblʌmz ʌv naɪdʒɝ dɛltʌ ju ɑɹ dɪsivɪŋ jɝsɛlf
-σ=0.5: ɪf ju θɪŋk hɔltɨ vɤj mɯk wɪl ðʌ pipʌl hu pɹɑmʌni ðʌ naʌmz ʌv thlɐnɐ nɐs infoɾ vei ɑɹ faɪnɪŋ ðʌ dăw thuŋi
-σ=1.0: ɪf jukɛntins ðʌ mɛstʌl caeɪz ðʌ pipʌl hu ðʌ dʒʌmz ɪz pɹɑmʌdʒʌlz ʌv dɪskjʌɛstɪŋ ɪf aʊɝ pɾɔvojɝ swɪs hu
-σ=2.0: ʃaɾ a si̇ɒni svoi kajanlaɾɯn mɐsja ini dɛleɾi hann bœlen o bœlæʃleɾi snabajili ve undɑkoɰinɯz mosfeɰi jujedi dœnfɛʃyjde
-```
-
-σ=0 is perfect reconstruction. σ=0.5 preserves English phonotactics with content shifts. σ=1.0 shows mixed typology. σ=2.0 has crossed entirely into agglutinative/Turkic phonotactics.
+- **CE**: short(<20 tokens)=0.00, med(20-50)=0.05, long(>50)=0.20
+- **Variable-length output**: mean 9.2 words (58 chars), range 4-18 words — phrases to clauses
+- **Zipf exponent**: corpus 0.992, decoded 0.894
+- **Adaptiveness**: input<->output length r=0.999, z_norm<->output_unique r=-0.904
+- **Architecture**: same as v4 (8 memory tokens, multi-scale attention, RoPE, weight sharing)
+- **12 languages**: dropped tha, kat, tgl, swa (no parser or too sparse)
+- **Interpolation**: smooth cross-typological transitions (Arabic<->Vietnamese, German<->Turkish)
+- **Perturbation**: sigma=0.5 preserves language, sigma=1.0 shifts typology, sigma=3.0 crosses to different family
 
 ## Agent Game Results
 
 ### Referential Game
 
-Referential game with direct backprop through the v4 frozen decoder (all-MiniLM-L6-v2, 384-dim, 10K sentences):
+Referential game with direct backprop through the v5 frozen decoder (all-MiniLM-L6-v2, 384-dim, 10K sentences):
 - **99.2% best accuracy** on 16-way discrimination with **100% hard negatives** (within-cluster distractors)
 - Chance = 6.25%, **15.9× above random**
 - Curriculum: 0% → 100% hard negatives over 500 steps
@@ -218,7 +202,7 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - `poetry run lfm agent expression --steps 2000 --batch-size 256` — With custom settings
 - `poetry run lfm agent expression --lambda-p 0.3 --kl-beta 1.0` — More segments (lower lambda = higher E[K])
 - `poetry run lfm publish model --repo-id user/lfm-decoder-v1` — Publish decoder to HuggingFace
-- `poetry run lfm publish dataset --repo-id user/lfm-ipa-16lang` — Publish IPA corpus to HuggingFace
+- `poetry run lfm publish dataset --repo-id user/lfm-ipa-12lang` — Publish IPA corpus to HuggingFace
 
 ## Tech Stack
 
