@@ -148,6 +148,7 @@ def _load_constituents_new_format(
         src = f["samples"]
         src_ipas = [t.decode() if isinstance(t, bytes) else t for t in src["ipa"][:]]
         src_langs = [t.decode() if isinstance(t, bytes) else t for t in src["language"][:]]
+        src_raw = [t.decode() if isinstance(t, bytes) else t for t in src["raw"][:]]
 
     # Build sentence list: unique parent sentences referenced by constituents
     parent_set = sorted(set(parent_indices))
@@ -177,7 +178,7 @@ def _load_constituents_new_format(
 
         # Build (lang, text) pairs with valid parent indices
         convert_inputs: list[tuple[str, str]] = []
-        convert_meta: list[tuple[int, str]] = []  # (sent_idx, label)
+        convert_meta: list[tuple[int, str, int]] = []  # (sent_idx, label, global_parent_idx)
         skipped_no_parent = 0
 
         for raw_text, label, lang, parent_idx in zip(
@@ -188,19 +189,33 @@ def _load_constituents_new_format(
                 skipped_no_parent += 1
                 continue
             convert_inputs.append((lang, raw_text))
-            convert_meta.append((sent_idx, label))
+            convert_meta.append((sent_idx, label, parent_idx))
 
         # Multiprocessed IPA conversion
         ipa_results = convert_corpus_to_ipa_labeled(convert_inputs)
 
         constituents: list[tuple[str, str, int, str]] = []
         skipped = skipped_no_parent
-        for result, (sent_idx, label) in zip(ipa_results, convert_meta):
+        aligned = 0
+        for i, (result, (sent_idx, label, global_pidx)) in enumerate(
+            zip(ipa_results, convert_meta),
+        ):
             if result is not None:
                 lang, ipa = result
                 constituents.append((lang, ipa, sent_idx, label))
             else:
-                skipped += 1
+                # Fallback: word-align constituent against parent IPA
+                con_lang, con_text = convert_inputs[i]
+                parent_raw = src_raw[global_pidx] if global_pidx < len(src_raw) else ""
+                parent_ipa = src_ipas[global_pidx] if global_pidx < len(src_ipas) else ""
+                ipa = _align_constituent_ipa(con_text, parent_raw, parent_ipa)
+                if ipa and len(ipa) >= 5:
+                    constituents.append((con_lang, ipa, sent_idx, label))
+                    aligned += 1
+                else:
+                    skipped += 1
+        if aligned:
+            logger.info("  Word-aligned %d constituents from parent IPA", aligned)
 
         with open(ipa_cache_path, "wb") as pf:
             pickle.dump({"constituents": constituents, "skipped": skipped}, pf,
@@ -250,6 +265,28 @@ def _load_constituents_new_format(
         constituents = balanced
 
     return sentences, constituents
+
+
+def _align_constituent_ipa(
+    con_text: str, parent_raw: str, parent_ipa: str,
+) -> str | None:
+    """Word-align a constituent's raw text to the parent sentence's IPA.
+
+    Fallback for languages where direct IPA conversion of short phrases
+    fails (e.g. Vietnamese).  Requires 1:1 word alignment between the
+    raw sentence and its IPA conversion.
+    """
+    if not parent_raw or not parent_ipa:
+        return None
+    raw_words = parent_raw.split()
+    ipa_words = parent_ipa.split()
+    if len(raw_words) != len(ipa_words):
+        return None
+    con_words = con_text.split()
+    for start in range(len(raw_words)):
+        if raw_words[start : start + len(con_words)] == con_words:
+            return " ".join(ipa_words[start : start + len(con_words)])
+    return None
 
 
 def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
