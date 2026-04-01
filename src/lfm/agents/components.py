@@ -163,6 +163,49 @@ class ZDiversityLoss(nn.Module):
         return torch.tensor(0.0, device=z_seq.device), mean_sim.mean()
 
 
+class ZDistributionLoss(nn.Module):
+    """Match projected z statistics to the pretrained decoder distribution.
+
+    Penalizes when batch z vectors deviate from the pretraining z
+    distribution's per-dimension mean and standard deviation.  This
+    prevents the projection from collapsing to a tiny subspace of the
+    latent space where the decoder produces degenerate output.
+
+    The decoder learned to produce diverse, well-formed IPA across its
+    full training distribution.  Keeping the projected z vectors in
+    that distribution ensures the decoder's full output diversity is
+    available to the expression game.
+
+    Args:
+        z_mean: Per-dimension latent mean from pretraining, ``(latent_dim,)``.
+        z_std: Per-dimension latent std from pretraining, ``(latent_dim,)``.
+    """
+
+    def __init__(self, z_mean: Tensor, z_std: Tensor) -> None:
+        super().__init__()
+        self.register_buffer("target_mean", z_mean.detach().clone())
+        self.register_buffer("target_std", z_std.detach().clone())
+
+    def forward(self, z: Tensor) -> tuple[Tensor, Tensor]:
+        """Compute distribution matching loss.
+
+        Args:
+            z: ``(batch, latent_dim)`` projected z vectors.
+
+        Returns:
+            Tuple of ``(loss, coverage_ratio)`` — scalar MSE loss and
+            mean per-dimension std ratio (detached diagnostic).
+        """
+        batch_mean = z.mean(dim=0)
+        batch_std = z.std(dim=0)
+
+        mean_loss = (batch_mean - self.target_mean).pow(2).mean()
+        std_loss = (batch_std - self.target_std).pow(2).mean()
+
+        ratio = (batch_std / self.target_std.clamp(min=1e-6)).mean().detach()
+        return mean_loss + std_loss, ratio
+
+
 class Receiver(nn.Module):
     """Score candidates against the message via learned dot-product.
 

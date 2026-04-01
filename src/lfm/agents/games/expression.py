@@ -65,6 +65,13 @@ class ExpressionGameConfig(LFMBaseConfig):
     z_diversity_weight: float = 0.0
     z_diversity_target: float | None = None
 
+    # Surface bottleneck: primary loss scores on token-level representations
+    # (through output_head -> softmax -> token_embedding), forcing surface
+    # forms to be discriminative.  Hidden-state path acts as auxiliary signal,
+    # annealed from hidden_state_weight -> 0 over hidden_state_anneal_steps.
+    hidden_state_weight: float = 1.0
+    hidden_state_anneal_steps: int = 1000
+
     # Message encoder
     encoder: MessageEncoderConfig = MessageEncoderConfig()
 
@@ -303,11 +310,22 @@ class ExpressionGame(nn.Module):
             z_mean=gen._z_mean if gen._z_stats_initialized else None,
             z_std=gen._z_std if gen._z_stats_initialized else None,
         )
+        hidden_dim = gen.config.decoder_hidden_dim
+
+        # Hidden-state path (auxiliary — gradient highway)
         self.msg_encoder = MessageEncoder(
-            gen.config.decoder_hidden_dim, config.embedding_dim,
+            hidden_dim, config.embedding_dim,
             num_heads=config.encoder.num_heads,
             num_layers=config.encoder.num_layers,
         )
+
+        # Surface-token path (primary — forces discriminative surface forms)
+        self.surface_encoder = MessageEncoder(
+            hidden_dim, config.embedding_dim,
+            num_heads=config.encoder.num_heads,
+            num_layers=config.encoder.num_layers,
+        )
+
         self.receiver = Receiver(config.embedding_dim)
 
         if config.z_diversity_weight > 0 and gen._z_stats_initialized:
@@ -329,6 +347,7 @@ class ExpressionGame(nn.Module):
         ckpt = {
             "z_gen": self.z_gen.state_dict(),
             "msg_encoder": self.msg_encoder.state_dict(),
+            "surface_encoder": self.surface_encoder.state_dict(),
             "receiver": self.receiver.state_dict(),
             # Architectural config (must match on resume)
             "embedding_dim": cfg.embedding_dim,
@@ -339,6 +358,8 @@ class ExpressionGame(nn.Module):
             "lambda_p": cfg.lambda_p,
             "kl_beta": cfg.kl_beta,
             "z_diversity_weight": cfg.z_diversity_weight,
+            "hidden_state_weight": cfg.hidden_state_weight,
+            "hidden_state_anneal_steps": cfg.hidden_state_anneal_steps,
             "encoder_num_layers": cfg.encoder.num_layers,
             "encoder_num_heads": cfg.encoder.num_heads,
             "num_distractors": cfg.num_distractors,
@@ -351,6 +372,8 @@ class ExpressionGame(nn.Module):
         """Restore from a checkpoint dict."""
         self.z_gen.load_state_dict(ckpt["z_gen"])
         self.msg_encoder.load_state_dict(ckpt["msg_encoder"])
+        if "surface_encoder" in ckpt:
+            self.surface_encoder.load_state_dict(ckpt["surface_encoder"])
         self.receiver.load_state_dict(ckpt["receiver"])
 
     def trainable_param_groups(self) -> list[dict]:
@@ -358,13 +381,29 @@ class ExpressionGame(nn.Module):
         return [
             {"params": list(self.z_gen.parameters()), "lr": self.config.gru_lr},
             {"params": list(self.msg_encoder.parameters()), "lr": self.config.receiver_lr},
+            {"params": list(self.surface_encoder.parameters()), "lr": self.config.receiver_lr},
             {"params": list(self.receiver.parameters()), "lr": self.config.receiver_lr},
         ]
 
     def forward(
         self, anchor: Tensor, distractors: Tensor,
+        *, step: int = 0,
     ) -> dict[str, Tensor]:
-        """Two-phase expression game forward pass."""
+        """Two-phase expression game forward pass.
+
+        Uses a dual-path architecture:
+        - **Surface path** (primary): token-level representations through
+          ``output_head → softmax → token_embedding`` force discriminative
+          surface forms — what the downstream LLM translator will see.
+        - **Hidden-state path** (auxiliary): raw decoder hidden states
+          provide smooth gradients via cross-attention.  Annealed from
+          ``hidden_state_weight`` → 0 over ``hidden_state_anneal_steps``.
+
+        Args:
+            anchor: ``(batch, embedding_dim)`` input embeddings.
+            distractors: ``(batch, num_distractors, embedding_dim)``.
+            step: Current training step (for annealing).
+        """
         batch = anchor.size(0)
         device = anchor.device
         num_candidates = distractors.size(1) + 1
@@ -384,9 +423,18 @@ class ExpressionGame(nn.Module):
         )
         trimmed_mask = gen_mask[:, :hidden.size(1)]
 
-        # Encode message and score candidates
-        message = self.msg_encoder(hidden, trimmed_mask)
+        # Surface path: project hidden → logits → soft tokens → re-embed
+        # Straight-through: forward uses argmax tokens, backward uses softmax
+        logits_per_pos = self.gen.output_head(hidden)  # (B, T, V)
+        soft_probs = F.softmax(logits_per_pos, dim=-1)
+        hard_ids = logits_per_pos.argmax(dim=-1)  # (B, T)
+        hard_onehot = F.one_hot(hard_ids, logits_per_pos.size(-1)).float()
+        straight_through = (hard_onehot - soft_probs).detach() + soft_probs
+        surface_repr = straight_through @ self.gen.token_embedding.weight  # (B, T, H)
 
+        surface_message = self.surface_encoder(surface_repr, trimmed_mask)
+
+        # Prepare candidates (shared between paths)
         candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
         perm = torch.stack([
             torch.randperm(num_candidates, device=device)
@@ -396,19 +444,38 @@ class ExpressionGame(nn.Module):
         candidates = torch.gather(candidates, 1, perm_expanded)
         target_idx = (perm == 0).long().argmax(dim=1)
 
-        logits = self.receiver(message, candidates)
-        receiver_loss = F.cross_entropy(logits, target_idx)
+        # Surface loss (primary)
+        surface_logits = self.receiver(surface_message, candidates)
+        surface_loss = F.cross_entropy(surface_logits, target_idx)
+
+        # Hidden-state loss (auxiliary, annealed)
+        cfg = self.config
+        anneal = cfg.hidden_state_anneal_steps
+        if anneal > 0 and cfg.hidden_state_weight > 0:
+            t = min(step / anneal, 1.0)
+            hs_weight = cfg.hidden_state_weight * (1.0 - t)
+        else:
+            hs_weight = cfg.hidden_state_weight
+
+        if hs_weight > 0:
+            hidden_message = self.msg_encoder(hidden, trimmed_mask)
+            hidden_logits = self.receiver(hidden_message, candidates)
+            hidden_loss = F.cross_entropy(hidden_logits, target_idx)
+        else:
+            hidden_loss = torch.tensor(0.0, device=device)
+
+        receiver_loss = surface_loss + hs_weight * hidden_loss
 
         # PonderNet KL: regularize halt distribution toward geometric prior
         total_tokens = trimmed_mask.float().sum(dim=1)
-        kl_loss = geometric_kl(halt_probs, self.config.lambda_p)
+        kl_loss = geometric_kl(halt_probs, cfg.lambda_p)
 
-        loss = receiver_loss + self.config.kl_beta * kl_loss
+        loss = receiver_loss + cfg.kl_beta * kl_loss
 
         # z diversity regularization
         if self.z_diversity is not None:
             div_loss, z_intra_sim = self.z_diversity(z_seq, z_weights)
-            loss = loss + self.config.z_diversity_weight * div_loss
+            loss = loss + cfg.z_diversity_weight * div_loss
         else:
             with torch.no_grad():
                 _, z_intra_sim = ZDiversityLoss.compute_similarity(
@@ -417,18 +484,20 @@ class ExpressionGame(nn.Module):
             div_loss = torch.tensor(0.0, device=device)
 
         with torch.no_grad():
-            accuracy = (logits.argmax(1) == target_idx).float().mean()
+            accuracy = (surface_logits.argmax(1) == target_idx).float().mean()
 
         return {
             "loss": loss,
             "accuracy": accuracy,
             "msg_lengths": total_tokens.mean().detach(),
-            "logits": logits,
+            "logits": surface_logits,
             "target_idx": target_idx,
             "halt_cost": kl_loss.detach(),
             "num_segments": num_segments.mean().detach(),
             "z_intra_sim": z_intra_sim,
             "z_div_loss": div_loss.detach(),
+            "hs_weight": torch.tensor(hs_weight),
+            "surface_loss": surface_loss.detach(),
         }
 
     @torch.no_grad()

@@ -143,6 +143,7 @@ class ReferentialGame(nn.Module):
         self,
         anchor: Tensor,
         distractors: Tensor,
+        *, step: int = 0,
     ) -> dict[str, Tensor]:
         """Run the two-phase referential game forward pass.
 

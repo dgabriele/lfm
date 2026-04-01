@@ -1,8 +1,8 @@
-"""Generate (IPA, English) parallel pairs via the frozen faculty pipeline.
+"""Generate (IPA, English) parallel pairs via the trained expression game.
 
-Sequential VRAM pipeline: load sentence-transformer -> encode -> free ->
-load faculty -> generate IPA -> free.  Saves pairs as JSONL for downstream
-training experiments.
+Uses the same embedding store the expression game was trained on to ensure
+the input distribution matches.  Saves pairs as JSONL for downstream
+translation training.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import sentencepiece as spm_lib
 import torch
 import yaml
 
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class PairGenerator:
-    """Generate (IPA, English) pairs from the faculty pipeline.
+    """Generate (IPA, English) pairs from a trained expression game.
 
     Args:
         config: Pair generation configuration.
@@ -40,129 +41,123 @@ class PairGenerator:
         torch.manual_seed(cfg.seed)
         device = torch.device(cfg.device)
 
-        # 1. Load English sentences
-        texts = self._load_texts()
-        if not texts:
-            raise RuntimeError("No texts loaded from corpus")
+        # 1. Load embeddings and passage text from the same store
+        #    the expression game was trained on
+        embeddings, texts = self._load_store()
 
-        # 2. Encode texts -> embeddings (loads sentence-transformer)
-        embeddings = self._encode_texts(texts)
+        # 2. Generate IPA via expression game
+        pairs = self._generate_expressions(texts, embeddings, device)
 
-        # 3. Generate IPA via faculty (loads decoder)
-        pairs = self._generate_ipa(texts, embeddings, device)
-
-        # 4. Save
+        # 3. Save
         self._save(pairs)
 
         return pairs
 
-    def _load_texts(self) -> list[str]:
-        """Load English sentences from Leipzig corpus."""
-        from lfm.data.loaders.leipzig import LeipzigCorpusConfig, LeipzigCorpusLoader
+    def _load_store(self) -> tuple[np.ndarray, list[str]]:
+        """Load embeddings and passage text from the embedding store."""
+        from lfm.embeddings.store import EmbeddingStore
 
         cfg = self.config
-        logger.info("Loading sentences from %s...", cfg.leipzig_dir)
+        store = EmbeddingStore(cfg.embedding_store_dir)
+        store.load()
 
-        loader = LeipzigCorpusLoader(
-            LeipzigCorpusConfig(
-                data_dir=cfg.leipzig_dir,
-                languages=cfg.languages,
-                max_samples_per_language=cfg.max_sentences,
-                min_line_length=cfg.min_line_length,
+        embeddings = np.array(store._embeddings)  # copy out of mmap
+
+        # Load passage text
+        passages_path = store.store_dir / "passages.jsonl"
+        if not passages_path.is_file():
+            raise FileNotFoundError(
+                f"No passages.jsonl in {store.store_dir}. "
+                f"Regenerate embeddings with the latest precompute_embeddings.py "
+                f"to include passage text."
             )
+
+        texts: list[str] = []
+        with passages_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                texts.append(json.loads(line).get("text", ""))
+
+        logger.info(
+            "Loaded %d embeddings + %d passages from %s",
+            len(embeddings), len(texts), cfg.embedding_store_dir,
         )
-        samples = loader.load()
-        texts = [text for _, text in samples]
-        logger.info("Loaded %d sentences", len(texts))
-        return texts
+        return embeddings, texts
 
-    def _encode_texts(self, texts: list[str]) -> np.ndarray:
-        """Encode texts with sentence-transformer, then free VRAM."""
-        from sentence_transformers import SentenceTransformer
-
-        cfg = self.config
-        logger.info("Loading encoder: %s", cfg.encoder_model)
-        encoder = SentenceTransformer(cfg.encoder_model, device=cfg.device)
-
-        logger.info("Encoding %d texts...", len(texts))
-        embeddings = encoder.encode(
-            texts,
-            batch_size=cfg.encode_batch_size,
-            show_progress_bar=True,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
-        embeddings = embeddings.astype(np.float32)
-
-        # Free encoder VRAM
-        del encoder
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        logger.info("Encoder freed from VRAM")
-
-        return embeddings
-
-    def _generate_ipa(
+    def _generate_expressions(
         self,
         texts: list[str],
         embeddings: np.ndarray,
         device: torch.device,
     ) -> list[tuple[str, str]]:
-        """Load faculty, generate IPA messages, then free VRAM."""
-        from lfm.faculty.config import FacultyConfig
+        """Load expression game, decode multi-segment expressions."""
+        from lfm.agents.games.expression import ExpressionGame, ExpressionGameConfig
         from lfm.faculty.model import LanguageFaculty
-        from lfm.generator.config import GeneratorConfig
 
         cfg = self.config
-        logger.info("Loading faculty (decoder: %s)", cfg.decoder_path)
 
-        faculty_config = FacultyConfig(
-            dim=384,
-            generator=GeneratorConfig(
-                pretrained_decoder_path=cfg.decoder_path,
-                spm_model_path=cfg.spm_path,
-                freeze_decoder=True,
-                max_output_len=cfg.max_output_len,
-            ),
+        # Build expression game from checkpoint config
+        ckpt = torch.load(cfg.expression_checkpoint, map_location=device, weights_only=False)
+        game_cfg = ExpressionGameConfig(
+            decoder_path=cfg.decoder_path,
+            spm_path=cfg.spm_path,
+            max_segments=ckpt.get("max_segments", cfg.max_segments),
+            embedding_dim=ckpt.get("embedding_dim", 384),
+            z_hidden_dim=ckpt.get("z_hidden_dim", 512),
+            num_memory_tokens=ckpt.get("num_memory_tokens", 8),
+            max_tokens_per_segment=ckpt.get("max_tokens_per_segment", 48),
+            device=cfg.device,
         )
-        faculty = LanguageFaculty(faculty_config).to(device)
-        faculty.generator.eval()
+        faculty = LanguageFaculty(game_cfg.build_faculty_config()).to(device)
+        game = ExpressionGame(game_cfg, faculty).to(device)
+        game.load_checkpoint_state(ckpt)
+        game.eval()
 
-        # Trigger lazy init
-        with torch.no_grad():
-            dummy = torch.randn(1, 384, device=device)
-            faculty(dummy)
+        # Load SPM for detokenization
+        sp = spm_lib.SentencePieceProcessor(model_file=cfg.spm_path)
+        vocab_size = sp.vocab_size()
+        eos_id = vocab_size + 1
 
-        # Generate pairs in batches
+        logger.info(
+            "Expression game loaded (step=%d, acc=%.1f%%)",
+            ckpt.get("step", -1),
+            ckpt.get("accuracy", 0) * 100,
+        )
+
+        # Generate in batches
         pairs: list[tuple[str, str]] = []
-        batch_size = cfg.encode_batch_size
+        batch_size = cfg.batch_size
         n = len(texts)
 
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            batch = torch.tensor(
-                embeddings[start:end], dtype=torch.float32, device=device,
-            )
+        with torch.no_grad():
+            for start in range(0, n, batch_size):
+                end = min(start + batch_size, n)
+                emb = torch.tensor(
+                    embeddings[start:end], dtype=torch.float32, device=device,
+                )
 
-            with torch.no_grad():
-                out = faculty(batch)
+                # GRU z-sequence + multi-segment decode
+                z_seq, _, z_weights, _ = game.z_gen(emb)
+                tokens, gen_mask, _ = game._multiseg_decode(z_seq, z_weights)
 
-            tokens = out["generator.tokens"]
-            ipa_texts = faculty.generator.decode_to_text(tokens)
+                # Detokenize each expression
+                for i in range(end - start):
+                    token_ids = tokens[i].tolist()
+                    mask = gen_mask[i].tolist()
+                    valid_ids = [
+                        t for t, m in zip(token_ids, mask)
+                        if m and t != eos_id and t < vocab_size
+                    ]
+                    ipa = sp.decode(valid_ids).strip()
+                    if ipa:
+                        pairs.append((ipa, texts[start + i]))
 
-            for i in range(end - start):
-                ipa = ipa_texts[i].strip()
-                if ipa:
-                    pairs.append((ipa, texts[start + i]))
+                if (start // batch_size) % 10 == 0:
+                    logger.info("Generated %d / %d pairs", len(pairs), n)
 
-            if (start // batch_size) % 10 == 0:
-                logger.info("Generated %d / %d pairs", len(pairs), n)
-
-        # Free faculty VRAM
-        del faculty
+        # Free VRAM
+        del game, faculty
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        logger.info("Faculty freed from VRAM")
 
         logger.info("Generated %d valid IPA-English pairs", len(pairs))
         return pairs

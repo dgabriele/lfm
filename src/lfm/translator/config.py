@@ -11,7 +11,7 @@ class PairGenerationConfig(LFMBaseConfig):
     The pair generation pipeline:
     1. Load English sentences from Leipzig corpus
     2. Encode with sentence-transformer -> embeddings
-    3. Pass through frozen faculty -> IPA messages
+    3. Pass through trained expression game -> multi-segment IPA
     4. Save as JSONL for downstream training
 
     Attributes:
@@ -21,24 +21,22 @@ class PairGenerationConfig(LFMBaseConfig):
         min_line_length: Minimum character length for source sentences.
         decoder_path: Path to pretrained VAE decoder checkpoint.
         spm_path: Path to sentencepiece model.
+        expression_checkpoint: Path to trained expression game checkpoint.
+        max_segments: Max segments (must match expression game training).
         encoder_model: Sentence-transformer model name for encoding.
         encode_batch_size: Batch size for encoding and generation.
-        max_output_len: Maximum IPA output sequence length (match decoder).
         output_path: Where to save the JSONL pairs file.
         device: Torch device string.
         seed: Random seed.
     """
 
-    leipzig_dir: str = "data/leipzig"
-    languages: list[str] = ["eng"]
-    max_sentences: int = 5000
-    min_line_length: int = 30
-    decoder_path: str = "data/models/v1/vae_decoder.pt"
-    spm_path: str = "data/models/v1/spm.model"
-    encoder_model: str = "all-MiniLM-L6-v2"
-    encode_batch_size: int = 64
-    max_output_len: int = 96
-    output_path: str = "data/models/v1/translator/pairs.jsonl"
+    embedding_store_dir: str = "data/embeddings"
+    decoder_path: str = "data/vae_decoder.pt"
+    spm_path: str = "data/spm.model"
+    expression_checkpoint: str = "data/expression_game/best.pt"
+    max_segments: int = 16
+    batch_size: int = 64
+    output_path: str = "data/translator/pairs.jsonl"
     device: str = "cuda"
     seed: int = 42
 
@@ -90,7 +88,7 @@ class TranslatorConfig(LFMBaseConfig):
     max_grad_norm: float = 1.0
 
     # Data
-    pairs_path: str = "data/models/v1/translator/pairs.jsonl"
+    pairs_path: str = "data/translator/pairs.jsonl"
     val_fraction: float = 0.1
 
     # Eval
@@ -99,6 +97,6 @@ class TranslatorConfig(LFMBaseConfig):
     eval_temperature: float = 0.7
 
     # Output
-    output_dir: str = "data/models/v1/translator"
+    output_dir: str = "data/translator"
     device: str = "cuda"
     seed: int = 42

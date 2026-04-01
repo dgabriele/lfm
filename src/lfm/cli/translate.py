@@ -8,7 +8,7 @@ from lfm.cli.base import CLICommand
 
 
 class GeneratePairsCommand(CLICommand):
-    """Generate (IPA, English) parallel pairs via the frozen faculty."""
+    """Generate (IPA, English) parallel pairs via the trained expression game."""
 
     @property
     def name(self) -> str:
@@ -20,72 +20,47 @@ class GeneratePairsCommand(CLICommand):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
-            "--decoder-path",
-            default="data/models/v1/vae_decoder.pt",
-            help="Path to pretrained VAE decoder checkpoint",
+            "--embedding-store", default="data/embeddings",
+            help="Embedding store directory (default: data/embeddings)",
         )
         parser.add_argument(
-            "--spm-path",
-            default="data/models/v1/spm.model",
-            help="Path to sentencepiece model",
+            "--decoder-path", default="data/vae_decoder.pt",
+            help="Pretrained VAE decoder checkpoint",
         )
         parser.add_argument(
-            "--leipzig-dir",
-            default="data/leipzig",
-            help="Path to Leipzig corpus directory (default: data/leipzig)",
+            "--spm-path", default="data/spm.model",
+            help="Sentencepiece model",
         )
         parser.add_argument(
-            "--languages",
-            nargs="+",
-            default=["eng"],
-            help="Language codes to load (default: eng)",
+            "--expression-checkpoint", default="data/expression_game/best.pt",
+            help="Trained expression game checkpoint",
         )
         parser.add_argument(
-            "--max-sentences",
-            type=int,
-            default=5000,
-            help="Maximum sentences to process (default: 5000)",
+            "--max-segments", type=int, default=16,
+            help="Max segments (must match training, default: 16)",
         )
         parser.add_argument(
-            "--encoder-model",
-            default="all-MiniLM-L6-v2",
-            help="Sentence-transformer model (default: all-MiniLM-L6-v2)",
+            "--batch-size", type=int, default=64,
+            help="Generation batch size (default: 64)",
         )
         parser.add_argument(
-            "--batch-size",
-            type=int,
-            default=64,
-            help="Encoding/generation batch size (default: 64)",
+            "--output", default="data/translator/pairs.jsonl",
+            help="Output JSONL path",
         )
-        parser.add_argument(
-            "--output",
-            default="data/models/v1/translator/pairs.jsonl",
-            help="Output JSONL path (default: data/models/v1/translator/pairs.jsonl)",
-        )
-        parser.add_argument(
-            "--device",
-            default="cuda",
-            help="Compute device (default: cuda)",
-        )
-        parser.add_argument(
-            "--seed",
-            type=int,
-            default=42,
-            help="Random seed (default: 42)",
-        )
+        parser.add_argument("--device", default="cuda")
+        parser.add_argument("--seed", type=int, default=42)
 
     def execute(self, args: argparse.Namespace) -> int:
         from lfm.translator.config import PairGenerationConfig
         from lfm.translator.pairs import PairGenerator
 
         config = PairGenerationConfig(
-            leipzig_dir=args.leipzig_dir,
-            languages=args.languages,
-            max_sentences=args.max_sentences,
+            embedding_store_dir=args.embedding_store,
             decoder_path=args.decoder_path,
             spm_path=args.spm_path,
-            encoder_model=args.encoder_model,
-            encode_batch_size=args.batch_size,
+            expression_checkpoint=args.expression_checkpoint,
+            max_segments=args.max_segments,
+            batch_size=args.batch_size,
             output_path=args.output,
             device=args.device,
             seed=args.seed,

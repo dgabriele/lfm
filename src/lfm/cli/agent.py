@@ -160,6 +160,10 @@ class ExpressionCommand(CLICommand):
                             help="z diversity regularization weight (default: 0, disabled)")
         parser.add_argument("--z-diversity-target", type=float, default=None,
                             help="Target z similarity (default: auto from pretrained distribution)")
+        parser.add_argument("--hidden-state-weight", type=float, default=1.0,
+                            help="Initial weight for hidden-state auxiliary loss (default: 1.0)")
+        parser.add_argument("--hidden-state-anneal-steps", type=int, default=1000,
+                            help="Steps to anneal hidden-state weight to 0 (default: 1000)")
         parser.add_argument("--device", default="cuda")
         parser.add_argument("--seed", type=int, default=42)
         parser.add_argument("--log-every", type=int, default=50)
@@ -188,6 +192,8 @@ class ExpressionCommand(CLICommand):
             kl_beta=args.kl_beta,
             z_diversity_weight=args.z_diversity_weight,
             z_diversity_target=args.z_diversity_target,
+            hidden_state_weight=args.hidden_state_weight,
+            hidden_state_anneal_steps=args.hidden_state_anneal_steps,
             encoder=MessageEncoderConfig(
                 num_layers=args.encoder_layers,
                 num_heads=args.encoder_heads,

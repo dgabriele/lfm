@@ -171,7 +171,7 @@ class AgentTrainer:
         for step in range(start_step, cfg.steps):
             anchor, distractors, hard_ratio = self._sample_batch(step)
 
-            out = game(anchor, distractors)
+            out = game(anchor, distractors, step=step)
             loss = out["loss"]
 
             self.optimizer.zero_grad()
@@ -194,6 +194,8 @@ class AgentTrainer:
                     extra += f"  halt={out['halt_cost'].item():.3f}"
                 if "z_div_loss" in out and out["z_div_loss"].item() > 0:
                     extra += f"  div={out['z_div_loss'].item():.3f}"
+                if "hs_weight" in out:
+                    extra += f"  hs={out['hs_weight'].item():.2f}"
                 logger.info(
                     "step=%d  loss=%.3f  acc=%.1f%%  "
                     "%s  hard=%.0f%%",
