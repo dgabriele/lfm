@@ -5,7 +5,7 @@
 # short phrase.  The decoder learns phrase-level EOS naturally because
 # every training sample is 5-15 tokens.
 #
-# 12 languages, ~4M samples, median IPA length 16 chars.
+# 12 languages (incl. Vietnamese via word-alignment), ~4M samples, median 15 IPA chars.
 
 dataset_path: /home/daniel/projects/lfm/data/datasets/constituents-12lang-leaf
 corpus_loader: leipzig
@@ -20,6 +20,7 @@ corpus_loader_config:
     - fin
     - hun
     - kor
+    - vie
     - ind
     - ara
     - hin
