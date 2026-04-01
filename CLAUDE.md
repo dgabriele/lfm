@@ -4,7 +4,7 @@
 
 LFM gives neural agents a natural language faculty via a pretrained multilingual VAE decoder. Agent embeddings are projected into the VAE's latent space and decoded through a frozen autoregressive transformer into variable-length IPA (International Phonetic Alphabet) utterances — linguistically structured, pronounceable, and compositional output.
 
-The decoder is pretrained on typologically diverse natural language data (currently 12 languages from the Leipzig Corpora Collection, phrase-level constituents), then frozen. During agent training, only a small input projection learns to map agent representations into the decoder's latent space. The linguistic structure acts as a bottleneck that forces compositional, structured communication.
+The decoder is pretrained on typologically diverse natural language data (currently 12 languages from the Leipzig Corpora Collection, leaf-level phrase constituents), then frozen. During agent training, only a small input projection learns to map agent representations into the decoder's latent space. The linguistic structure acts as a bottleneck that forces compositional, structured communication.
 
 ## Architecture
 
@@ -116,16 +116,18 @@ src/lfm/
 
 ## Pretraining Results
 
-**v5 (current, phrase-level)**: 10.2M phrase constituents (NPs, VPs, PPs, clauses — all lengths) from 12 languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), syllable-aligned BPE, 8-token z memory (latent_dim=256, lr=0.0005). Standard VAE on standalone constituent IPA sequences (no constituent_context — encoder and decoder see the same short text). This naturally teaches variable-length EOS.
+**v5-leaf (current, leaf-level phrases)**: 4M leaf-level phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with IPA-converted inline and word-alignment fallback for Vietnamese. Syllable-aligned BPE, 8-token z memory (latent_dim=256, lr=0.0005). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context). Each sample IS a short phrase, so the decoder learns phrase-level EOS naturally.
 
-- **CE**: short(<20 tokens)=0.00, med(20-50)=0.05, long(>50)=0.20
-- **Variable-length output**: mean 9.2 words (58 chars), range 4-18 words — phrases to clauses
-- **Zipf exponent**: corpus 0.992, decoded 0.894
-- **Adaptiveness**: input<->output length r=0.999, z_norm<->output_unique r=-0.904
+- **CE**: short(<20 BPE)=0.01, med(20-50 BPE)=0.08
+- **Variable-length output**: mean 2.5 words (16.5 IPA chars), range 1-4 words — atomic phrases
+- **Zipf exponent**: corpus 1.004, decoded 0.980 (near-perfect Zipf law)
+- **Adaptiveness**: input<->output length r=1.000, z_norm<->output_unique r=-0.718
+- **TTR**: 1.000 (every word unique within a phrase)
+- **EOS rate**: 1.00 (always produces well-formed EOS)
 - **Architecture**: same as v4 (8 memory tokens, multi-scale attention, RoPE, weight sharing)
 - **12 languages**: dropped tha, kat, tgl, swa (no parser or too sparse)
-- **Interpolation**: smooth cross-typological transitions (Arabic<->Vietnamese, German<->Turkish)
-- **Perturbation**: sigma=0.5 preserves language, sigma=1.0 shifts typology, sigma=3.0 crosses to different family
+- **Vietnamese recovered**: word-alignment of constituents against parent sentence IPA
+- **Key insight**: leaf-only extraction means the decoder learns atoms; the expression game composes them
 
 ## Agent Game Results
 
@@ -149,10 +151,10 @@ Expression game using a GRU-based z-sequence generator with PonderNet geometric-
 - **Each z**: Decoded through the frozen decoder until EOS, with KV cache persisting across segments for coarticulation
 - **PonderNet halting**: Per-step halt probability regularized toward geometric prior p(k) = lambda(1-lambda)^{k-1}. lambda=0.4 -> E[K]=2.5 segments. KL divergence prevents segment count explosion without manual tuning
 - **Two-phase backprop**: Same as referential game -- no_grad generation, then parallel decoder re-run with gradients through cross-attention
-- **98.8% peak accuracy** at 100% hard negatives (16-way, within-cluster distractors)
-- ~2.5 segments stable (PonderNet prior prevents expansion to max)
-- Segment z similarity: 0.957 (segments share semantic region but aren't identical)
-- Average message length: ~52 tokens across segments
+- **93.8% peak accuracy** at 100% hard negatives (16-way, within-cluster distractors)
+- ~2.6 segments stable (PonderNet prior prevents expansion to max)
+- Average message length: ~15 tokens across segments (~6 tokens per segment)
+- v5-leaf decoder produces phrase-level expressions
 - Converges in ~50 steps to >95%
 
 ### Evaluation Scripts

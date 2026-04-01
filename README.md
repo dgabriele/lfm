@@ -68,7 +68,7 @@ LFM uses a **generative linguistic bottleneck**: a pretrained VAE decoder that p
 
 ### Step 1: Pretrain the VAE decoder
 
-A multilingual VAE is trained on IPA-transcribed phrase-level constituents from typologically diverse languages (Leipzig Corpora Collection). The v5 training set covers 12 languages spanning major morphological types:
+A multilingual VAE is trained on IPA-transcribed phrase-level constituents from typologically diverse languages (Leipzig Corpora Collection). The v5-leaf training set covers 12 languages spanning major morphological types:
 
 | Typology | Languages |
 |----------|-----------|
@@ -78,7 +78,7 @@ A multilingual VAE is trained on IPA-transcribed phrase-level constituents from 
 | Introflexive | Arabic |
 | Split-ergative | Hindi |
 
-The training corpus consists of 10.2M phrase constituents (NPs, VPs, PPs, clauses — all lengths) extracted via unified UD dependency-to-constituency conversion with Stanza dependency parsers. Each verb and its argument dependents are grouped into synthetic VP constituents, and nested phrases (NPs within VPs, SBARs within VPs, etc.) are extracted recursively. v5 trains on standalone constituent IPA sequences (no constituent_context — encoder and decoder see the same short text), which naturally teaches variable-length EOS. Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), tokenized with syllable-aligned sentencepiece BPE (`max_seq_len=96`).
+The training corpus consists of 4M **leaf-level** phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) extracted via unified UD dependency-to-constituency conversion with Stanza dependency parsers. Only leaf constituents are kept -- the atomic building blocks of syntax. Vietnamese IPA is recovered via word-alignment of constituents against parent sentence IPA (fallback for languages where epitran's word-level IPA doesn't align with constituent spans). v5-leaf trains on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally. The expression game then composes these atomic phrases into multi-segment utterances. Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), tokenized with syllable-aligned sentencepiece BPE (`max_seq_len=96`).
 
 The decoder uses a **LinguisticDecoder** with architectural biases for natural language:
 - **Rotary Positional Embeddings (RoPE)**: translation-invariant pattern learning — a morpheme works the same way regardless of position
@@ -104,7 +104,7 @@ Only the expression generator and encoder learn. The decoder's linguistic struct
 
 ### Step 3: Variable-length, variable-structure messages
 
-Expression complexity scales with input complexity. The GRU can produce more segments to elaborate on complex inputs, with PonderNet halting deciding when enough has been said. Short, simple inputs produce fewer segments with brief output. This is the same mechanism natural language uses: say more when there's more to say.
+Expression complexity scales with input complexity. The GRU can produce more segments to elaborate on complex inputs, with PonderNet halting deciding when enough has been said. Short, simple inputs produce fewer segments with brief output. With the v5-leaf decoder, each segment is an atomic phrase (mean 2.5 words), and the expression game composes ~2.6 such phrases into multi-segment utterances (~15 tokens total). This is the same mechanism natural language uses: say more when there's more to say.
 
 ## The Linguistic Decoder
 
@@ -131,21 +131,22 @@ The **LinguisticDecoder** has architectural biases for natural language:
 
 The decoder is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay (per-epoch), DIP-VAE covariance regularization, and full resume support.
 
-**v5 (current, phrase-level)**: 10.2M IPA phrase constituents (NPs, VPs, PPs, clauses — all lengths) from 12 typologically diverse languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), syllable-aligned BPE tokenization, 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Standard VAE on standalone constituent IPA sequences (no constituent_context — encoder and decoder see the same short text), which naturally teaches variable-length EOS.
+**v5-leaf (current, leaf-level phrases)**: 4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 typologically diverse languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with word-alignment fallback for Vietnamese. Syllable-aligned BPE tokenization, 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally.
 
 ### Pretraining results
 
-10.2M IPA phrase constituents (all lengths: NPs, VPs, PPs, clauses) from 12 languages, syllable-aligned BPE, 8-token z memory (latent_dim=256, lr=0.0005):
+4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages, syllable-aligned BPE, 8-token z memory (latent_dim=256, lr=0.0005):
 
 | Metric | Value |
 |--------|-------|
-| CE (short, <20 tokens) | **0.00** |
-| CE (medium, 20-50 tokens) | **0.05** |
-| CE (long, >50 tokens) | **0.20** |
-| Variable-length output | mean 9.2 words (58 chars), range 4-18 words |
-| Zipf exponent | corpus 0.992, decoded 0.894 |
-| Adaptiveness (input<->output length) | r=0.999 |
-| Adaptiveness (z_norm<->output_unique) | r=-0.904 |
+| CE (short, <20 BPE) | **0.01** |
+| CE (medium, 20-50 BPE) | **0.08** |
+| Variable-length output | mean 2.5 words (16.5 IPA chars), range 1-4 words |
+| Zipf exponent | corpus 1.004, decoded 0.980 (near-perfect Zipf law) |
+| Adaptiveness (input<->output length) | r=1.000 |
+| Adaptiveness (z_norm<->output_unique) | r=-0.718 |
+| TTR | 1.000 (every word unique within a phrase) |
+| EOS rate | 1.00 (always produces well-formed EOS) |
 
 <p align="center">
   <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
@@ -155,7 +156,7 @@ The decoder is trained on IPA-transcribed text from typologically diverse langua
 
 ### Reconstruction
 
-The v5 decoder achieves near-perfect reconstruction on short and medium phrases (CE=0.00 for <20 tokens, CE=0.05 for 20-50 tokens), with graceful degradation on long sequences (CE=0.20 for >50 tokens).
+The v5-leaf decoder achieves near-perfect reconstruction on leaf phrases (CE=0.01 for <20 BPE tokens, CE=0.08 for 20-50 BPE tokens). Leaf-only training means the decoder specializes in atomic phrase production, and the expression game composes them.
 
 ### Cross-typological Interpolation
 
@@ -265,9 +266,11 @@ src/lfm/
 Detailed visualization evidence for the model's structural properties — latent space organization, attention hierarchy, Zipf's law, smoothness, adaptive length, compositionality, cross-typological interpolation, and per-dimension latent sweeps — is presented in **[docs/structural-analysis.md](docs/structural-analysis.md)**, generated via the `lfm visualize all` and `lfm explore dim-sweep` CLI commands.
 
 Key findings:
-- **Adaptiveness**: input<->output length r=0.999, z_norm<->output_unique r=-0.904
-- **Zipfian output**: corpus exponent 0.992, decoded 0.894 — natural language statistics preserved
-- **Variable-length output**: mean 9.2 words (58 chars), range 4-18 words — phrases to clauses
+- **Adaptiveness**: input<->output length r=1.000, z_norm<->output_unique r=-0.718
+- **Zipfian output**: corpus exponent 1.004, decoded 0.980 — near-perfect Zipf law
+- **Variable-length output**: mean 2.5 words (16.5 IPA chars), range 1-4 words — atomic phrases
+- **TTR**: 1.000 (every word unique within a phrase)
+- **EOS rate**: 1.00 (always produces well-formed EOS)
 - **Functional compositionality**: specific z dimensions control specific output properties
 - **Multi-scale attention**: architectural hierarchy confirmed in per-head entropy analysis
 
@@ -275,7 +278,7 @@ Key findings:
 
 ### Referential Game
 
-Referential game with direct backprop through the v5 frozen decoder, using real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives:
+Referential game with direct backprop through the v5-leaf frozen decoder, using real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives:
 
 | Metric | Value |
 |--------|-------|
@@ -302,7 +305,7 @@ step=1500 hard=100%  acc=95.7%   (stable plateau)
 
 ### Example outputs
 
-English sentences encoded with all-MiniLM-L6-v2, projected through the trained `_input_proj` (from the best checkpoint at 98.4% accuracy), and decoded through the frozen v5 decoder:
+English sentences encoded with all-MiniLM-L6-v2, projected through the trained `_input_proj` (from the best checkpoint at 98.4% accuracy), and decoded through the frozen v5-leaf decoder:
 
 ```
 ENG: "The committee voted unanimously to approve the new environmental regulations."
@@ -361,10 +364,9 @@ The expression game uses a **GRU-based z-sequence generator** with **PonderNet g
 
 | Metric | Value |
 |--------|-------|
-| Peak accuracy (100% hard negatives) | **98.8%** |
-| Segments per message | ~2.5 (stable, PonderNet-regulated) |
-| Segment z similarity | 0.957 |
-| Average message length | ~52 tokens across segments |
+| Peak accuracy (100% hard negatives) | **93.8%** |
+| Segments per message | ~2.6 (stable, PonderNet-regulated) |
+| Average message length | ~15 tokens (~6 tokens per segment) |
 | Convergence | ~50 steps to >95% |
 
 ```bash
@@ -596,17 +598,18 @@ A pretrained LM has morphological knowledge handed to it as tokenizer artifacts 
 
 ## Status
 
-**PoC pretraining validated.** The v5 VAE decoder learns a well-structured latent space over 12 typologically diverse languages (10.2M phrase constituents), with structural claims backed by visualization evidence:
+**PoC pretraining validated.** The v5-leaf VAE decoder learns a well-structured latent space over 12 typologically diverse languages (4M leaf-level phrase constituents), with structural claims backed by visualization evidence:
 
 - Latent space organizes languages typologically (t-SNE, clustering)
 - Multi-scale attention heads function as designed (entropy analysis)
-- Output follows Zipfian distribution (corpus 0.992, decoded 0.894), refuting degenerate coding
-- Variable-length encoding: mean 9.2 words (58 chars), range 4-18 words
-- Adaptive length: input<->output length r=0.999, z_norm<->output_unique r=-0.904
-- CE by length: short(<20)=0.00, med(20-50)=0.05, long(>50)=0.20
+- Output follows near-perfect Zipfian distribution (corpus 1.004, decoded 0.980), refuting degenerate coding
+- Variable-length encoding: mean 2.5 words (16.5 IPA chars), range 1-4 words -- atomic phrases
+- Adaptive length: input<->output length r=1.000, z_norm<->output_unique r=-0.718
+- CE by length: short(<20 BPE)=0.01, med(20-50 BPE)=0.08
+- TTR=1.000, EOS rate=1.00
 - Compositional structure present (power-law probe R-squared)
 
-The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 99.2% peak accuracy (15.9x above chance), with ~96% sustained at 100% hard negatives. The expression game extends this to multi-segment generation via GRU z-sequence with PonderNet halting, achieving 98.8% peak accuracy with ~2.5 segments per message.
+The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 99.2% peak accuracy (15.9x above chance), with ~96% sustained at 100% hard negatives. The expression game extends this to multi-segment generation via GRU z-sequence with PonderNet halting, achieving 93.8% peak accuracy with ~2.6 segments of ~6 tokens each (15 tokens total), where the v5-leaf decoder produces phrase-level expressions.
 
 ### Limitations
 
