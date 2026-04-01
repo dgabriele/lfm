@@ -1,12 +1,17 @@
-# VAE decoder pretraining (v5 — phrase-level decoder from scratch)
+# ==========================================================================
+# VAE decoder pretraining — v5 (phrase-level, leaf constituents)
 #
-# Standard VAE training on leaf-level phrase constituents as standalone
-# sequences.  No constituent_context — encoder and decoder see the same
-# short phrase.  The decoder learns phrase-level EOS naturally because
-# every training sample is 5-15 tokens.
+# Standard VAE on leaf-level phrase constituents as standalone IPA
+# sequences. Encoder and decoder see the same short phrase (no
+# constituent_context). The decoder learns phrase-level EOS naturally.
 #
-# 12 languages (incl. Vietnamese via word-alignment), ~4M samples, median 15 IPA chars.
+# 12 languages, ~4M samples, median 15 IPA chars.
+# ==========================================================================
 
+# --- Data source ---
+# Path to an HDF5 dataset with samples/ipa + samples/language fields.
+# This dataset contains leaf-level phrase constituents (NP, VP, PP, etc.)
+# already converted to IPA.
 dataset_path: /home/daniel/projects/lfm/data/datasets/constituents-12lang-leaf
 corpus_loader: leipzig
 corpus_loader_config:
@@ -25,78 +30,128 @@ corpus_loader_config:
     - ara
     - hin
 
-# No constituency context — standard VAE reconstruction
+# --- Constituency training mode ---
+# false = standard VAE (encoder and decoder see same text).
+# true = encoder sees parent sentence, decoder sees constituent span.
+# For phrase-level training, use false — every sample IS the target.
 constituent_context: false
 
-# Tokenizer
+# --- Tokenizer ---
+# Sentencepiece BPE vocabulary size.
 spm_vocab_size: 8000
+# Syllabify IPA before BPE training so merges respect syllable boundaries.
 syllable_aligned_bpe: true
 
-# Architecture (same as v4)
+# --- Model architecture ---
+# Latent z dimensionality. Controls information capacity of the bottleneck.
 latent_dim: 256
+# Standard transformer encoder layers for IPA → z.
 encoder_num_layers: 2
+# Decoder hidden dimension. All decoder layers, embeddings, and output head use this.
 decoder_hidden_dim: 512
+# Number of decoder transformer layers (unique layers if share_decoder_layers).
 decoder_num_layers: 4
+# Attention heads. Must equal len(attention_head_windows).
 decoder_num_heads: 8
+# Decoder dropout during training.
 decoder_dropout: 0.1
+# z is projected to this many memory tokens for decoder cross-attention.
+# K=1: single vector. K=8: richer z access across all positions.
 num_memory_tokens: 8
 
-# Linguistic structure
+# --- Linguistic attention structure ---
+# Per-head sliding window sizes for multi-scale causal self-attention.
+# [3,3,7,7,15,15,0,0] = 2 heads at phonotactic, morpheme, word, and full scale.
+# 0 = full causal (no window restriction).
 attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+# Every Nth position gets full attention in all heads (composition points).
 attention_global_every: 7
+# Rotary positional embeddings (translation-invariant pattern learning).
 use_rope: true
+# Weight sharing: create num_layers/2 unique layers, apply each twice (recursion).
 share_decoder_layers: true
+# Max BPE token sequence length. Sequences longer than this are truncated.
 max_seq_len: 96
+# How to pool variable-length encoder output to a single vector before z projection.
+# "mean" = masked mean pooling. "attention" = learned query cross-attention.
 encoder_pooling: mean
 
-# KL — disabled
+# --- KL divergence ---
+# Weight for KL(q(z|x) || N(0,I)) loss. 0 = no KL (continuous VAE, no prior).
+# Nonzero KL forces z toward standard normal, which may destroy encoder structure.
 kl_weight: 0.0
+# Per-dimension free bits: clamp KL per dim to this minimum to prevent collapse.
 kl_free_bits: 0.5
+# Steps to linearly anneal KL weight from 0 to kl_weight (cyclical).
 kl_warmup_steps: 10000
+# Alternative KL formulation (beta-VAE). 0 = disabled.
 kl_beta: 0.0
 
-# Contrastive / phonetic — disabled
+# --- Auxiliary losses (all disabled for v5) ---
+# InfoNCE contrastive loss aligning z with external embeddings. Requires embeddings_path.
 contrastive_weight: 0.0
 contrastive_temperature: 0.07
 embeddings_path: ""
+# Initialize token embeddings from panphon articulatory features.
 phonetic_init: false
 phonetic_init_scale: 0.5
+# Blend one-hot CE target with phonetic similarity matrix (near-miss tolerance).
 phonetic_label_smoothing: 0.0
-
-# VQ — disabled
+# Vector quantization of z (VQ-VAE mode). false = continuous z.
 use_vq: false
 
-# Training
+# --- Training ---
 batch_size: 160
 gradient_accumulation_steps: 1
+# Mixed precision (float16 forward, float32 backward). Saves ~40% VRAM.
 use_amp: true
+# Cosine LR schedule: starts at lr, decays to lr_min.
 lr: 0.0005
 lr_min: 0.0001
 num_epochs: 10
 
-# Latent regularization
+# --- Latent regularization ---
+# z variance regularization: pulls per-dim z variance toward target. 0 = disabled.
 z_var_weight: 0.0
 z_var_target: 0.05
 z_var_floor: 0.01
+# Word dropout: randomly zero decoder input embeddings to force z-dependence.
+# Annealed from word_dropout → word_dropout_min over anneal epochs. 0 = disabled.
 word_dropout: 0.0
 word_dropout_min: 0.0
 word_dropout_anneal_epochs: 20
+# DIP-VAE: off-diagonal covariance penalty encouraging z dimension independence.
 dip_weight: 0.1
+# Bag-of-words loss: order-invariant token presence check. 0 = disabled.
 bow_weight: 0.0
+
+# --- Sampling balance ---
+# Boost sampling weight for sequences >= this many BPE tokens.
+# Ensures longer leaf constituents (VPs, PPs) get adequate batch representation.
+# 0 = disabled (uniform random). 15 = mild boost for 15+ token sequences.
 length_boost_threshold: 15
+# Multiplier for boosted samples. 10 = 10x more likely to appear in a batch.
 length_boost_factor: 10.0
+
+# --- Checkpointing & diagnostics ---
+# Run reconstruction/interpolation/perturbation diagnostics every N steps.
 diagnostic_every: 3000
+# Save a resumable checkpoint every N steps (in addition to end-of-epoch).
 checkpoint_every_steps: 3000
+# Fraction of data held out for validation.
 val_fraction: 0.1
 seed: 42
 device: cuda
+# Where to save the best decoder checkpoint (inference-only weights).
 output_path: /home/daniel/projects/lfm/data/models/v5-leaf/vae_decoder.pt
 
-# Topological regularization
+# --- Topological regularization (disabled) ---
+# Penalizes z-distance vs output-distance mismatches (Lipschitz continuity).
 topo_weight: 0.0
 topo_sample_pairs: 32
 
-# Adversarial discriminator
+# --- Adversarial discriminator (disabled) ---
+# Structural discriminator that distinguishes teacher-forced vs free-run output.
 use_adversarial: false
 adv_weight: 0.1
 adv_lr: 0.0001
