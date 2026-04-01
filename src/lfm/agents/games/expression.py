@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
-from lfm.agents.components import MessageEncoder, Receiver
+from lfm.agents.components import MessageEncoder, Receiver, ZDiversityLoss
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
 from lfm.agents.decode import rerun_decoder_multiseg_with_grad
 from lfm.config.base import LFMBaseConfig
@@ -57,6 +57,13 @@ class ExpressionGameConfig(LFMBaseConfig):
     # E[K] = 1/lambda_p.  lambda_p=0.5 → ~2 segments, 0.3 → ~3.3, 0.2 → ~5.
     lambda_p: float = 0.4
     kl_beta: float = 0.5
+
+    # z diversity: penalize intra-expression z similarity above a data-driven
+    # target (auto-computed from pretrained z distribution).  Prevents the GRU
+    # from collapsing all segments to near-identical z's while keeping them
+    # close enough for linguistic coherence.
+    z_diversity_weight: float = 0.0
+    z_diversity_target: float | None = None
 
     # Message encoder
     encoder: MessageEncoderConfig = MessageEncoderConfig()
@@ -303,6 +310,14 @@ class ExpressionGame(nn.Module):
         )
         self.receiver = Receiver(config.embedding_dim)
 
+        if config.z_diversity_weight > 0 and gen._z_stats_initialized:
+            self.z_diversity = ZDiversityLoss(
+                gen._z_mean, gen._z_std,
+                target=config.z_diversity_target,
+            )
+        else:
+            self.z_diversity = None
+
     @property
     def gen(self):
         """Shortcut to the underlying generator."""
@@ -310,11 +325,27 @@ class ExpressionGame(nn.Module):
 
     def checkpoint_state(self) -> dict:
         """Return state dict for checkpointing."""
-        return {
+        cfg = self.config
+        ckpt = {
             "z_gen": self.z_gen.state_dict(),
             "msg_encoder": self.msg_encoder.state_dict(),
             "receiver": self.receiver.state_dict(),
+            # Architectural config (must match on resume)
+            "embedding_dim": cfg.embedding_dim,
+            "z_hidden_dim": cfg.z_hidden_dim,
+            "max_segments": cfg.max_segments,
+            "max_tokens_per_segment": cfg.max_tokens_per_segment,
+            "num_memory_tokens": cfg.num_memory_tokens,
+            "lambda_p": cfg.lambda_p,
+            "kl_beta": cfg.kl_beta,
+            "z_diversity_weight": cfg.z_diversity_weight,
+            "encoder_num_layers": cfg.encoder.num_layers,
+            "encoder_num_heads": cfg.encoder.num_heads,
+            "num_distractors": cfg.num_distractors,
         }
+        if self.z_diversity is not None:
+            ckpt["z_diversity_target"] = self.z_diversity.target_sim.item()
+        return ckpt
 
     def load_checkpoint_state(self, ckpt: dict) -> None:
         """Restore from a checkpoint dict."""
@@ -372,35 +403,21 @@ class ExpressionGame(nn.Module):
         total_tokens = trimmed_mask.float().sum(dim=1)
         kl_loss = geometric_kl(halt_probs, self.config.lambda_p)
 
-        # Z redundancy: penalize consecutive z's that are too similar.
-        # If z_i ≈ z_{i-1}, the segment is redundant — the GRU should
-        # either halt or produce a distinct z.
-        z_normed = F.normalize(z_seq, dim=-1)
-        consec_sim = (z_normed[:, 1:] * z_normed[:, :-1]).sum(dim=-1)  # (B, K-1)
-        # Penalize positive similarity only — don't reward anti-correlation
-        consec_sim = consec_sim.clamp(min=0)
-        pair_weight = torch.min(z_weights[:, 1:], z_weights[:, :-1])
-        z_redundancy = (consec_sim * pair_weight).sum(dim=-1).mean()
+        loss = receiver_loss + self.config.kl_beta * kl_loss
 
-        loss = (
-            receiver_loss
-            + self.config.kl_beta * kl_loss
-            + self.config.kl_beta * z_redundancy
-        )
+        # z diversity regularization
+        if self.z_diversity is not None:
+            div_loss, z_intra_sim = self.z_diversity(z_seq, z_weights)
+            loss = loss + self.config.z_diversity_weight * div_loss
+        else:
+            with torch.no_grad():
+                _, z_intra_sim = ZDiversityLoss.compute_similarity(
+                    z_seq, z_weights,
+                )
+            div_loss = torch.tensor(0.0, device=device)
 
         with torch.no_grad():
             accuracy = (logits.argmax(1) == target_idx).float().mean()
-
-            # Intra-expression z diversity
-            K = z_seq.size(1)
-            z_normed = F.normalize(z_seq, dim=-1)
-            z_sim = torch.bmm(z_normed, z_normed.transpose(1, 2))
-            active = z_weights > 0.01
-            active_pair = active.unsqueeze(-1) & active.unsqueeze(-2)
-            diag_mask = ~torch.eye(K, dtype=torch.bool, device=device).unsqueeze(0)
-            pair_mask = active_pair & diag_mask
-            n_pairs = pair_mask.float().sum(dim=(1, 2)).clamp(min=1)
-            z_intra_sim = (z_sim.clamp(min=0) * pair_mask.float()).sum(dim=(1, 2)) / n_pairs
 
         return {
             "loss": loss,
@@ -410,7 +427,8 @@ class ExpressionGame(nn.Module):
             "target_idx": target_idx,
             "halt_cost": kl_loss.detach(),
             "num_segments": num_segments.mean().detach(),
-            "z_intra_sim": z_intra_sim.mean().detach(),
+            "z_intra_sim": z_intra_sim,
+            "z_div_loss": div_loss.detach(),
         }
 
     @torch.no_grad()

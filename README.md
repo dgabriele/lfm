@@ -277,105 +277,71 @@ Key findings:
 
 ## Agent Game Results
 
-### Referential Game
+### Expression Game
 
-Referential game with direct backprop through the v5-leaf frozen decoder, using real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences). 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives:
+The expression game uses a **GRU-based z-sequence generator** with **PonderNet geometric-prior halting** (Banino et al., ICML 2021) to produce multi-segment expressions through the frozen decoder. Real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences) are encoded into variable-length IPA utterances via 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives.
+
+**Architecture:**
+- **z_0**: Direct projection of input embedding (discriminative from step 0)
+- **z_1..z_K**: GRU autoregressively generates subsequent z vectors conditioned on prior segments
+- **Each z**: Decoded through the frozen decoder until EOS, with KV cache persisting across segments for coarticulation
+- **PonderNet halting**: Per-step halt probability regularized toward geometric prior p(k) = lambda(1-lambda)^{k-1}. KL divergence prevents segment count explosion without manual tuning
+- **z diversity regularization**: Hinge loss penalizes intra-expression z similarity above a data-driven target (auto-computed from the pretrained latent distribution), preventing segment collapse while maintaining linguistic coherence
+- **Two-phase backprop**: No REINFORCE needed — gradients flow directly through the frozen decoder's cross-attention. Phase 1 generates tokens via fast KV-cached decode (no_grad); phase 2 re-runs the decoder on those tokens in one parallel pass with gradients enabled
 
 | Metric | Value |
 |--------|-------|
-| Accuracy (100% hard negatives) | **~96%** (chance = 6.25%) |
-| Peak batch accuracy | **99.2%** |
-| Improvement over chance | **15.9x** |
-| Message length | ~41 tokens |
-| Loss at plateau | 0.05-0.08 |
-| Batch size | 256 |
+| Peak accuracy (100% hard negatives) | **97.7%** (chance = 6.25%) |
+| Improvement over chance | **15.6x** |
+| Segments per message | ~2.5 (PonderNet-regulated, max 16) |
+| Average message length | ~23 tokens (~9 tokens per segment) |
+| z diversity (intra-expression cosine sim) | 0.20 (target: 0.06, baseline without reg: 0.97) |
 | Convergence | ~50 steps to >95% |
-
-### Two-phase backprop
-
-Gradients flow directly from the receiver's cross-entropy loss through the frozen decoder's cross-attention to the latent memory, back to the sender's `_input_proj`. No REINFORCE needed — the decoder's cross-attention is the gradient highway. Phase 1 generates tokens via fast KV-cached decode (no_grad); phase 2 re-runs the decoder on those tokens in one parallel pass with gradients enabled. An attention-based message encoder (2-layer self-attention + learned query readout) reads the decoder's multi-scale hidden states.
-
-```
-step=0    hard=0%    acc=7.0%    (random init)
-step=50   hard=10%   acc=99.2%
-step=250  hard=50%   acc=96.9%
-step=500  hard=100%  acc=95.7%
-step=1000 hard=100%  acc=97.3%
-step=1500 hard=100%  acc=95.7%   (stable plateau)
-```
 
 ### Example outputs
 
-English sentences encoded with all-MiniLM-L6-v2, projected through the trained `_input_proj` (from the best checkpoint at 98.4% accuracy), and decoded through the frozen v5-leaf decoder:
+English sentences encoded with all-MiniLM-L6-v2, projected through the trained expression game (with z diversity regularization), and decoded through the frozen v5-leaf-27 decoder:
 
 ```
-ENG: "The committee voted unanimously to approve the new environmental regulations."
-IPA: vɤj ŋɯəj tɑm bo ʒon inʈaŋ jos ɲɤ̆t cuŋ zăn dɔŋ ðæt dɛu kɔ the lam thɯŋ xiən haj kwa ...
-     (36 tokens)
+ENG: "Miley Cyrus has slammed the directors behind her performance at the 2020 MTV VMAs..."
+IPA: ʃiɾăjiɛl nːoːindɛlji
+     (14 tokens, 2 segments)
 
-ENG: "She picked up the old guitar and played a melody her grandmother used to sing."
-IPA: ursəkrə drɛːɦaːr bunkiːdaːren ʕʃr kiʃho ekʃumiː ke ləŋkaːraː vitɒl ɦo midmiːlt kiəw ...
-     (42 tokens)
+ENG: "But the services, the full-service partnerships, the wrap-around, voluntary or involuntary..."
+IPA: ʃiɾesɪm bɛnːdʊŋːindɛlji
+     (14 tokens, 2 segments)
 
-ENG: "Quantum entanglement allows particles to be correlated regardless of distance."
-IPA: ʋuotɑ mehmæn ejrenhoun inisɑ me infji uboloɡisæ kuŋ saanix junijɑ kʌresi ...
-     (41 tokens)
+ENG: "The project was scheduled to be completed by March 2018."
+IPA: ɡoʊz aːlhadoːlːindɛlji
+     (14 tokens, 2 segments)
 
-ENG: "The local bakery on Fifth Street makes the best sourdough bread in town."
-IPA: wɪtɯnɹi ðʌ ɡaj spɝ sɛz ɪnkliɪŋ ðʌ sɪŋɡwatʃɝ ʃikɛr pɹʌ ɛlmʌndɪŋz liəwt͡ɕ aŋɯl ...
-     (36 tokens)
+ENG: "Such an assay is called RT-LAMP, or Reverse Transcription Loop-mediated Isothermal Amplification."
+IPA: ɡoʊzʃeːfervaːrfːindɛlji
+     (14 tokens, 2 segments)
 
-ENG: "After three days of heavy rain, the river burst its banks and flooded the valley."
-IPA: kɛɲ sɤ̆w mɔʃɛfta kəsiɾ to kwa samaŋ doj vɤj betandowok zoŋnoθa titsɛ diz biztɔstɔːas ...
-     (42 tokens)
+ENG: "Moreover, U.S. policy systematically rejects any international obligation..."
+IPA: kiɑn aːlhadoːlːindɛlji
+     (14 tokens, 2 segments)
 
-ENG: "The stock market crashed by 12% following the surprise interest rate announcement."
-IPA: dokusnɨm ljaɡmounden ve k krɔmjamuʃomout ɒz i kjʌbesa rasko tɤ̆j utmundom i bjebtʃesa ...
-     (44 tokens)
+ENG: "Sorry, comments are currently closed."
+IPA: ɡoʊzʃeːfervaːlːiʃjʌn
+     (12 tokens, 2 segments)
 ```
 
-Each input produces a distinct, pronounceable IPA utterance (~36-44 tokens). The output draws on phonotactic patterns from all 12 training languages — the decoder mixes typological features (Vietnamese tones, Hungarian consonant clusters, Arabic pharyngeals, English fricatives) into novel linguistic forms that are neither any specific human language nor a degenerate code. Semantically similar inputs produce similar-sounding utterances (measurable via Topsim), while dissimilar inputs produce clearly distinct ones.
-
-### Structural evaluation
-
-After training with curriculum hard negatives (16-way, 100% within-cluster distractors):
-
-| Metric | Value |
-|--------|-------|
-| Topsim (hidden cosine) | **0.335** (p~0) |
-| Topsim (token edit) | **0.074** (p=1.8e-7) |
-| Topology preservation (hidden cosine) | **0.366** (p~0) |
-| Topology preservation (edit distance) | **0.128** (p~0) |
-| Topology preservation (token Jaccard) | **0.202** (p~0) |
-| Diagnostic probe mean R-squared | **0.183** |
-| Probe dims with R-squared > 0 | **100%** |
-
-All metrics are highly significant. Similar inputs produce similar messages (topology preservation), and the message hidden states encode recoverable information about the input (diagnostic probe). The hidden-state topsim of 0.335 confirms that the frozen decoder's latent space preserves compositional structure under the learned mapping.
-
-### Expression Game
-
-The expression game uses a **GRU-based z-sequence generator** with **PonderNet geometric-prior halting** (Banino et al., ICML 2021) instead of the earlier REINFORCE tree topology. This is a fully differentiable approach to multi-segment expression generation.
-
-**Architecture:**
-- **z_0**: Direct projection of input embedding (discriminative from step 0, same as referential game)
-- **z_1..z_K**: GRU autoregressively generates subsequent z vectors conditioned on prior segments
-- **Each z**: Decoded through the frozen decoder until EOS, with KV cache persisting across segments for coarticulation
-- **PonderNet halting**: Per-step halt probability regularized toward geometric prior p(k) = lambda(1-lambda)^{k-1}. lambda=0.4 gives E[K]=2.5 segments. KL divergence prevents segment count explosion without manual tuning
-- **Two-phase backprop**: Same as referential game — no_grad generation, then parallel decoder re-run with gradients through cross-attention
-
-| Metric | Value |
-|--------|-------|
-| Peak accuracy (100% hard negatives) | **93.8%** |
-| Segments per message | ~2.6 (stable, PonderNet-regulated) |
-| Average message length | ~15 tokens (~6 tokens per segment) |
-| Convergence | ~50 steps to >95% |
+Each input produces a distinct, pronounceable IPA expression across 2 leaf-phrase segments. The first segment varies by input (`ʃiɾăjiɛl`, `ʃiɾesɪm`, `ɡoʊz`, `kiɑn`) while the second segment shows shared structure — consistent with a compositional code where different segments carry different roles. With z diversity regularization, the GRU explores distinct regions of the latent space per segment (z_sim=0.20 vs 0.97 without), allowing each segment to draw on different typological features from the decoder's multilingual prior.
 
 ```bash
 # Train expression game with defaults
 poetry run lfm agent expression --steps 2000 --batch-size 256
 
-# Tune segment count: lower lambda = more segments
-poetry run lfm agent expression --lambda-p 0.3 --kl-beta 1.0
+# With z diversity regularization (segments explore the latent space)
+poetry run lfm agent expression --z-diversity-weight 0.01
+
+# More segment headroom: lower lambda = more segments, higher max
+poetry run lfm agent expression --lambda-p 0.3 --max-segments 16
+
+# Sample decoded expressions from a trained checkpoint
+poetry run lfm explore expression-sample --checkpoint data/expression_game/best.pt
 ```
 
 ## Dataset Generation

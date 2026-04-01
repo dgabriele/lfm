@@ -68,6 +68,101 @@ class MessageEncoder(nn.Module):
         return self.proj(readout)
 
 
+class ZDiversityLoss(nn.Module):
+    """Regularize intra-expression z diversity toward a data-driven target.
+
+    Penalizes when z vectors within an expression are more similar
+    (higher cosine similarity) than typical vectors drawn from the
+    pretrained latent distribution.  This prevents the GRU from
+    collapsing all segments to near-identical z's while keeping them
+    close enough to maintain linguistic coherence for downstream
+    translation.
+
+    The target similarity is computed empirically from the pretrained
+    z distribution: sample random z vectors from N(z_mean, z_std),
+    compute their pairwise cosine similarity, and use the mean as the
+    baseline.  Intra-expression similarity above this target is
+    penalized via a hinge loss.
+
+    Args:
+        z_mean: Per-dimension latent mean from pretraining, ``(latent_dim,)``.
+        z_std: Per-dimension latent std from pretraining, ``(latent_dim,)``.
+        target: Override target similarity.  ``None`` = auto-compute.
+        n_calibration_samples: Samples for empirical target estimation.
+    """
+
+    def __init__(
+        self,
+        z_mean: Tensor,
+        z_std: Tensor,
+        target: float | None = None,
+        n_calibration_samples: int = 1000,
+    ) -> None:
+        super().__init__()
+        if target is not None:
+            self.register_buffer("target_sim", torch.tensor(target))
+        else:
+            with torch.no_grad():
+                zs = torch.randn(n_calibration_samples, z_mean.shape[0])
+                zs = zs * z_std.cpu() + z_mean.cpu()
+                normed = torch.nn.functional.normalize(zs, dim=-1)
+                sim = normed @ normed.T
+                mask = ~torch.eye(n_calibration_samples, dtype=torch.bool)
+                self.register_buffer("target_sim", sim[mask].mean())
+
+    def forward(
+        self, z_seq: Tensor, z_weights: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Compute diversity hinge loss and mean similarity.
+
+        Args:
+            z_seq: ``(batch, K, latent_dim)`` z vectors per segment.
+            z_weights: ``(batch, K)`` segment weights from PonderNet.
+
+        Returns:
+            Tuple of ``(loss, mean_sim)`` — scalar hinge loss and
+            mean intra-expression cosine similarity (detached).
+        """
+        K = z_seq.size(1)
+        z_normed = torch.nn.functional.normalize(z_seq, dim=-1)
+        sim = torch.bmm(z_normed, z_normed.transpose(1, 2))
+
+        active = z_weights > 0.01
+        active_pair = active.unsqueeze(-1) & active.unsqueeze(-2)
+        diag_mask = ~torch.eye(K, dtype=torch.bool, device=z_seq.device).unsqueeze(0)
+        pair_mask = active_pair & diag_mask
+
+        n_pairs = pair_mask.float().sum(dim=(1, 2)).clamp(min=1)
+        mean_sim = (sim.clamp(min=0) * pair_mask.float()).sum(dim=(1, 2)) / n_pairs
+
+        excess = (mean_sim - self.target_sim).clamp(min=0)
+        return excess.mean(), mean_sim.mean().detach()
+
+    @staticmethod
+    def compute_similarity(
+        z_seq: Tensor, z_weights: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Compute mean intra-expression cosine similarity (no loss).
+
+        Useful as a diagnostic when diversity regularization is disabled.
+
+        Returns:
+            Tuple of ``(zero_loss, mean_sim)``.
+        """
+        K = z_seq.size(1)
+        z_normed = torch.nn.functional.normalize(z_seq, dim=-1)
+        sim = torch.bmm(z_normed, z_normed.transpose(1, 2))
+
+        active = z_weights > 0.01
+        active_pair = active.unsqueeze(-1) & active.unsqueeze(-2)
+        diag_mask = ~torch.eye(K, dtype=torch.bool, device=z_seq.device).unsqueeze(0)
+        pair_mask = active_pair & diag_mask
+
+        n_pairs = pair_mask.float().sum(dim=(1, 2)).clamp(min=1)
+        mean_sim = (sim.clamp(min=0) * pair_mask.float()).sum(dim=(1, 2)) / n_pairs
+        return torch.tensor(0.0, device=z_seq.device), mean_sim.mean()
+
+
 class Receiver(nn.Module):
     """Score candidates against the message via learned dot-product.
 

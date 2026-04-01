@@ -183,6 +183,132 @@ class DimSweepCommand(CLICommand):
         return 0
 
 
+class ExpressionSampleCommand(CLICommand):
+    """Sample expressions from a trained expression game checkpoint.
+
+    Loads an expression game checkpoint + embedding store, runs random
+    embeddings through the GRU z-sequence generator, decodes through
+    the frozen decoder, and prints English → IPA expression pairs.
+    """
+
+    @property
+    def name(self) -> str:
+        return "expression-sample"
+
+    @property
+    def help(self) -> str:
+        return "Sample decoded IPA expressions from a trained expression game"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--checkpoint", default="data/expression_game/best.pt",
+            help="Expression game checkpoint (default: data/expression_game/best.pt)",
+        )
+        parser.add_argument(
+            "--decoder-path", default="data/vae_decoder.pt",
+            help="Pretrained decoder checkpoint (default: data/vae_decoder.pt)",
+        )
+        parser.add_argument(
+            "--spm-path", default="data/spm.model",
+            help="Sentencepiece model (default: data/spm.model)",
+        )
+        parser.add_argument(
+            "--embedding-store", default="data/embeddings",
+            help="Embedding store directory (default: data/embeddings)",
+        )
+        parser.add_argument(
+            "--num-samples", type=int, default=10,
+            help="Number of samples to decode (default: 10)",
+        )
+        parser.add_argument(
+            "--max-segments", type=int, default=16,
+            help="Max segments (must match training, default: 16)",
+        )
+        parser.add_argument(
+            "--seed", type=int, default=42,
+            help="Random seed (default: 42)",
+        )
+        parser.add_argument(
+            "--device", default="cuda",
+            help="Compute device (default: cuda)",
+        )
+
+    def execute(self, args: argparse.Namespace) -> int:
+        import random
+
+        import torch
+
+        from lfm.agents.games.expression import ExpressionGame, ExpressionGameConfig
+        from lfm.embeddings.store import EmbeddingStore
+        from lfm.faculty import FacultyConfig, LanguageFaculty
+        from lfm.generator.config import GeneratorConfig
+
+        import sentencepiece as spm_lib
+
+        device = args.device
+        sp = spm_lib.SentencePieceProcessor(model_file=args.spm_path)
+        vocab_size = sp.vocab_size()
+        eos_id = vocab_size + 1
+
+        # Build expression game
+        cfg = ExpressionGameConfig(
+            decoder_path=args.decoder_path,
+            spm_path=args.spm_path,
+            max_segments=args.max_segments,
+            device=device,
+        )
+        faculty = LanguageFaculty(cfg.build_faculty_config()).to(device)
+        game = ExpressionGame(cfg, faculty).to(device)
+
+        # Load checkpoint
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        game.load_checkpoint_state(ckpt)
+        game.eval()
+
+        # Load embeddings
+        store = EmbeddingStore(args.embedding_store)
+        store.load()
+
+        # Load passage text if available
+        passages_path = store.store_dir / "passages.jsonl"
+        passages: list[str] | None = None
+        if passages_path.is_file():
+            import json as _json
+            with passages_path.open("r", encoding="utf-8") as fh:
+                passages = [_json.loads(line).get("text", "") for line in fh]
+
+        # Sample
+        rng = random.Random(args.seed)
+        indices = rng.sample(range(store.num_passages), min(args.num_samples, store.num_passages))
+
+        with torch.no_grad():
+            for i, idx in enumerate(indices):
+                emb = torch.from_numpy(store.get_embeddings([idx])).to(device)
+
+                # GRU z-sequence
+                z_seq, halt_probs, z_weights, num_segs = game.z_gen(emb)
+
+                # Multi-segment decode
+                tokens, gen_mask, seg_bounds = game._multiseg_decode(z_seq, z_weights)
+
+                # Decode to IPA
+                token_ids = tokens[0].tolist()
+                mask = gen_mask[0].tolist()
+                valid_ids = [t for t, m in zip(token_ids, mask) if m and t != eos_id and t < vocab_size]
+                ipa = sp.decode(valid_ids)
+
+                n_segs = int(num_segs[0].item())
+                if passages and idx < len(passages):
+                    print(f'[{i + 1}] ENG: "{passages[idx][:100]}"')
+                else:
+                    print(f'[{i + 1}] embedding #{idx}')
+                print(f'    IPA: {ipa}')
+                print(f'    ({len(valid_ids)} tokens, {n_segs} segments)')
+                print()
+
+        return 0
+
+
 def register_explore_group(
     parent_subparsers: argparse._SubParsersAction,
 ) -> None:
@@ -200,6 +326,7 @@ def register_explore_group(
 
     commands = [
         DimSweepCommand(),
+        ExpressionSampleCommand(),
     ]
 
     for cmd in commands:

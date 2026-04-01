@@ -156,6 +156,10 @@ class ExpressionCommand(CLICommand):
         parser.add_argument("--receiver-lr", type=float, default=3e-4)
         parser.add_argument("--curriculum-warmup", type=int, default=500)
         parser.add_argument("--no-curriculum", action="store_true")
+        parser.add_argument("--z-diversity-weight", type=float, default=0.0,
+                            help="z diversity regularization weight (default: 0, disabled)")
+        parser.add_argument("--z-diversity-target", type=float, default=None,
+                            help="Target z similarity (default: auto from pretrained distribution)")
         parser.add_argument("--device", default="cuda")
         parser.add_argument("--seed", type=int, default=42)
         parser.add_argument("--log-every", type=int, default=50)
@@ -182,6 +186,8 @@ class ExpressionCommand(CLICommand):
             max_tokens_per_segment=args.max_tokens_per_segment,
             lambda_p=args.lambda_p,
             kl_beta=args.kl_beta,
+            z_diversity_weight=args.z_diversity_weight,
+            z_diversity_target=args.z_diversity_target,
             encoder=MessageEncoderConfig(
                 num_layers=args.encoder_layers,
                 num_heads=args.encoder_heads,

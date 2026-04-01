@@ -103,15 +103,23 @@ class AgentTrainer:
 
         return anchor, distractors, hard_ratio
 
-    def _save_checkpoint(self, step: int, accuracy: float) -> None:
-        """Save latest checkpoint, and best if accuracy improved."""
+    def _save_checkpoint(
+        self, step: int, accuracy: float, hard_ratio: float = 1.0,
+    ) -> None:
+        """Save latest checkpoint, and best if accuracy improved.
+
+        Best checkpoint is only updated once the curriculum has reached
+        full difficulty (hard_ratio >= 1.0), so that early high-accuracy
+        scores at low difficulty don't lock in a weak checkpoint.
+        """
         ckpt = self.game.checkpoint_state()
         ckpt["step"] = step
         ckpt["accuracy"] = accuracy
+        ckpt["hard_ratio"] = hard_ratio
 
         torch.save(ckpt, str(self._output_dir / "latest.pt"))
 
-        if accuracy > self._best_acc:
+        if hard_ratio >= 1.0 and accuracy > self._best_acc:
             self._best_acc = accuracy
             torch.save(ckpt, str(self._output_dir / "best.pt"))
             logger.info(
@@ -184,6 +192,8 @@ class AgentTrainer:
                     extra += f"  z_sim={out['z_intra_sim'].item():.3f}"
                 if "halt_cost" in out:
                     extra += f"  halt={out['halt_cost'].item():.3f}"
+                if "z_div_loss" in out and out["z_div_loss"].item() > 0:
+                    extra += f"  div={out['z_div_loss'].item():.3f}"
                 logger.info(
                     "step=%d  loss=%.3f  acc=%.1f%%  "
                     "%s  hard=%.0f%%",
@@ -196,13 +206,13 @@ class AgentTrainer:
 
             # Checkpoint
             if step > 0 and step % cfg.checkpoint_every == 0:
-                self._save_checkpoint(step, out["accuracy"].item())
+                self._save_checkpoint(step, out["accuracy"].item(), hard_ratio)
 
         # Final checkpoint
         if cfg.steps > 0:
             with torch.no_grad():
                 final_acc = out["accuracy"].item()
-            self._save_checkpoint(cfg.steps, final_acc)
+            self._save_checkpoint(cfg.steps, final_acc, hard_ratio)
 
             results = {
                 "final_accuracy": final_acc,

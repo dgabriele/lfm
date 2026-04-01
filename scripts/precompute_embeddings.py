@@ -117,11 +117,13 @@ def main(
         "encoder": model_name,
     }
 
+    passages = [{"text": t} for t in texts]
     store = EmbeddingStore.create(
         store_dir=store_dir,
         embeddings=embeddings,
         cluster_labels=cluster_labels,
         metadata=metadata,
+        passages=passages,
     )
     logger.info(
         "Saved: %d embeddings, dim=%d, %d clusters → %s",
