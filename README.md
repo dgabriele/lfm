@@ -78,7 +78,7 @@ A multilingual VAE is trained on IPA-transcribed phrase-level constituents from 
 | Introflexive | Arabic |
 | Split-ergative | Hindi |
 
-The training corpus consists of 4M **leaf-level** phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) extracted via unified UD dependency-to-constituency conversion with Stanza dependency parsers. Only leaf constituents are kept -- the atomic building blocks of syntax. Vietnamese IPA is recovered via word-alignment of constituents against parent sentence IPA (fallback for languages where epitran's word-level IPA doesn't align with constituent spans). v5-leaf trains on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally. The expression game then composes these atomic phrases into multi-segment utterances. Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), tokenized with syllable-aligned sentencepiece BPE (`max_seq_len=96`).
+The training corpus consists of 4M **leaf-level** phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) extracted via unified UD dependency-to-constituency conversion with Stanza dependency parsers. Only leaf constituents are kept -- the atomic building blocks of syntax. Vietnamese IPA is recovered via word-alignment of constituents against parent sentence IPA (fallback for languages where epitran's word-level IPA doesn't align with constituent spans). v5-leaf trains on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally. The expression game then composes these atomic phrases into multi-segment utterances. Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), tokenized with syllable-aligned sentencepiece BPE (`max_seq_len=27`, auto-scaled from dataset).
 
 The decoder uses a **LinguisticDecoder** with architectural biases for natural language:
 - **Rotary Positional Embeddings (RoPE)**: translation-invariant pattern learning — a morpheme works the same way regardless of position
@@ -119,7 +119,7 @@ z (384-dim latent vector)
       |-- RoPE (translation-invariant positions)
       |-- Multi-scale attention heads (3/7/15/full token windows)
       +-- Weight-shared layers (2 unique × 4 applications = recursion)
-  → variable-length IPA tokens (max_seq_len=96)
+  → variable-length IPA tokens (max_seq_len=27)
 ```
 
 The **LinguisticDecoder** has architectural biases for natural language:
@@ -131,20 +131,21 @@ The **LinguisticDecoder** has architectural biases for natural language:
 
 The decoder is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay (per-epoch), DIP-VAE covariance regularization, and full resume support.
 
-**v5-leaf (current, leaf-level phrases)**: 4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 typologically diverse languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with word-alignment fallback for Vietnamese. Syllable-aligned BPE tokenization, 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally.
+**v5-leaf-27 (current, leaf-level phrases)**: 4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 typologically diverse languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with word-alignment fallback for Vietnamese. Syllable-aligned BPE tokenization, `max_seq_len=27` (auto-scaled from dataset), 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally.
 
 ### Pretraining results
 
-4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages, syllable-aligned BPE, 8-token z memory (latent_dim=256, lr=0.0005):
+4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages, syllable-aligned BPE, max_seq_len=27, 8-token z memory (latent_dim=256, lr=0.0005):
 
 | Metric | Value |
 |--------|-------|
-| CE (short, <20 BPE) | **0.01** |
-| CE (medium, 20-50 BPE) | **0.08** |
+| Val CE (short, <20 BPE) | **0.006** |
+| Val CE (medium, 20-50 BPE) | **0.065** |
+| Val CE (overall) | **0.0071** |
 | Variable-length output | mean 2.5 words (16.5 IPA chars), range 1-4 words |
-| Zipf exponent | corpus 1.004, decoded 0.980 (near-perfect Zipf law) |
+| Zipf exponent | corpus 1.004, decoded 1.058 (near-perfect Zipf law) |
 | Adaptiveness (input<->output length) | r=1.000 |
-| Adaptiveness (z_norm<->output_unique) | r=-0.718 |
+| Adaptiveness (z_norm<->output_unique) | r=-0.663 |
 | TTR | 1.000 (every word unique within a phrase) |
 | EOS rate | 1.00 (always produces well-formed EOS) |
 
@@ -156,16 +157,16 @@ The decoder is trained on IPA-transcribed text from typologically diverse langua
 
 ### Reconstruction
 
-The v5-leaf decoder achieves near-perfect reconstruction on leaf phrases (CE=0.01 for <20 BPE tokens, CE=0.08 for 20-50 BPE tokens). Leaf-only training means the decoder specializes in atomic phrase production, and the expression game composes them.
+The v5-leaf-27 decoder achieves near-perfect reconstruction on leaf phrases (val CE=0.006 for <20 BPE tokens, val CE=0.065 for 20-50 BPE tokens). Leaf-only training means the decoder specializes in atomic phrase production, and the expression game composes them.
 
 ### Cross-typological Interpolation
 
 The latent space supports smooth interpolation between typologically distant languages. Pairs are auto-selected by maximum z-distance across language family boundaries:
 
 <p align="center">
-  <img src="docs/static/images/interpolation_trajectories.png" width="60%" alt="Interpolation trajectories in t-SNE space" />
+  <img src="docs/static/images/interpolation_pca_trajectories.png" width="60%" alt="Interpolation trajectories in PCA space" />
 </p>
-<p align="center"><em>Arabic→Vietnamese (Afro-Asiatic introflexive → Austroasiatic isolating) and German→Turkish (Indo-European fusional → Turkic agglutinative). Decoded IPA transitions smoothly through intermediate typological regions.</em></p>
+<p align="center"><em>Korean→Vietnamese (Koreanic agglutinative → Austroasiatic isolating) and Arabic→Portuguese (Afro-Asiatic introflexive → Indo-European fusional). Decoded IPA transitions smoothly through intermediate typological regions.</em></p>
 
 ### Perturbation
 
@@ -266,8 +267,8 @@ src/lfm/
 Detailed visualization evidence for the model's structural properties — latent space organization, attention hierarchy, Zipf's law, smoothness, adaptive length, compositionality, cross-typological interpolation, and per-dimension latent sweeps — is presented in **[docs/structural-analysis.md](docs/structural-analysis.md)**, generated via the `lfm visualize all` and `lfm explore dim-sweep` CLI commands.
 
 Key findings:
-- **Adaptiveness**: input<->output length r=1.000, z_norm<->output_unique r=-0.718
-- **Zipfian output**: corpus exponent 1.004, decoded 0.980 — near-perfect Zipf law
+- **Adaptiveness**: input<->output length r=1.000, z_norm<->output_unique r=-0.663
+- **Zipfian output**: corpus exponent 1.004, decoded 1.058 — near-perfect Zipf law
 - **Variable-length output**: mean 2.5 words (16.5 IPA chars), range 1-4 words — atomic phrases
 - **TTR**: 1.000 (every word unique within a phrase)
 - **EOS rate**: 1.00 (always produces well-formed EOS)
@@ -598,14 +599,14 @@ A pretrained LM has morphological knowledge handed to it as tokenizer artifacts 
 
 ## Status
 
-**PoC pretraining validated.** The v5-leaf VAE decoder learns a well-structured latent space over 12 typologically diverse languages (4M leaf-level phrase constituents), with structural claims backed by visualization evidence:
+**PoC pretraining validated.** The v5-leaf-27 VAE decoder learns a well-structured latent space over 12 typologically diverse languages (4M leaf-level phrase constituents, max_seq_len=27), with structural claims backed by visualization evidence:
 
 - Latent space organizes languages typologically (t-SNE, clustering)
 - Multi-scale attention heads function as designed (entropy analysis)
-- Output follows near-perfect Zipfian distribution (corpus 1.004, decoded 0.980), refuting degenerate coding
+- Output follows near-perfect Zipfian distribution (corpus 1.004, decoded 1.058), refuting degenerate coding
 - Variable-length encoding: mean 2.5 words (16.5 IPA chars), range 1-4 words -- atomic phrases
-- Adaptive length: input<->output length r=1.000, z_norm<->output_unique r=-0.718
-- CE by length: short(<20 BPE)=0.01, med(20-50 BPE)=0.08
+- Adaptive length: input<->output length r=1.000, z_norm<->output_unique r=-0.663
+- Val CE by length: short(<20 BPE)=0.006, med(20-50 BPE)=0.065
 - TTR=1.000, EOS rate=1.00
 - Compositional structure present (power-law probe R-squared)
 

@@ -102,7 +102,7 @@ phonetic_label_smoothing: 0.0
 use_vq: false
 
 # --- Training ---
-batch_size: 160
+batch_size: 320
 gradient_accumulation_steps: 1
 # Mixed precision (float16 forward, float32 backward). Saves ~40% VRAM.
 use_amp: true
@@ -144,7 +144,7 @@ val_fraction: 0.1
 seed: 42
 device: cuda
 # Where to save the best decoder checkpoint (inference-only weights).
-output_path: /home/daniel/projects/lfm/data/models/v5-leaf/vae_decoder.pt
+output_path: /home/daniel/projects/lfm/data/models/v5-leaf-27/vae_decoder.pt
 
 # --- Topological regularization (disabled) ---
 # Penalizes z-distance vs output-distance mismatches (Lipschitz continuity).

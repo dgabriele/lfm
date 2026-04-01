@@ -169,7 +169,8 @@ class AttentionVisualization(BaseVisualization):
             )  # (1, S)
 
             seq_len = input_tensor.size(1)
-            memory = latent_to_decoder(z_i).unsqueeze(1)  # (1, 1, D)
+            _n_mem = latent_to_decoder.out_features // dec_tok.embedding_dim
+            memory = latent_to_decoder(z_i).reshape(1, _n_mem, -1)  # (1, K, D)
             tgt = dec_tok(input_tensor)  # (1, S, D)
 
             # Prepare mask

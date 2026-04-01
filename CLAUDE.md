@@ -116,12 +116,12 @@ src/lfm/
 
 ## Pretraining Results
 
-**v5-leaf (current, leaf-level phrases)**: 4M leaf-level phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with IPA-converted inline and word-alignment fallback for Vietnamese. Syllable-aligned BPE, 8-token z memory (latent_dim=256, lr=0.0005). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context). Each sample IS a short phrase, so the decoder learns phrase-level EOS naturally.
+**v5-leaf-27 (current, leaf-level phrases)**: 4M leaf-level phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with IPA-converted inline and word-alignment fallback for Vietnamese. Syllable-aligned BPE, max_seq_len=27 (auto-scaled from dataset), 8-token z memory (latent_dim=256, lr=0.0005). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context). Each sample IS a short phrase, so the decoder learns phrase-level EOS naturally.
 
-- **CE**: short(<20 BPE)=0.01, med(20-50 BPE)=0.08
+- **Val CE**: short(<20 BPE)=0.006, med(20-50 BPE)=0.065, overall=0.0071
 - **Variable-length output**: mean 2.5 words (16.5 IPA chars), range 1-4 words — atomic phrases
-- **Zipf exponent**: corpus 1.004, decoded 0.980 (near-perfect Zipf law)
-- **Adaptiveness**: input<->output length r=1.000, z_norm<->output_unique r=-0.718
+- **Zipf exponent**: corpus 1.004, decoded 1.058 (near-perfect Zipf law)
+- **Adaptiveness**: input<->output length r=1.000, z_norm<->output_unique r=-0.663
 - **TTR**: 1.000 (every word unique within a phrase)
 - **EOS rate**: 1.00 (always produces well-formed EOS)
 - **Architecture**: same as v4 (8 memory tokens, multi-scale attention, RoPE, weight sharing)

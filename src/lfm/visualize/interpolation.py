@@ -453,9 +453,7 @@ class InterpolationVisualization(BaseVisualization):
 
         unique_bg_codes = sorted(set(bg_langs))
         unique_families = sorted({get_label(c, "family") for c in unique_bg_codes})
-        family_colors = {
-            fam: _FAMILY_COLORS.get(fam, "#999999") for fam in unique_families
-        }
+        family_colors = get_color_map("family", keys=unique_families)
 
         for code in unique_bg_codes:
             mask = np.array([l == code for l in bg_langs])

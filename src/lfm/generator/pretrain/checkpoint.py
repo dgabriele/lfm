@@ -123,6 +123,7 @@ def save_resume_checkpoint(
         _ckpt["encoder_pooling"] = getattr(cfg, "encoder_pooling", "mean")
         _ckpt["decoder_hidden_dim"] = getattr(cfg, "decoder_hidden_dim", 512)
         _ckpt["latent_dim"] = getattr(cfg, "latent_dim", 256)
+        _ckpt["max_seq_len"] = getattr(cfg, "max_seq_len", 96)
     torch.save(_ckpt, resume_path)
 
 

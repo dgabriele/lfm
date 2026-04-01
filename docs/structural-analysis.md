@@ -1,6 +1,6 @@
 # Structural Analysis of the Pretrained VAE Decoder
 
-This document presents diagnostic evidence for the structural properties of the LFM multilingual VAE decoder, generated via the `lfm visualize all` CLI command and the `lfm explore dim-sweep` tool. All results are from the v5-leaf model trained on 4M leaf-level phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with word-alignment fallback for Vietnamese. CE at epoch 2: short(<20 BPE)=0.01, med(20-50 BPE)=0.08. Variable-length output: mean 2.5 words (16.5 IPA chars), range 1-4 words — atomic phrases. TTR=1.000, EOS rate=1.00.
+This document presents diagnostic evidence for the structural properties of the LFM multilingual VAE decoder, generated via the `lfm visualize all` CLI command and the `lfm explore dim-sweep` tool. All results are from the v5-leaf-27 model trained on 4M leaf-level phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with word-alignment fallback for Vietnamese. `max_seq_len=27` (auto-scaled from dataset, vs the previous fixed 96). Val CE at epoch 2: short(<20 BPE)=0.006, med(20-50 BPE)=0.065, overall=0.0071. Variable-length output: mean 2.5 words (16.5 IPA chars), range 1-4 words — atomic phrases. TTR=1.000, EOS rate=1.00.
 
 ---
 
@@ -56,7 +56,7 @@ This confirms the multi-scale attention windows function as intended — a lingu
 
 ## Zipf's law
 
-Decoded token frequencies follow a Zipfian rank-frequency distribution (corpus exponent 1.004, decoded exponent 0.980 — near-perfect Zipf law). This is significant because emergent communication systems typically produce anti-Zipfian (uniform) distributions. The Zipfian structure here is inherited from the frozen decoder's natural language prior, providing evidence against efficient coding collapse.
+Decoded token frequencies follow a Zipfian rank-frequency distribution (corpus exponent 1.004, decoded exponent 1.058 — near-perfect Zipf law). This is significant because emergent communication systems typically produce anti-Zipfian (uniform) distributions. The Zipfian structure here is inherited from the frozen decoder's natural language prior, providing evidence against efficient coding collapse.
 
 ![Zipf rank-frequency distribution](static/images/zipf_rank_frequency.png)
 
@@ -78,7 +78,7 @@ Interpolation continuity curves are monotonic — intermediate latent codes prod
 
 ## Adaptive length
 
-Decoded output length correlates near-perfectly with input length (r=1.000), and z norm correlates negatively with output uniqueness (r=-0.718), confirming that the decoder uses variable-length encoding — more complex inputs produce longer utterances. Output ranges from 1 to 4 words (mean 2.5 words, 16.5 IPA chars) — atomic phrases.
+Decoded output length correlates near-perfectly with input length (r=1.000), and z norm correlates negatively with output uniqueness (r=-0.663), confirming that the decoder uses variable-length encoding — more complex inputs produce longer utterances. Output ranges from 1 to 4 words (mean 2.5 words, 16.5 IPA chars) — atomic phrases.
 
 ![Adaptiveness: input vs output length](static/images/adaptiveness_input_vs_output_length.png)
 
@@ -102,9 +102,9 @@ PCA on the latent space shows 90% of variance captured by 3 principal components
 
 ## Cross-typological interpolation
 
-Interpolation trajectories between maximally distant language pairs (auto-selected in t-SNE space) show smooth paths through the latent space.
+Interpolation trajectories between maximally distant language pairs (auto-selected by z-distance, cross-family) show smooth paths through the latent space. PCA preserves global geometry better than t-SNE for trajectory visualization:
 
-![Interpolation trajectories in latent space](static/images/interpolation_trajectories.png)
+![Interpolation trajectories in PCA space](static/images/interpolation_pca_trajectories.png)
 
 The decoded IPA text along these trajectories shows gradual cross-typological transitions — phonotactic patterns, morphological complexity, and word structure shift continuously rather than switching abruptly.
 
