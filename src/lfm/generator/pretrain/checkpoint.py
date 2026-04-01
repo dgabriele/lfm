@@ -88,6 +88,7 @@ def save_resume_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     scaler: torch.amp.GradScaler,
     contrastive_proj: nn.Module | None = None,
+    cfg: object | None = None,
 ) -> None:
     """Save full training state for resume (every epoch)."""
     resume_path = Path(output_dir) / "vae_resume.pt"
@@ -111,6 +112,17 @@ def save_resume_checkpoint(
         _ckpt["contrastive_proj"] = contrastive_proj.state_dict()
     if modules.get("_residual_vq") is not None:
         _ckpt["residual_vq"] = modules["_residual_vq"].state_dict()
+    # Architecture metadata for checkpoint consumers (viz, agent games)
+    if cfg is not None:
+        _ckpt["num_memory_tokens"] = getattr(cfg, "num_memory_tokens", 1)
+        _ckpt["encoder_num_layers"] = getattr(cfg, "encoder_num_layers", 2)
+        _ckpt["attention_head_windows"] = list(getattr(cfg, "attention_head_windows", [3,3,7,7,15,15,0,0]))
+        _ckpt["attention_global_every"] = getattr(cfg, "attention_global_every", 7)
+        _ckpt["use_rope"] = getattr(cfg, "use_rope", True)
+        _ckpt["share_decoder_layers"] = getattr(cfg, "share_decoder_layers", True)
+        _ckpt["encoder_pooling"] = getattr(cfg, "encoder_pooling", "mean")
+        _ckpt["decoder_hidden_dim"] = getattr(cfg, "decoder_hidden_dim", 512)
+        _ckpt["latent_dim"] = getattr(cfg, "latent_dim", 256)
     torch.save(_ckpt, resume_path)
 
 

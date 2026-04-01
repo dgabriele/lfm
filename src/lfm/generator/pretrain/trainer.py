@@ -622,6 +622,7 @@ class VAEPretrainer:
                         optimizer=optimizer,
                         scheduler=scheduler,
                         scaler=scaler,
+                        cfg=cfg,
                     )
                     logger.info("Mid-epoch checkpoint at step %d", global_step)
 
@@ -740,6 +741,7 @@ class VAEPretrainer:
                 modules=modules, optimizer=optimizer,
                 scheduler=scheduler, scaler=scaler,
                 contrastive_proj=contrastive_proj,
+                cfg=cfg,
             )
 
         _shutdown_state["epoch"] = epoch + 1 if epoch >= start_epoch else start_epoch

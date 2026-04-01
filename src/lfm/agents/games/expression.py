@@ -371,7 +371,22 @@ class ExpressionGame(nn.Module):
         # PonderNet KL: regularize halt distribution toward geometric prior
         total_tokens = trimmed_mask.float().sum(dim=1)
         kl_loss = geometric_kl(halt_probs, self.config.lambda_p)
-        loss = receiver_loss + self.config.kl_beta * kl_loss
+
+        # Z redundancy: penalize consecutive z's that are too similar.
+        # If z_i ≈ z_{i-1}, the segment is redundant — the GRU should
+        # either halt or produce a distinct z.
+        z_normed = F.normalize(z_seq, dim=-1)
+        consec_sim = (z_normed[:, 1:] * z_normed[:, :-1]).sum(dim=-1)  # (B, K-1)
+        # Penalize positive similarity only — don't reward anti-correlation
+        consec_sim = consec_sim.clamp(min=0)
+        pair_weight = torch.min(z_weights[:, 1:], z_weights[:, :-1])
+        z_redundancy = (consec_sim * pair_weight).sum(dim=-1).mean()
+
+        loss = (
+            receiver_loss
+            + self.config.kl_beta * kl_loss
+            + self.config.kl_beta * z_redundancy
+        )
 
         with torch.no_grad():
             accuracy = (logits.argmax(1) == target_idx).float().mean()
@@ -442,6 +457,15 @@ class ExpressionGame(nn.Module):
         seg_active = z_weights > 0.01
         finished = ~seg_active[:, 0]
 
+        # Extend RoPE freqs for multi-segment decode beyond max_seq_len
+        rope_freqs = gen._rope_freqs
+        if rope_freqs is not None and rope_freqs.size(0) < max_total + 1:
+            from lfm.generator.layers import precompute_rope_freqs
+            rope_freqs = precompute_rope_freqs(
+                gen.config.decoder_hidden_dim // gen.config.decoder_num_heads,
+                max_total + 1, device=device,
+            )
+
         if is_linguistic:
             kv_cache = decoder.make_kv_cache(
                 batch, max_total + 1, device, dtype=torch.float16,
@@ -464,7 +488,7 @@ class ExpressionGame(nn.Module):
             mask_row = gen._full_causal_mask[:, 0:1, 0:1]
             out = decoder.forward_cached(
                 cur_embed, memory, kv_cache,
-                rope_freqs=gen._rope_freqs, tgt_mask_row=mask_row,
+                rope_freqs=rope_freqs, tgt_mask_row=mask_row,
             )
             kv_cache.advance()
         else:
@@ -511,7 +535,7 @@ class ExpressionGame(nn.Module):
                 ]
                 out = decoder.forward_cached(
                     new_embed, memory, kv_cache,
-                    rope_freqs=gen._rope_freqs, tgt_mask_row=mask_row,
+                    rope_freqs=rope_freqs, tgt_mask_row=mask_row,
                 )
                 kv_cache.advance()
             else:

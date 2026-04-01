@@ -175,21 +175,24 @@ class AgentTrainer:
             if step % cfg.log_every == 0:
                 extra = ""
                 if "num_segments" in out:
-                    extra += f"  segs={out['num_segments'].item():.1f}"
+                    n_segs = out['num_segments'].item()
+                    extra += f"  segs={n_segs:.1f}"
+                    expr_len = out['msg_lengths'].item()
+                    seg_len = expr_len / max(n_segs, 1)
+                    extra += f"  expr_len={expr_len:.0f}  seg_len={seg_len:.0f}"
                 if "z_intra_sim" in out:
                     extra += f"  z_sim={out['z_intra_sim'].item():.3f}"
                 if "halt_cost" in out:
                     extra += f"  halt={out['halt_cost'].item():.3f}"
                 logger.info(
                     "step=%d  loss=%.3f  acc=%.1f%%  "
-                    "avg_msg_len=%.0f  hard=%.0f%%%s  "
+                    "%s  hard=%.0f%%  "
                     "(chance=%.1f%%)",
                     step,
                     loss.item(),
                     out["accuracy"].item() * 100,
-                    out["msg_lengths"].item(),
+                    extra if extra else f"expr_len={out['msg_lengths'].item():.0f}",
                     hard_ratio * 100,
-                    extra,
                     chance * 100,
                 )
 
