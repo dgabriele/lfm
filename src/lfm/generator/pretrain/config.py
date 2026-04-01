@@ -108,6 +108,8 @@ class VAEPretrainConfig(LFMBaseConfig):
     use_rope: bool = True
     share_decoder_layers: bool = True
     max_seq_len: int = 96
+    """Max BPE token sequence length. 0 = auto-detect from dataset
+    (max sample length + 2 for BOS/EOS)."""
     encoder_pooling: str = "mean"  # "mean" or "attention"
     kl_weight: float = 0.5
     kl_free_bits: float = 0.5

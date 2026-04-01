@@ -70,8 +70,9 @@ attention_global_every: 7
 use_rope: true
 # Weight sharing: create num_layers/2 unique layers, apply each twice (recursion).
 share_decoder_layers: true
-# Max BPE token sequence length. Sequences longer than this are truncated.
-max_seq_len: 96
+# Max BPE token sequence length. 0 = auto-detect from dataset.
+# Auto adds +2 for BOS/EOS. For leaf constituents this gives ~27 vs the old fixed 96.
+max_seq_len: 0
 # How to pool variable-length encoder output to a single vector before z projection.
 # "mean" = masked mean pooling. "attention" = learned query cross-attention.
 encoder_pooling: mean

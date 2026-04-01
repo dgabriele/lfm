@@ -402,7 +402,19 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
 
     sp = spm_lib.SentencePieceProcessor(model_file=spm_path)
 
-    # 4. Build dataset and split.
+    # 4. Auto-scale max_seq_len if set to 0 (auto).
+    # Use the actual max token length in the corpus + 2 (BOS + EOS).
+    if cfg.max_seq_len <= 0:
+        actual_max = max(len(t) for t in token_ids_list)
+        cfg_dict = cfg.model_dump()
+        cfg_dict["max_seq_len"] = actual_max + 2  # +BOS +EOS
+        cfg = type(cfg)(**cfg_dict)
+        logger.info(
+            "Auto-scaled max_seq_len to %d (max token len %d + 2)",
+            cfg.max_seq_len, actual_max,
+        )
+
+    # Build dataset and split.
     # Identify word-boundary token IDs (sentencepiece ▁ prefix) so
     # truncated sequences are cut at word boundaries, not mid-word.
     word_boundary_ids = {
