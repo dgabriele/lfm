@@ -413,6 +413,103 @@ class InterpolationVisualization(BaseVisualization):
     # Figure 2: decoded text table
     # ------------------------------------------------------------------
 
+    def _fig_pca_trajectories(
+        self,
+        z: torch.Tensor,
+        languages: list[str],
+        interp_arrays: list[np.ndarray],
+        pair_labels: list[tuple[str, str]],
+    ) -> Figure:
+        """PCA projection with interpolation paths — preserves global geometry.
+
+        Unlike t-SNE, PCA is a linear projection that preserves distances,
+        so evenly-spaced interpolation points appear evenly-spaced.
+        """
+        from sklearn.decomposition import PCA
+
+        z_np = z.cpu().numpy() if isinstance(z, torch.Tensor) else np.asarray(z)
+
+        n_bg = min(len(z_np), _MAX_BG_POINTS)
+        rng = np.random.RandomState(self.config.seed)
+        bg_idx = rng.choice(len(z_np), size=n_bg, replace=False)
+        bg_z = z_np[bg_idx]
+        bg_langs = [languages[i] for i in bg_idx]
+
+        interp_concat = np.concatenate(interp_arrays, axis=0)
+        combined = np.concatenate([bg_z, interp_concat], axis=0)
+
+        pca = PCA(n_components=2, random_state=self.config.seed)
+        xy = pca.fit_transform(combined)
+
+        bg_xy = xy[:n_bg]
+        interp_xy = xy[n_bg:]
+
+        x_lo, x_hi = np.percentile(bg_xy[:, 0], [1, 99])
+        y_lo, y_hi = np.percentile(bg_xy[:, 1], [1, 99])
+        x_pad = (x_hi - x_lo) * 0.12
+        y_pad = (y_hi - y_lo) * 0.12
+
+        fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+
+        unique_bg_codes = sorted(set(bg_langs))
+        unique_families = sorted({get_label(c, "family") for c in unique_bg_codes})
+        family_colors = {
+            fam: _FAMILY_COLORS.get(fam, "#999999") for fam in unique_families
+        }
+
+        for code in unique_bg_codes:
+            mask = np.array([l == code for l in bg_langs])
+            fam = get_label(code, "family")
+            ax.scatter(
+                bg_xy[mask, 0], bg_xy[mask, 1],
+                s=6, alpha=0.15, c=family_colors[fam], edgecolors="none",
+            )
+
+        path_colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e"]
+        offset = 0
+        for pi, (lang_a, lang_b) in enumerate(pair_labels):
+            n_pts = interp_arrays[pi].shape[0]
+            pts = interp_xy[offset : offset + n_pts]
+            offset += n_pts
+            path_color = path_colors[pi % len(path_colors)]
+
+            ax.plot(
+                pts[:, 0], pts[:, 1],
+                color=path_color, linewidth=2.5, alpha=0.8, zorder=3,
+            )
+            for k in range(n_pts):
+                ax.scatter(
+                    pts[k, 0], pts[k, 1], s=30, zorder=4,
+                    facecolors="white" if 0 < k < n_pts - 1 else path_color,
+                    ec=path_color, lw=1.5, alpha=0.95,
+                )
+
+            name_a = get_label(lang_a, "name")
+            name_b = get_label(lang_b, "name")
+            ax.annotate(
+                name_a, pts[0], fontsize=9, fontweight="bold",
+                xytext=(8, 8), textcoords="offset points",
+                bbox=dict(boxstyle="round,pad=0.2", fc=path_color, alpha=0.2),
+            )
+            ax.annotate(
+                name_b, pts[-1], fontsize=9, fontweight="bold",
+                xytext=(8, -12), textcoords="offset points",
+                bbox=dict(boxstyle="round,pad=0.2", fc=path_color, alpha=0.2),
+            )
+            ax.plot([], [], color=path_color, linewidth=2.5,
+                    label=f"{name_a} → {name_b}")
+
+        ax.set_xlim(x_lo - x_pad, x_hi + x_pad)
+        ax.set_ylim(y_lo - y_pad, y_hi + y_pad)
+        var = pca.explained_variance_ratio_
+        ax.set_xlabel(f"PC1 ({var[0]*100:.1f}% variance)", fontsize=11)
+        ax.set_ylabel(f"PC2 ({var[1]*100:.1f}% variance)", fontsize=11)
+        ax.set_title("Latent Interpolation (PCA — preserves global geometry)", fontsize=13)
+        ax.legend(loc="upper right", frameon=True, framealpha=0.9, fontsize=10)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig
+
     def _fig_decoded_table(
         self,
         interp_arrays: list[np.ndarray],
@@ -586,13 +683,20 @@ class InterpolationVisualization(BaseVisualization):
             z, languages, interp_arrays, valid_pairs
         )
 
-        # Figure 2: decoded text table
+        # Figure 2: PCA trajectories (preserves global geometry)
+        fig_pca = self._fig_pca_trajectories(
+            z, languages, interp_arrays, valid_pairs
+        )
+
+        # Figure 3: decoded text table
         fig_text = self._fig_decoded_table(interp_arrays, valid_pairs, data)
 
-        return [fig_tsne, fig_text]
+        return [fig_tsne, fig_pca, fig_text]
 
     def save(
         self, figures: list[Figure], suffixes: list[str] | None = None
     ) -> list:
         """Save with descriptive suffixes."""
-        return super().save(figures, suffixes=["trajectories", "decoded"])
+        return super().save(
+            figures, suffixes=["trajectories", "pca_trajectories", "decoded"],
+        )
