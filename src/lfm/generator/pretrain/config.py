@@ -92,6 +92,12 @@ class VAEPretrainConfig(LFMBaseConfig):
     num_memory_tokens: int = 1
     max_batches_per_epoch: int | None = None
     """Cap batches per epoch for smoke testing.  None = full epoch."""
+    length_boost_threshold: int = 0
+    """BPE token length above which samples get boosted sampling weight.
+    0 = disabled (uniform random).  E.g. 15 = samples with >=15 tokens
+    get ``length_boost_factor`` extra weight."""
+    length_boost_factor: float = 10.0
+    """Sampling weight multiplier for samples above ``length_boost_threshold``."""
     checkpoint_every_steps: int | None = None
     """Save a resumable checkpoint every N steps.  None = end of epoch only."""
     syllable_aligned_bpe: bool = False

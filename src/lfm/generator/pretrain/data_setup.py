@@ -479,23 +479,29 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> PreprocessedData:
             drop_last=True,  # InfoNCE needs consistent batch sizes
         )
     else:
-        # Gentle length boost: give longer sequences a mild sampling
-        # weight so they appear ~500/batch instead of ~22/batch,
-        # without overwhelming the short majority.
-        _train_indices = list(train_dataset.indices)
-        _train_lengths = [len(token_ids_list[i]) for i in _train_indices]
-        _len_arr = torch.tensor(_train_lengths, dtype=torch.float32)
-        # Weight: 1.0 for short (<15 BPE), 10.0 for medium (15+)
-        _weights = torch.where(_len_arr >= 15, 10.0, 1.0)
-        _sampler = torch.utils.data.WeightedRandomSampler(
-            _weights, num_samples=len(_weights), replacement=True,
-        )
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=cfg.batch_size,
-            sampler=_sampler,
-            drop_last=True,
-        )
+        _boost_thresh = getattr(cfg, "length_boost_threshold", 0)
+        if _boost_thresh > 0:
+            _boost_factor = getattr(cfg, "length_boost_factor", 10.0)
+            _train_indices = list(train_dataset.indices)
+            _train_lengths = [len(token_ids_list[i]) for i in _train_indices]
+            _len_arr = torch.tensor(_train_lengths, dtype=torch.float32)
+            _weights = torch.where(_len_arr >= _boost_thresh, _boost_factor, 1.0)
+            _sampler = torch.utils.data.WeightedRandomSampler(
+                _weights, num_samples=len(_weights), replacement=True,
+            )
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=cfg.batch_size,
+                sampler=_sampler,
+                drop_last=True,
+            )
+        else:
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=cfg.batch_size,
+                shuffle=True,
+                drop_last=True,
+            )
 
     interleaved_loader = None
     if _use_constituent_context:
