@@ -28,6 +28,7 @@ from lfm.agents.components import (
     ZDistributionLoss,
     ZDiversityLoss,
 )
+from lfm.agents.diffusion import DiffusionZGenerator, length_distribution_loss
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
 from lfm.agents.decode import rerun_decoder_multiseg_with_grad
 from lfm.config.base import LFMBaseConfig
@@ -53,10 +54,18 @@ class ExpressionGameConfig(LFMBaseConfig):
     vq_codebook_path: str | None = None
     vq_residual_alpha: float = 1.0
 
-    # GRU z-sequence generator
+    # z-sequence generator
+    z_generator: str = "gru"  # "gru" or "diffusion"
     z_hidden_dim: int = 512
     max_segments: int = 8
     max_tokens_per_segment: int = 48
+
+    # Diffusion-specific (only when z_generator="diffusion")
+    diffusion_steps: int = 4
+    diffusion_layers: int = 4
+    diffusion_heads: int = 8
+    target_segments: float = 2.5
+    length_weight: float = 0.5
 
     # PonderNet geometric prior: lambda_p controls expected segment count.
     # E[K] = 1/lambda_p.  lambda_p=0.5 → ~2 segments, 0.3 → ~3.3, 0.2 → ~5.
@@ -315,15 +324,32 @@ class ExpressionGame(nn.Module):
         with torch.no_grad():
             faculty(torch.randn(1, config.embedding_dim, device=device))
 
-        self.z_gen = ZSequenceGenerator(
-            input_dim=config.embedding_dim,
-            hidden_dim=config.z_hidden_dim,
-            latent_dim=gen._latent_dim,
-            max_segments=config.max_segments,
-            use_halt=config.use_halt,
-            z_mean=gen._z_mean if gen._z_stats_initialized else None,
-            z_std=gen._z_std if gen._z_stats_initialized else None,
-        )
+        _z_mean = gen._z_mean if gen._z_stats_initialized else None
+        _z_std = gen._z_std if gen._z_stats_initialized else None
+
+        if config.z_generator == "diffusion":
+            self.z_gen = DiffusionZGenerator(
+                input_dim=config.embedding_dim,
+                latent_dim=gen._latent_dim,
+                d_model=config.z_hidden_dim,
+                max_segments=config.max_segments,
+                num_steps=config.diffusion_steps,
+                num_layers=config.diffusion_layers,
+                num_heads=config.diffusion_heads,
+                z_mean=_z_mean,
+                z_std=_z_std,
+                target_segments=config.target_segments,
+            )
+        else:
+            self.z_gen = ZSequenceGenerator(
+                input_dim=config.embedding_dim,
+                hidden_dim=config.z_hidden_dim,
+                latent_dim=gen._latent_dim,
+                max_segments=config.max_segments,
+                use_halt=config.use_halt,
+                z_mean=_z_mean,
+                z_std=_z_std,
+            )
         hidden_dim = gen.config.decoder_hidden_dim
 
         # Hidden-state path (auxiliary — gradient highway)
@@ -369,6 +395,7 @@ class ExpressionGame(nn.Module):
             "surface_encoder": self.surface_encoder.state_dict(),
             "receiver": self.receiver.state_dict(),
             # Architectural config (must match on resume)
+            "z_generator": cfg.z_generator,
             "embedding_dim": cfg.embedding_dim,
             "z_hidden_dim": cfg.z_hidden_dim,
             "max_segments": cfg.max_segments,
@@ -429,8 +456,12 @@ class ExpressionGame(nn.Module):
         device = anchor.device
         num_candidates = distractors.size(1) + 1
 
-        # GRU z-sequence (with grad)
-        z_seq, halt_probs, z_weights, num_segments = self.z_gen(anchor)
+        # z-sequence generation (with grad)
+        if isinstance(self.z_gen, DiffusionZGenerator):
+            z_seq, z_weights, num_segments = self.z_gen(anchor)
+            halt_probs = None
+        else:
+            z_seq, halt_probs, z_weights, num_segments = self.z_gen(anchor)
 
         # Phase 1: multi-segment decode (no_grad)
         with torch.no_grad():
@@ -505,14 +536,18 @@ class ExpressionGame(nn.Module):
 
         receiver_loss = surface_weight * surface_loss + hs_weight * hidden_loss
 
-        # PonderNet KL (only when using cumulative halting)
+        # Length regularization
         total_tokens = trimmed_mask.float().sum(dim=1)
-        if cfg.use_halt and cfg.kl_beta > 0:
+        if isinstance(self.z_gen, DiffusionZGenerator):
+            len_loss = length_distribution_loss(z_weights, cfg.target_segments)
+            loss = receiver_loss + cfg.length_weight * len_loss
+            kl_loss = len_loss  # Reuse key for logging
+        elif cfg.use_halt and cfg.kl_beta > 0:
             kl_loss = geometric_kl(halt_probs, cfg.lambda_p)
+            loss = receiver_loss + cfg.kl_beta * kl_loss
         else:
             kl_loss = torch.tensor(0.0, device=device)
-
-        loss = receiver_loss + cfg.kl_beta * kl_loss
+            loss = receiver_loss
 
         # z diversity regularization
         if self.z_diversity is not None:

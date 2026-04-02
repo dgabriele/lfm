@@ -156,6 +156,16 @@ class ExpressionCommand(CLICommand):
         parser.add_argument("--receiver-lr", type=float, default=3e-4)
         parser.add_argument("--curriculum-warmup", type=int, default=500)
         parser.add_argument("--no-curriculum", action="store_true")
+        parser.add_argument("--z-generator", choices=["gru", "diffusion"], default="gru",
+                            help="Z-sequence generator type (default: gru)")
+        parser.add_argument("--diffusion-steps", type=int, default=4,
+                            help="Diffusion reverse steps (default: 4)")
+        parser.add_argument("--diffusion-layers", type=int, default=4,
+                            help="Diffusion denoiser layers (default: 4)")
+        parser.add_argument("--target-segments", type=float, default=2.5,
+                            help="Target E[K] for length regularization (default: 2.5)")
+        parser.add_argument("--length-weight", type=float, default=0.5,
+                            help="Length distribution loss weight (default: 0.5)")
         parser.add_argument("--no-halt", action="store_true",
                             help="Disable PonderNet halting (always use all segments)")
         parser.add_argument("--z-diversity-weight", type=float, default=0.0,
@@ -192,6 +202,11 @@ class ExpressionCommand(CLICommand):
             z_hidden_dim=args.z_hidden_dim,
             max_segments=args.max_segments,
             max_tokens_per_segment=args.max_tokens_per_segment,
+            z_generator=args.z_generator,
+            diffusion_steps=args.diffusion_steps,
+            diffusion_layers=args.diffusion_layers,
+            target_segments=args.target_segments,
+            length_weight=args.length_weight,
             use_halt=not args.no_halt,
             lambda_p=args.lambda_p,
             kl_beta=args.kl_beta,
