@@ -30,6 +30,7 @@ from lfm.agents.components import (
     ZDiversityLoss,
 )
 from lfm.agents.diffusion import DiffusionZGenerator, length_distribution_loss
+from lfm.agents.refinement import RefinementDenoiser
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
 from lfm.agents.decode import rerun_decoder_multiseg_with_grad
 from lfm.config.base import LFMBaseConfig
@@ -89,6 +90,12 @@ class ExpressionGameConfig(LFMBaseConfig):
     # annealed from hidden_state_weight -> 0 over hidden_state_anneal_steps.
     hidden_state_weight: float = 1.0
     hidden_state_anneal_steps: int = 1000
+
+    # Phase 2 mode: "decoder" = frozen decoder re-run (original),
+    # "refinement" = lightweight diffusion denoiser (lower VRAM, bidirectional)
+    phase2_mode: str = "decoder"
+    refinement_layers: int = 4
+    refinement_steps: int = 4
 
     # IPA-to-IPA receiver: score based on IPA token representations
     # instead of raw embeddings. Forces surface forms to be discriminative.
@@ -390,6 +397,16 @@ class ExpressionGame(nn.Module):
         else:
             self.ipa_encoder = None
 
+        # Refinement denoiser (replaces Phase 2 decoder re-run)
+        if config.phase2_mode == "refinement":
+            self.refinement = RefinementDenoiser(
+                hidden_dim=hidden_dim,
+                num_layers=config.refinement_layers,
+                num_steps=config.refinement_steps,
+            )
+        else:
+            self.refinement = None
+
         # IPA cache (populated by build_ipa_cache before training)
         self._ipa_cache_tokens: Tensor | None = None
         self._ipa_cache_masks: Tensor | None = None
@@ -445,7 +462,9 @@ class ExpressionGame(nn.Module):
             "surface_encoder": self.surface_encoder.state_dict(),
             "receiver": self.receiver.state_dict(),
             **({"ipa_encoder": self.ipa_encoder.state_dict()} if self.ipa_encoder is not None else {}),
+            **({"refinement": self.refinement.state_dict()} if self.refinement is not None else {}),
             # Architectural config (must match on resume)
+            "phase2_mode": cfg.phase2_mode,
             "use_ipa_receiver": cfg.use_ipa_receiver,
             "z_generator": cfg.z_generator,
             "embedding_dim": cfg.embedding_dim,
@@ -477,6 +496,8 @@ class ExpressionGame(nn.Module):
         self.receiver.load_state_dict(ckpt["receiver"])
         if self.ipa_encoder is not None and "ipa_encoder" in ckpt:
             self.ipa_encoder.load_state_dict(ckpt["ipa_encoder"])
+        if self.refinement is not None and "refinement" in ckpt:
+            self.refinement.load_state_dict(ckpt["refinement"])
 
     def trainable_param_groups(self) -> list[dict]:
         """Return optimizer param groups with per-group learning rates."""
@@ -488,6 +509,8 @@ class ExpressionGame(nn.Module):
         ]
         if self.ipa_encoder is not None:
             groups.append({"params": list(self.ipa_encoder.parameters()), "lr": self.config.receiver_lr})
+        if self.refinement is not None:
+            groups.append({"params": list(self.refinement.parameters()), "lr": self.config.receiver_lr})
         return groups
 
     def forward(
@@ -540,11 +563,31 @@ class ExpressionGame(nn.Module):
             self._seen_total += tokens.size(0)
             surface_global = len(self._seen_hashes) / max(self._seen_total, 1)
 
-        # Phase 2: re-run decoder with gradients
-        hidden = rerun_decoder_multiseg_with_grad(
-            self.gen, z_seq, z_weights, tokens, gen_mask, seg_bounds,
-        )
-        trimmed_mask = gen_mask[:, :hidden.size(1)]
+        # Phase 2: produce hidden states with gradients to z
+        if self.refinement is not None:
+            # Refinement denoiser: lightweight diffusion over token embeddings
+            from lfm.agents.decode import _calibrate_or_quantize
+            actual_max = int(gen_mask.float().sum(dim=1).max().item())
+            _tokens_trim = tokens[:, :actual_max]
+            _mask_trim = gen_mask[:, :actual_max]
+
+            tok_emb = self.gen.token_embedding(_tokens_trim).detach()
+
+            weighted_z = z_weights.unsqueeze(-1) * z_seq
+            z_flat = weighted_z.reshape(batch * z_seq.size(1), -1)
+            z_dec = _calibrate_or_quantize(self.gen, z_flat)
+            z_memories = self.gen.latent_to_decoder(z_dec).reshape(
+                batch, z_seq.size(1) * self.gen._num_memory_tokens, -1,
+            )
+
+            hidden = self.refinement(tok_emb, z_memories, _mask_trim)
+            trimmed_mask = _mask_trim
+        else:
+            # Original: frozen decoder re-run with gradients
+            hidden = rerun_decoder_multiseg_with_grad(
+                self.gen, z_seq, z_weights, tokens, gen_mask, seg_bounds,
+            )
+            trimmed_mask = gen_mask[:, :hidden.size(1)]
 
         # Per-position segment weights for halt gradient flow.
         # All segments contribute equally to the message (no attenuation),

@@ -170,6 +170,10 @@ class ExpressionCommand(CLICommand):
                             help="Target E[K] for length regularization (default: 2.5)")
         parser.add_argument("--length-weight", type=float, default=0.5,
                             help="Length distribution loss weight (default: 0.5)")
+        parser.add_argument("--phase2-mode", choices=["decoder", "refinement"], default="decoder",
+                            help="Phase 2 mode: 'decoder' (frozen re-run) or 'refinement' (diffusion denoiser)")
+        parser.add_argument("--refinement-layers", type=int, default=4)
+        parser.add_argument("--refinement-steps", type=int, default=4)
         parser.add_argument("--use-ipa-receiver", action="store_true",
                             help="Score based on IPA token representations instead of raw embeddings")
         parser.add_argument("--ipa-cache-refresh", type=int, default=0,
@@ -224,6 +228,9 @@ class ExpressionCommand(CLICommand):
             z_hidden_dim=_get("z_hidden_dim", args.z_hidden_dim, 512),
             max_segments=_get("max_segments", args.max_segments, 8),
             max_tokens_per_segment=_get("max_tokens_per_segment", args.max_tokens_per_segment, 48),
+            phase2_mode=_get("phase2_mode", args.phase2_mode, "decoder"),
+            refinement_layers=_get("refinement_layers", args.refinement_layers, 4),
+            refinement_steps=_get("refinement_steps", args.refinement_steps, 4),
             use_ipa_receiver=_get("use_ipa_receiver", args.use_ipa_receiver, False),
             ipa_cache_refresh=_get("ipa_cache_refresh", args.ipa_cache_refresh, 0),
             z_generator=_get("z_generator", args.z_generator, "gru"),
