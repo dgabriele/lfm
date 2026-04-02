@@ -527,6 +527,8 @@ class VAEPretrainer:
                         extra_parts.append(
                             f"KL={kl_loss.item():.3f} kl_scale={kl_scale:.4f} active={active}/{cfg.latent_dim}"
                         )
+                    if z_stats_initialized:
+                        extra_parts.append(f"z_std={z_running_std.mean().item():.4f}")
                     if cfg.z_var_weight > 0:
                         extra_parts.append(f"zvar={z_var_loss.item():.4f}")
                     if cfg.dip_weight > 0:

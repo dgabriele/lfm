@@ -22,7 +22,12 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
-from lfm.agents.components import MessageEncoder, Receiver, ZDiversityLoss
+from lfm.agents.components import (
+    MessageEncoder,
+    Receiver,
+    ZDistributionLoss,
+    ZDiversityLoss,
+)
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
 from lfm.agents.decode import rerun_decoder_multiseg_with_grad
 from lfm.config.base import LFMBaseConfig
@@ -55,6 +60,8 @@ class ExpressionGameConfig(LFMBaseConfig):
 
     # PonderNet geometric prior: lambda_p controls expected segment count.
     # E[K] = 1/lambda_p.  lambda_p=0.5 → ~2 segments, 0.3 → ~3.3, 0.2 → ~5.
+    # Set use_halt=False to always generate all max_segments (no halting).
+    use_halt: bool = True
     lambda_p: float = 0.4
     kl_beta: float = 0.5
 
@@ -64,6 +71,7 @@ class ExpressionGameConfig(LFMBaseConfig):
     # close enough for linguistic coherence.
     z_diversity_weight: float = 0.0
     z_diversity_target: float | None = None
+    z_distribution_weight: float = 0.0
 
     # Surface bottleneck: primary loss scores on token-level representations
     # (through output_head -> softmax -> token_embedding), forcing surface
@@ -141,12 +149,14 @@ class ZSequenceGenerator(nn.Module):
         hidden_dim: int,
         latent_dim: int,
         max_segments: int = 8,
+        use_halt: bool = True,
         z_mean: Tensor | None = None,
         z_std: Tensor | None = None,
     ) -> None:
         super().__init__()
         self.max_segments = max_segments
         self.latent_dim = latent_dim
+        self.use_halt = use_halt
 
         # z_0: direct projection (discriminative from step 0)
         self.z0_proj = nn.Linear(input_dim, latent_dim)
@@ -160,6 +170,12 @@ class ZSequenceGenerator(nn.Module):
         self.gru = nn.GRUCell(latent_dim, hidden_dim)
         self.z_proj = nn.Linear(hidden_dim, latent_dim)
         self.halt_head = nn.Linear(hidden_dim, 1)
+
+        # Initialize gate bias to start closed (sigmoid(-3) ≈ 0.05).
+        # Segment 0 always has weight 1.0; later segments must learn
+        # to open their gates when the content demands it.
+        with torch.no_grad():
+            self.halt_head.bias.fill_(-3.0)
 
         # Scale z projections to match the pretrained z distribution
         if z_mean is not None and z_std is not None:
@@ -201,21 +217,18 @@ class ZSequenceGenerator(nn.Module):
         # GRU hidden state
         h = self.h_proj(embedding)
 
-        # Track which samples have halted
-        running = torch.ones(batch, device=device)
-
         for i in range(1, K):
             h = self.gru(z, h)
             z = self.z_proj(h)
-            lam = torch.sigmoid(self.halt_head(h)).squeeze(-1)
-
-            halts[:, i] = lam
             z_seq[:, i] = z
 
-            # Probability of being active at step i = prod(1-halt) up to i-1
-            # Weight = running probability (not yet halted)
-            weights[:, i] = running * (1.0 - lam)
-            running = running * (1.0 - lam)
+            if self.use_halt:
+                # Independent gate: each segment decides its own weight.
+                # No cumulative product — segment 3 can contribute
+                # even if segment 2 doesn't.
+                gate = torch.sigmoid(self.halt_head(h)).squeeze(-1)
+                halts[:, i] = gate
+                weights[:, i] = gate
 
         # Soft segment count = sum of weights
         num_segments = weights.sum(dim=-1)
@@ -307,6 +320,7 @@ class ExpressionGame(nn.Module):
             hidden_dim=config.z_hidden_dim,
             latent_dim=gen._latent_dim,
             max_segments=config.max_segments,
+            use_halt=config.use_halt,
             z_mean=gen._z_mean if gen._z_stats_initialized else None,
             z_std=gen._z_std if gen._z_stats_initialized else None,
         )
@@ -336,6 +350,11 @@ class ExpressionGame(nn.Module):
         else:
             self.z_diversity = None
 
+        if config.z_distribution_weight > 0 and gen._z_stats_initialized:
+            self.z_distribution = ZDistributionLoss(gen._z_mean, gen._z_std)
+        else:
+            self.z_distribution = None
+
     @property
     def gen(self):
         """Shortcut to the underlying generator."""
@@ -355,9 +374,11 @@ class ExpressionGame(nn.Module):
             "max_segments": cfg.max_segments,
             "max_tokens_per_segment": cfg.max_tokens_per_segment,
             "num_memory_tokens": cfg.num_memory_tokens,
+            "use_halt": cfg.use_halt,
             "lambda_p": cfg.lambda_p,
             "kl_beta": cfg.kl_beta,
             "z_diversity_weight": cfg.z_diversity_weight,
+            "z_distribution_weight": cfg.z_distribution_weight,
             "hidden_state_weight": cfg.hidden_state_weight,
             "hidden_state_anneal_steps": cfg.hidden_state_anneal_steps,
             "encoder_num_layers": cfg.encoder.num_layers,
@@ -423,6 +444,15 @@ class ExpressionGame(nn.Module):
         )
         trimmed_mask = gen_mask[:, :hidden.size(1)]
 
+        # Per-position segment weights for halt gradient flow.
+        # All segments contribute equally to the message (no attenuation),
+        # but the weights are available for auxiliary losses.
+        from lfm.agents.decode import _compute_segment_assignment
+        seg_assign = _compute_segment_assignment(
+            seg_bounds, trimmed_mask.size(1), z_seq.size(1), device,
+        )
+        per_pos_weight = z_weights.gather(1, seg_assign)  # (B, T)
+
         # Surface path: project hidden → logits → soft tokens → re-embed
         # Straight-through: forward uses argmax tokens, backward uses softmax
         logits_per_pos = self.gen.output_head(hidden)  # (B, T, V)
@@ -432,7 +462,9 @@ class ExpressionGame(nn.Module):
         straight_through = (hard_onehot - soft_probs).detach() + soft_probs
         surface_repr = straight_through @ self.gen.token_embedding.weight  # (B, T, H)
 
-        surface_message = self.surface_encoder(surface_repr, trimmed_mask)
+        surface_message = self.surface_encoder(
+            surface_repr * per_pos_weight.unsqueeze(-1), trimmed_mask,
+        )
 
         # Prepare candidates (shared between paths)
         candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
@@ -444,31 +476,41 @@ class ExpressionGame(nn.Module):
         candidates = torch.gather(candidates, 1, perm_expanded)
         target_idx = (perm == 0).long().argmax(dim=1)
 
-        # Surface loss (primary)
-        surface_logits = self.receiver(surface_message, candidates)
-        surface_loss = F.cross_entropy(surface_logits, target_idx)
-
-        # Hidden-state loss (auxiliary, annealed)
         cfg = self.config
+
+        # Hidden-state loss — scale by per-segment gate for direct
+        # gradient to the gate head
+        hidden_message = self.msg_encoder(
+            hidden * per_pos_weight.unsqueeze(-1), trimmed_mask,
+        )
+        hidden_logits = self.receiver(hidden_message, candidates)
+        hidden_loss = F.cross_entropy(hidden_logits, target_idx)
+
+        # Surface loss (anneals IN as hidden-state anneals OUT)
         anneal = cfg.hidden_state_anneal_steps
         if anneal > 0 and cfg.hidden_state_weight > 0:
             t = min(step / anneal, 1.0)
             hs_weight = cfg.hidden_state_weight * (1.0 - t)
+            surface_weight = t
         else:
             hs_weight = cfg.hidden_state_weight
+            surface_weight = 0.0 if hs_weight > 0 else 1.0
 
-        if hs_weight > 0:
-            hidden_message = self.msg_encoder(hidden, trimmed_mask)
-            hidden_logits = self.receiver(hidden_message, candidates)
-            hidden_loss = F.cross_entropy(hidden_logits, target_idx)
+        if surface_weight > 0:
+            surface_logits = self.receiver(surface_message, candidates)
+            surface_loss = F.cross_entropy(surface_logits, target_idx)
         else:
-            hidden_loss = torch.tensor(0.0, device=device)
+            surface_logits = hidden_logits
+            surface_loss = torch.tensor(0.0, device=device)
 
-        receiver_loss = surface_loss + hs_weight * hidden_loss
+        receiver_loss = surface_weight * surface_loss + hs_weight * hidden_loss
 
-        # PonderNet KL: regularize halt distribution toward geometric prior
+        # PonderNet KL (only when using cumulative halting)
         total_tokens = trimmed_mask.float().sum(dim=1)
-        kl_loss = geometric_kl(halt_probs, cfg.lambda_p)
+        if cfg.use_halt and cfg.kl_beta > 0:
+            kl_loss = geometric_kl(halt_probs, cfg.lambda_p)
+        else:
+            kl_loss = torch.tensor(0.0, device=device)
 
         loss = receiver_loss + cfg.kl_beta * kl_loss
 
@@ -483,6 +525,15 @@ class ExpressionGame(nn.Module):
                 )
             div_loss = torch.tensor(0.0, device=device)
 
+        # z distribution matching
+        if self.z_distribution is not None:
+            z_all = z_seq.reshape(-1, z_seq.size(-1))
+            dist_loss, z_coverage = self.z_distribution(z_all)
+            loss = loss + cfg.z_distribution_weight * dist_loss
+        else:
+            dist_loss = torch.tensor(0.0, device=device)
+            z_coverage = torch.tensor(0.0, device=device)
+
         with torch.no_grad():
             accuracy = (surface_logits.argmax(1) == target_idx).float().mean()
 
@@ -496,6 +547,8 @@ class ExpressionGame(nn.Module):
             "num_segments": num_segments.mean().detach(),
             "z_intra_sim": z_intra_sim,
             "z_div_loss": div_loss.detach(),
+            "z_dist_loss": dist_loss.detach(),
+            "z_coverage": z_coverage,
             "hs_weight": torch.tensor(hs_weight),
             "surface_loss": surface_loss.detach(),
         }

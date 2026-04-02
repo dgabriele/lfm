@@ -1,0 +1,114 @@
+# ==========================================================================
+# VAE decoder pretraining — v6 (full constituency tree, all levels)
+#
+# Standard VAE on ALL phrase constituents (leaf + internal), not just
+# leaves. The decoder learns to produce output ranging from atomic NPs
+# (2-3 words) to full clauses (10+ words). z controls where on that
+# spectrum the output lands. max_seq_len auto-scales from dataset.
+#
+# 12 languages, ~11.6M samples, variable length.
+# ==========================================================================
+
+# --- Data source ---
+dataset_path: /home/daniel/projects/lfm/data/datasets/constituents-12lang-all
+corpus_loader: leipzig
+corpus_loader_config:
+  data_dir: data/leipzig
+  languages:
+    - eng
+    - deu
+    - por
+    - rus
+    - tur
+    - fin
+    - hun
+    - kor
+    - vie
+    - ind
+    - ara
+    - hin
+
+# --- Constituency training mode ---
+constituent_context: false
+
+# --- Tokenizer ---
+spm_vocab_size: 8000
+syllable_aligned_bpe: true
+
+# --- Model architecture ---
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+
+# --- Linguistic attention structure ---
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+# Auto-scale from dataset — full constituency tree has longer sequences.
+max_seq_len: 0
+encoder_pooling: mean
+
+# --- KL divergence ---
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+kl_beta: 0.0
+
+# --- Auxiliary losses ---
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+use_vq: false
+
+# --- Training ---
+batch_size: 80
+gradient_accumulation_steps: 4
+use_amp: true
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 3
+
+# --- Latent regularization ---
+z_var_weight: 0.0
+z_var_target: 0.05
+z_var_floor: 0.01
+# Word dropout: force z-dependence by randomly zeroing decoder inputs.
+word_dropout: 0.3
+word_dropout_min: 0.1
+word_dropout_anneal_epochs: 3
+# DIP-VAE: off-diagonal covariance penalty.
+dip_weight: 0.1
+bow_weight: 0.0
+
+# --- Sampling balance ---
+# Boost longer sequences so the decoder sees full clauses, not just NPs.
+length_boost_threshold: 30
+length_boost_factor: 5.0
+
+# --- Checkpointing & diagnostics ---
+diagnostic_every: 5000
+checkpoint_every_steps: 5000
+val_fraction: 0.05
+seed: 42
+device: cuda
+output_path: /home/daniel/projects/lfm/data/models/v6/vae_decoder.pt
+
+# --- Disabled ---
+topo_weight: 0.0
+topo_sample_pairs: 32
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true

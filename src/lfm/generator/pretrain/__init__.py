@@ -37,7 +37,7 @@ from .forward import (
 )
 from .model import build_model
 from .checkpoint import _file_hash, save_best_checkpoint, save_resume_checkpoint, load_resume_checkpoint
-from .diagnostics import sample_decode, encode_text, word_edit_distance, structural_metrics, run_epoch_diagnostics
+from .diagnostics import sample_decode, encode_text, word_edit_distance, structural_metrics, run_epoch_diagnostics, surface_diversity
 from .trainer import VAEPretrainer, pretrain_vae_decoder
 
 __all__ = [

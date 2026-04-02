@@ -202,6 +202,74 @@ def structural_metrics(texts: list[str]) -> dict[str, float]:
     }
 
 
+def surface_diversity(
+    *,
+    modules: dict[str, nn.Module],
+    cfg: VAEPretrainConfig,
+    vocab_size: int,
+    bos_id: int,
+    eos_id: int,
+    device: torch.device,
+    sp: object,
+    z_running_mean: Tensor,
+    z_running_std: Tensor,
+    n_samples: int = 200,
+) -> dict[str, float]:
+    """Measure how many unique token sequences the decoder produces.
+
+    Samples random z vectors from the pretrained distribution, decodes
+    each, and computes diversity metrics.  This is the key diagnostic
+    for whether the decoder maps different z regions to different
+    surface forms.
+
+    Returns:
+        Dict with ``unique``, ``total``, ``diversity_ratio``,
+        ``mean_pairwise_edit``, and ``mean_length``.
+    """
+    # Sample from the learned z distribution
+    z = torch.randn(n_samples, cfg.latent_dim, device=device) * z_running_std + z_running_mean
+
+    texts = sample_decode(
+        z,
+        modules=modules,
+        cfg=cfg,
+        vocab_size=vocab_size,
+        bos_id=bos_id,
+        eos_id=eos_id,
+        device=device,
+        sp=sp,
+    )
+
+    # Count unique sequences
+    unique = len(set(texts))
+    total = len(texts)
+    diversity_ratio = unique / max(total, 1)
+
+    # Mean pairwise edit distance (subsample for speed)
+    import random as _rng
+    n_pairs = min(500, total * (total - 1) // 2)
+    indices = list(range(total))
+    edit_dists = []
+    for _ in range(n_pairs):
+        i, j = _rng.sample(indices, 2)
+        ed, ml = word_edit_distance(texts[i], texts[j])
+        if ml > 0:
+            edit_dists.append(ed / ml)
+    mean_edit = sum(edit_dists) / max(len(edit_dists), 1)
+
+    # Mean length
+    lengths = [len(t.split()) for t in texts]
+    mean_length = sum(lengths) / max(len(lengths), 1)
+
+    return {
+        "unique": unique,
+        "total": total,
+        "diversity_ratio": diversity_ratio,
+        "mean_pairwise_edit": mean_edit,
+        "mean_length": mean_length,
+    }
+
+
 def run_epoch_diagnostics(
     *,
     epoch: int,
@@ -426,4 +494,28 @@ def run_epoch_diagnostics(
         m["rep_rate"],
         m["mean_word_len"],
         eos_rate,
+    )
+
+    # --- 7. Surface diversity ---
+    # Free cached tensors before decoding to avoid OOM
+    torch.cuda.empty_cache()
+    sd = surface_diversity(
+        modules=modules,
+        cfg=cfg,
+        vocab_size=vocab_size,
+        bos_id=bos_id,
+        eos_id=eos_id,
+        device=device,
+        sp=sp,
+        z_running_mean=z_running_mean,
+        z_running_std=z_running_std,
+        n_samples=64,
+    )
+    logger.info(
+        "  surface_div: %d/%d unique (%.1f%%) "
+        "mean_edit=%.3f mean_len=%.1f",
+        sd["unique"], sd["total"],
+        sd["diversity_ratio"] * 100,
+        sd["mean_pairwise_edit"],
+        sd["mean_length"],
     )

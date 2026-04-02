@@ -150,6 +150,18 @@ class VisualizationSuite:
         except Exception:
             logger.exception("adaptiveness failed")
 
+        from lfm.visualize.surface_diversity import SurfaceDiversityVisualization
+
+        try:
+            logger.info("Running: surface-diversity")
+            viz = SurfaceDiversityVisualization(self.config)
+            figs = viz.generate(full_corpus)
+            all_paths.extend(
+                viz.save(figs, ["summary", "edit_vs_z", "position_entropy"])
+            )
+        except Exception:
+            logger.exception("surface-diversity failed")
+
         # Phase 6: Translation evaluation (standalone — reads from results dir)
         try:
             translator_dir = Path("data/models/v1/translator")

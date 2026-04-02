@@ -74,7 +74,7 @@ class AgentTrainer:
                 + frac * (curriculum.end_hard_ratio - curriculum.start_hard_ratio)
             )
         else:
-            hard_ratio = 0.0
+            hard_ratio = 1.0
 
         idx = self._rng.integers(0, self._n, size=cfg.batch_size)
         anchor = torch.tensor(
@@ -194,6 +194,8 @@ class AgentTrainer:
                     extra += f"  halt={out['halt_cost'].item():.3f}"
                 if "z_div_loss" in out and out["z_div_loss"].item() > 0:
                     extra += f"  div={out['z_div_loss'].item():.3f}"
+                if "z_coverage" in out and out["z_coverage"].item() > 0:
+                    extra += f"  zcov={out['z_coverage'].item():.2f}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
                 logger.info(

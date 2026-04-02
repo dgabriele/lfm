@@ -90,6 +90,7 @@ def register_visualize_group(
     from lfm.cli.visualize.compositionality import CompositionalityCommand
     from lfm.cli.visualize.smoothness import SmoothnessCommand
     from lfm.cli.visualize.adaptiveness import AdaptivenessCommand
+    from lfm.cli.visualize.surface_diversity import SurfaceDiversityCommand
     from lfm.cli.visualize.all import AllCommand
 
     # Commands that use shared checkpoint arguments
@@ -104,6 +105,7 @@ def register_visualize_group(
         CompositionalityCommand(),
         SmoothnessCommand(),
         AdaptivenessCommand(),
+        SurfaceDiversityCommand(),
         AllCommand(),
     ]
 
