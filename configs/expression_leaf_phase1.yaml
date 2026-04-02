@@ -10,8 +10,10 @@ embedding_store_dir: data/embeddings
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_segments: 8
-target_segments: 8.0
+max_segments: 16
+# Length regularization disabled — all segments forced active via use_halt: false.
+# target_segments and length_weight only apply when variable_segments is enabled.
+target_segments: 16.0
 length_weight: 0.0
 
 # Loss weights
@@ -27,8 +29,8 @@ use_halt: false
 use_ipa_receiver: false
 
 # Training
-batch_size: 128
-gradient_accumulation_steps: 2
+batch_size: 96
+gradient_accumulation_steps: 3
 steps: 4000
 gru_lr: 0.0001
 receiver_lr: 0.0003

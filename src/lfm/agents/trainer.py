@@ -238,6 +238,25 @@ class AgentTrainer:
                     hard_ratio * 100,
                 )
 
+                # Print IPA samples every checkpoint
+                if "_tokens" in out and step % cfg.checkpoint_every == 0:
+                    try:
+                        sp = game.gen._tokenizer._sp if hasattr(game.gen, '_tokenizer') else None
+                        if sp is None:
+                            import sentencepiece as _spm
+                            sp = _spm.SentencePieceProcessor(model_file=cfg.spm_path)
+                        vocab_size = sp.vocab_size()
+                        eos_id = vocab_size + 1
+                        toks = out["_tokens"]
+                        mask = out["_gen_mask"]
+                        for j in range(min(5, toks.size(0))):
+                            ids = [t.item() for t, m in zip(toks[j], mask[j])
+                                   if m and t.item() != eos_id and t.item() < vocab_size]
+                            ipa = sp.decode(ids)
+                            logger.info("  sample[%d]: %s  (%d tok)", j, ipa[:100], len(ids))
+                    except Exception:
+                        pass
+
             # Checkpoint
             if step > 0 and step % cfg.checkpoint_every == 0:
                 self._save_checkpoint(step, out["accuracy"].item(), hard_ratio)

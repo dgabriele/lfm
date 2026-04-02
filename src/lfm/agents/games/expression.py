@@ -673,10 +673,10 @@ class ExpressionGame(nn.Module):
 
         # Length regularization
         total_tokens = trimmed_mask.float().sum(dim=1)
-        if isinstance(self.z_gen, DiffusionZGenerator):
+        if isinstance(self.z_gen, DiffusionZGenerator) and cfg.length_weight > 0:
             len_loss = length_distribution_loss(z_weights, cfg.target_segments)
             loss = receiver_loss + cfg.length_weight * len_loss
-            kl_loss = len_loss  # Reuse key for logging
+            kl_loss = len_loss
         elif cfg.use_halt and cfg.kl_beta > 0:
             kl_loss = geometric_kl(halt_probs, cfg.lambda_p)
             loss = receiver_loss + cfg.kl_beta * kl_loss
@@ -722,6 +722,8 @@ class ExpressionGame(nn.Module):
             "hs_weight": torch.tensor(hs_weight),
             "surface_unique": torch.tensor(surface_unique),
             "surface_global": torch.tensor(surface_global),
+            "_tokens": tokens.detach(),
+            "_gen_mask": gen_mask.detach(),
             "surface_loss": surface_loss.detach(),
         }
 
