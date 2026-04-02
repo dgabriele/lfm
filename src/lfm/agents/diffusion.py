@@ -169,25 +169,12 @@ class DiffusionZGenerator(nn.Module):
         self.z_out = nn.Linear(d_model, latent_dim)
         self.activity_head = nn.Linear(d_model, 1)
 
-        # Initialize activity biases for Zipfian length distribution:
-        # pos 0 = always 1.0 (hardcoded), pos 1 = ~0.88, pos 2 = ~0.62,
-        # pos 3 = ~0.27, pos 4+ = ~0.05
+        # Activity bias: start at 0 (sigmoid=0.5, half-active).
+        # Let the surface loss decide which segments to keep open
+        # and which to close, rather than fighting a strong prior.
         with torch.no_grad():
-            biases = torch.full((max_segments,), -3.0)
-            if max_segments > 1:
-                biases[1] = 2.0
-            if max_segments > 2:
-                biases[2] = 0.5
-            if max_segments > 3:
-                biases[3] = -1.0
-            # Store for reference; actual bias is scalar per the linear head,
-            # so we initialize the bias to the mean and let pos_embed handle
-            # per-position differentiation.
-            self.activity_head.bias.fill_(-1.0)
-            # Encode the Zipfian prior into pos_embed's contribution to
-            # the activity head by adjusting the last dim of pos_embed
-            # proportionally.  Simpler: just add a learned buffer.
-            self.register_buffer("_activity_bias", biases)
+            self.activity_head.bias.fill_(0.0)
+            self.register_buffer("_activity_bias", torch.zeros(max_segments))
 
         # z distribution stats from pretraining
         if z_mean is not None:
