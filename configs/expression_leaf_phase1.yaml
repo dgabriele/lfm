@@ -11,13 +11,13 @@ diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
 max_segments: 8
-target_segments: 4.0
-length_weight: 0.5
+target_segments: 8.0
+length_weight: 0.0
 
 # Loss weights
 hidden_state_weight: 1.0
 hidden_state_anneal_steps: 0
-z_diversity_weight: 0.5
+z_diversity_weight: 0.1
 z_distribution_weight: 0.0
 
 # No halting — use all 8 segments
@@ -27,8 +27,8 @@ use_halt: false
 use_ipa_receiver: false
 
 # Training
-batch_size: 192
-gradient_accumulation_steps: 1
+batch_size: 128
+gradient_accumulation_steps: 2
 steps: 4000
 gru_lr: 0.0001
 receiver_lr: 0.0003

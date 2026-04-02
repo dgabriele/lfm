@@ -126,3 +126,29 @@ Map non-human vocalizations to IPA via acoustic-to-articulatory inversion: click
 The decoder, trained on human + whale IPA, would learn "whale phonotactics" alongside human phonotactics. The expression system could then generate whale-like segments when encoding marine biology data.
 
 **Risk:** Mixing radically different phonotactic systems may degrade human language quality. Safer approach: train on human languages first, then test whether the frozen decoder can decode whale-mapped IPA at all. If it produces valid output, the mapping is compatible. If not, the decoder rejects it — useful diagnostic information.
+
+---
+
+## 10. Diffusion-based iterative token refinement
+
+**Status:** Planned — v2 architecture for scale
+
+Replace the sequential AR decoder bottleneck with a parallel diffusion refinement step. The AR decoder runs once (no_grad) to produce a "rough draft" of tokens, then a lightweight diffusion denoiser refines them in parallel for discriminative quality.
+
+**Architecture:**
+```
+z vectors → AR decoder (one pass, rough draft) → token embeddings
+  → add noise → diffusion denoiser (T=4 steps, cross-attends to z) → refined embeddings
+  → snap to nearest vocabulary token
+```
+
+**Why this works:** The AR decoder provides linguistic structure (phonotactics, morphology, Zipf law). The diffusion refinement adjusts tokens for discriminative quality without rebuilding linguistic competence. The denoiser is small (correcting, not generating) and fully parallel.
+
+**What it solves:**
+- GPU utilization: current pipeline is ~50% idle during sequential AR decode
+- Token quality: AR decode is greedy/nucleus sampled, diffusion refinement can optimize for downstream objectives
+- Scale: at 500+ token expressions with 100K+ corpus, sequential decode becomes the training bottleneck
+
+**Bidirectional path:** The refinement diffusion supports natural reversal — given observed IPA tokens, add noise and denoise conditioned on nothing to recover the z vectors. This is the IPA→z reconstruction path for bidirectional communication via LLM.
+
+**When to implement:** After the current architecture achieves successful LLM translation training. The current pipeline (diffusion z-generator → AR decode → IPA-to-IPA receiver with topology loss) is sufficient for the 10K-300K scale. Option D becomes compelling for production-scale deployment.

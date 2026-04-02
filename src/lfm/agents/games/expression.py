@@ -344,6 +344,7 @@ class ExpressionGame(nn.Module):
                 num_steps=config.diffusion_steps,
                 num_layers=config.diffusion_layers,
                 num_heads=config.diffusion_heads,
+                variable_segments=config.use_halt,
                 z_mean=_z_mean,
                 z_std=_z_std,
                 target_segments=config.target_segments,

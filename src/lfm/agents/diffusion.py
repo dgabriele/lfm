@@ -132,6 +132,7 @@ class DiffusionZGenerator(nn.Module):
         num_steps: int = 4,
         num_layers: int = 4,
         num_heads: int = 8,
+        variable_segments: bool = True,
         z_mean: Tensor | None = None,
         z_std: Tensor | None = None,
         target_segments: float = 2.5,
@@ -142,6 +143,7 @@ class DiffusionZGenerator(nn.Module):
         self.max_segments = max_segments
         self.num_steps = num_steps
         self.target_segments = target_segments
+        self.variable_segments = variable_segments
 
         # Project noisy z into denoiser space
         self.z_in = nn.Linear(latent_dim, d_model)
@@ -283,9 +285,13 @@ class DiffusionZGenerator(nn.Module):
         """
         z_seq, activity_logits = self._reverse_sample(embedding)
 
-        # First segment always active; concat 1.0 with sigmoid of remaining
-        ones = torch.ones(embedding.size(0), 1, device=embedding.device)
-        z_weights = torch.cat([ones, torch.sigmoid(activity_logits[:, 1:])], dim=1)
+        if self.variable_segments:
+            # First segment always active; concat 1.0 with sigmoid of remaining
+            ones = torch.ones(embedding.size(0), 1, device=embedding.device)
+            z_weights = torch.cat([ones, torch.sigmoid(activity_logits[:, 1:])], dim=1)
+        else:
+            # All segments always active
+            z_weights = torch.ones(embedding.size(0), self.max_segments, device=embedding.device)
 
         num_segments = z_weights.sum(dim=-1)
 
