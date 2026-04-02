@@ -279,69 +279,37 @@ Key findings:
 
 ### Expression Game
 
-The expression game uses a **GRU-based z-sequence generator** with **PonderNet geometric-prior halting** (Banino et al., ICML 2021) to produce multi-segment expressions through the frozen decoder. Real LLM embeddings (all-MiniLM-L6-v2, 384-dim, 10K English sentences) are encoded into variable-length IPA utterances via 16-way discrimination (15 distractors, 6.25% chance) with curriculum-controlled hard negatives.
+The expression game trains a z-sequence generator to encode input embeddings as multi-segment IPA expressions through the frozen decoder. The goal is not just discrimination but **semantic topology preservation** — IPA expressions should mirror the similarity structure of the input embeddings, enabling downstream LLM translation.
 
-**Architecture:**
-- **z_0**: Direct projection of input embedding (discriminative from step 0)
-- **z_1..z_K**: GRU autoregressively generates subsequent z vectors conditioned on prior segments
-- **Each z**: Decoded through the frozen decoder until EOS, with KV cache persisting across segments for coarticulation
-- **PonderNet halting**: Per-step halt probability regularized toward geometric prior p(k) = lambda(1-lambda)^{k-1}. KL divergence prevents segment count explosion without manual tuning
-- **z diversity regularization**: Hinge loss penalizes intra-expression z similarity above a data-driven target (auto-computed from the pretrained latent distribution), preventing segment collapse while maintaining linguistic coherence
-- **Two-phase backprop**: No REINFORCE needed — gradients flow directly through the frozen decoder's cross-attention. Phase 1 generates tokens via fast KV-cached decode (no_grad); phase 2 re-runs the decoder on those tokens in one parallel pass with gradients enabled
+**Evolution**: An initial GRU-based autoregressive approach achieved high discrimination accuracy (97%+) but produced only ~1,500 unique surface forms across 10K inputs — the hidden-state gradient highway let the system discriminate without diverse tokens. This led to a diffusion-based architecture that solves the surface diversity problem by construction.
 
-| Metric | Value |
-|--------|-------|
-| Peak accuracy (100% hard negatives) | **97.7%** (chance = 6.25%) |
-| Improvement over chance | **15.6x** |
-| Segments per message | ~2.5 (PonderNet-regulated, max 16) |
-| Average message length | ~23 tokens (~9 tokens per segment) |
-| z diversity (intra-expression cosine sim) | 0.20 (target: 0.06, baseline without reg: 0.97) |
-| Convergence | ~50 steps to >95% |
+**Current architecture — DiffusionZGenerator + IPA-to-IPA receiver:**
 
-### Example outputs
-
-English sentences encoded with all-MiniLM-L6-v2, projected through the trained expression game (with z diversity regularization), and decoded through the frozen v5-leaf-27 decoder:
-
-```
-ENG: "Miley Cyrus has slammed the directors behind her performance at the 2020 MTV VMAs..."
-IPA: ʃiɾăjiɛl nːoːindɛlji
-     (14 tokens, 2 segments)
-
-ENG: "But the services, the full-service partnerships, the wrap-around, voluntary or involuntary..."
-IPA: ʃiɾesɪm bɛnːdʊŋːindɛlji
-     (14 tokens, 2 segments)
-
-ENG: "The project was scheduled to be completed by March 2018."
-IPA: ɡoʊz aːlhadoːlːindɛlji
-     (14 tokens, 2 segments)
-
-ENG: "Such an assay is called RT-LAMP, or Reverse Transcription Loop-mediated Isothermal Amplification."
-IPA: ɡoʊzʃeːfervaːrfːindɛlji
-     (14 tokens, 2 segments)
-
-ENG: "Moreover, U.S. policy systematically rejects any international obligation..."
-IPA: kiɑn aːlhadoːlːindɛlji
-     (14 tokens, 2 segments)
-
-ENG: "Sorry, comments are currently closed."
-IPA: ɡoʊzʃeːfervaːlːiʃjʌn
-     (12 tokens, 2 segments)
-```
-
-Each input produces a distinct, pronounceable IPA expression across 2 leaf-phrase segments. The first segment varies by input (`ʃiɾăjiɛl`, `ʃiɾesɪm`, `ɡoʊz`, `kiɑn`) while the second segment shows shared structure — consistent with a compositional code where different segments carry different roles. With z diversity regularization, the GRU explores distinct regions of the latent space per segment (z_sim=0.20 vs 0.97 without), allowing each segment to draw on different typological features from the decoder's multilingual prior.
+- **Diffusion z-sequence**: A small transformer denoiser (T=4 flow-matching steps) refines all K z positions simultaneously, conditioned on the input embedding via cross-attention. Unlike the GRU, all segments see each other during generation, enabling co-adaptation. The noise schedule forces full z-space exploration — no projection collapse possible.
+- **IPA-to-IPA receiver**: Both the sender's expression and the 16 candidate expressions go through a shared `IPAEncoder` (token embedding + self-attention + learned query readout). The receiver compares IPA representations against each other, not against raw embeddings. This directly mirrors the downstream LLM task: distinguish inputs by their IPA surface forms.
+- **Soft topology loss**: Instead of hard 1-of-16 classification (cross-entropy), the loss is KL divergence between the IPA similarity distribution and the input embedding cosine similarity distribution. "The dog ran" should produce IPA closer to "the cat ran" than to "quantum mechanics." The training objective minimizes semantic ambiguity, not just classification error.
+- **Two-phase backprop**: Phase 1 generates tokens via fast KV-cached decode (no_grad); phase 2 re-runs the decoder on those tokens with gradients flowing through cross-attention back to the denoiser.
+- **Surface diversity**: 9,994/10,000 unique IPA expressions (99.94%) — up from 1,519 with the GRU approach.
+- **IPA cache**: All 10K embeddings decoded at training start and cached. Candidate IPA looked up per batch (zero decode overhead). Cache refreshed periodically as the denoiser improves.
 
 ```bash
-# Train expression game with defaults
-poetry run lfm agent expression --steps 2000 --batch-size 256
+# Train with diffusion z-generator and IPA-to-IPA receiver
+poetry run lfm agent expression --z-generator diffusion --use-ipa-receiver \
+  --steps 4000 --batch-size 64 --gradient-accumulation-steps 4
 
-# With z diversity regularization (segments explore the latent space)
-poetry run lfm agent expression --z-diversity-weight 0.01
+# Two-phase training: hidden-state warmup, then IPA receiver
+# Phase 1: learn good z projections
+poetry run lfm agent expression --z-generator diffusion \
+  --hidden-state-weight 1.0 --steps 2000
+# Phase 2: switch to IPA-to-IPA scoring
+poetry run lfm agent expression --z-generator diffusion --use-ipa-receiver \
+  --resume data/expression_game/best.pt --hidden-state-weight 0.0 --steps 4000
 
-# More segment headroom: lower lambda = more segments, higher max
-poetry run lfm agent expression --lambda-p 0.3 --max-segments 16
-
-# Sample decoded expressions from a trained checkpoint
+# Sample decoded expressions
 poetry run lfm explore expression-sample --checkpoint data/expression_game/best.pt
+
+# Generate IPA-English pairs for LLM translation training
+poetry run lfm translate generate-pairs --expression-checkpoint data/expression_game/best.pt
 ```
 
 ## Dataset Generation

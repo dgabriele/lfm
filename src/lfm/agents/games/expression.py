@@ -590,17 +590,27 @@ class ExpressionGame(nn.Module):
             candidate_vecs = torch.stack(cand_vecs, dim=1)  # (B, 16, dim)
 
             ipa_logits = self.receiver(sender_vec, candidate_vecs)
-            ipa_loss = F.cross_entropy(ipa_logits, target_idx)
 
-            # IPA path is the primary loss; hidden-state is auxiliary
+            # Soft topology loss: IPA similarity structure should mirror
+            # input embedding similarity structure.  Use KL divergence
+            # between IPA logits and embedding cosine similarities.
+            candidates_emb = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
+            perm_expanded = perm.unsqueeze(-1).expand_as(candidates_emb)
+            candidates_emb = torch.gather(candidates_emb, 1, perm_expanded)
+            with torch.no_grad():
+                teacher_sims = F.cosine_similarity(
+                    anchor.unsqueeze(1), candidates_emb, dim=-1,
+                )  # (B, 16)
+                teacher_probs = F.softmax(teacher_sims / 0.1, dim=-1)
+            student_log_probs = F.log_softmax(ipa_logits, dim=-1)
+            ipa_loss = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+            # Accuracy: still track hard classification for logging
             surface_logits = ipa_logits
             surface_loss = ipa_loss
-            # Skip the old surface/hidden-state dual-path logic
+
             hs_weight = cfg.hidden_state_weight
             if hs_weight > 0:
-                candidates_emb = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
-                perm_expanded = perm.unsqueeze(-1).expand_as(candidates_emb)
-                candidates_emb = torch.gather(candidates_emb, 1, perm_expanded)
                 hidden_message = self.msg_encoder(
                     hidden * per_pos_weight.unsqueeze(-1), trimmed_mask,
                 )
