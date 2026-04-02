@@ -16,10 +16,8 @@ max_segments: 12
 target_segments: 12.0
 length_weight: 0.0
 
-# Phase 2: refinement denoiser instead of frozen decoder re-run
-phase2_mode: refinement
-refinement_layers: 4
-refinement_steps: 4
+# Phase 2 internal mode: frozen decoder re-run (standard for phase 1)
+phase2_mode: decoder
 
 # Loss weights
 hidden_state_weight: 1.0
@@ -34,8 +32,8 @@ use_halt: false
 use_ipa_receiver: false
 
 # Training
-batch_size: 128
-gradient_accumulation_steps: 2
+batch_size: 48
+gradient_accumulation_steps: 5
 steps: 4000
 gru_lr: 0.0001
 receiver_lr: 0.0003

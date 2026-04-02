@@ -1,0 +1,48 @@
+# Expression game phase 2 — leaf-only decoder, IPA-to-IPA receiver
+# Resume from phase 1 checkpoint. Refinement denoiser replaces frozen decoder.
+z_generator: diffusion
+decoder_path: data/models/v5-leaf-27/vae_decoder.pt
+spm_path: data/models/v5-leaf-27/spm.model
+output_dir: data/expression_game_v5-leaf-ipa-300k
+embedding_store_dir: data/embeddings
+
+# Diffusion
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_segments: 12
+target_segments: 12.0
+length_weight: 0.0
+
+# Phase 2 internal mode: refinement denoiser (lightweight, bidirectional)
+phase2_mode: refinement
+refinement_layers: 2
+refinement_steps: 4
+
+# Loss weights — IPA receiver primary, no hidden-state auxiliary
+hidden_state_weight: 0.0
+hidden_state_anneal_steps: 0
+z_diversity_weight: 0.0
+z_distribution_weight: 0.0
+
+# No halting — use all segments
+use_halt: false
+
+# IPA-to-IPA receiver with topology loss
+use_ipa_receiver: true
+ipa_cache_refresh: 500
+
+# Training — resume from phase 1 checkpoint
+# resume: data/expression_game_v5-leaf-diffusion-300k/best.pt
+batch_size: 128
+gradient_accumulation_steps: 2
+steps: 6000
+gru_lr: 0.0001
+receiver_lr: 0.0003
+num_distractors: 15
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 50
+checkpoint_every: 100
