@@ -167,17 +167,22 @@ class AgentTrainer:
             )
 
         results: dict[str, float] = {}
+        accum = getattr(cfg, "gradient_accumulation_steps", 1)
 
         for step in range(start_step, cfg.steps):
-            anchor, distractors, hard_ratio = self._sample_batch(step)
-
-            out = game(anchor, distractors, step=step)
-            loss = out["loss"]
-
+            # Accumulate gradients over multiple micro-batches
             self.optimizer.zero_grad()
-            loss.backward()
+            acc_sum = 0.0
+            for micro in range(accum):
+                anchor, distractors, hard_ratio = self._sample_batch(step)
+                out = game(anchor, distractors, step=step)
+                loss = out["loss"] / accum
+                loss.backward()
+                acc_sum += out["accuracy"].item()
             nn.utils.clip_grad_norm_(self._all_params, cfg.max_grad_norm)
             self.optimizer.step()
+            # Use accumulated accuracy for logging
+            out["accuracy"] = torch.tensor(acc_sum / accum)
 
             # Logging
             if step % cfg.log_every == 0:
@@ -196,6 +201,10 @@ class AgentTrainer:
                     extra += f"  div={out['z_div_loss'].item():.3f}"
                 if "z_coverage" in out and out["z_coverage"].item() > 0:
                     extra += f"  zcov={out['z_coverage'].item():.2f}"
+                if "surface_unique" in out:
+                    extra += f"  sdiv={out['surface_unique'].item():.0%}"
+                if "surface_global" in out:
+                    extra += f"  gdiv={out['surface_global'].item():.0%}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
                 logger.info(

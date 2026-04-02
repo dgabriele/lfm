@@ -296,8 +296,9 @@ class DiffusionZGenerator(nn.Module):
         """
         z_seq, activity_logits = self._reverse_sample(embedding)
 
-        z_weights = torch.sigmoid(activity_logits)
-        z_weights[:, 0] = 1.0  # First segment always active
+        # First segment always active; concat 1.0 with sigmoid of remaining
+        ones = torch.ones(embedding.size(0), 1, device=embedding.device)
+        z_weights = torch.cat([ones, torch.sigmoid(activity_logits[:, 1:])], dim=1)
 
         num_segments = z_weights.sum(dim=-1)
 

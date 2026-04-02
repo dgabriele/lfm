@@ -250,18 +250,20 @@ class ExpressionSampleCommand(CLICommand):
         vocab_size = sp.vocab_size()
         eos_id = vocab_size + 1
 
-        # Build expression game
+        # Build expression game from checkpoint config
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         cfg = ExpressionGameConfig(
             decoder_path=args.decoder_path,
             spm_path=args.spm_path,
-            max_segments=args.max_segments,
+            z_generator=ckpt.get("z_generator", "gru"),
+            max_segments=ckpt.get("max_segments", args.max_segments),
+            diffusion_steps=ckpt.get("diffusion_steps", 4),
+            diffusion_layers=ckpt.get("diffusion_layers", 4),
             device=device,
         )
         faculty = LanguageFaculty(cfg.build_faculty_config()).to(device)
         game = ExpressionGame(cfg, faculty).to(device)
 
-        # Load checkpoint
-        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         game.load_checkpoint_state(ckpt)
         game.eval()
 

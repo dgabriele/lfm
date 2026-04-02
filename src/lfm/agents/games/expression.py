@@ -98,6 +98,7 @@ class ExpressionGameConfig(LFMBaseConfig):
 
     # Training
     batch_size: int = 256
+    gradient_accumulation_steps: int = 1
     steps: int = 2000
     gru_lr: float = 1e-4
     receiver_lr: float = 3e-4
@@ -381,6 +382,10 @@ class ExpressionGame(nn.Module):
         else:
             self.z_distribution = None
 
+        # Running surface diversity tracker
+        self._seen_hashes: set[int] = set()
+        self._seen_total: int = 0
+
     @property
     def gen(self):
         """Shortcut to the underlying generator."""
@@ -469,6 +474,19 @@ class ExpressionGame(nn.Module):
                 z_seq, z_weights,
             )
 
+            # Surface diversity: count unique token sequences
+            _eos = self.gen.eos_id
+            _batch_seqs = set()
+            for row, m in zip(tokens, gen_mask):
+                ids = tuple(t.item() for t, v in zip(row, m) if v and t.item() != _eos)
+                _batch_seqs.add(hash(ids))
+            surface_unique = len(_batch_seqs) / max(tokens.size(0), 1)
+
+            # Running global diversity
+            self._seen_hashes.update(_batch_seqs)
+            self._seen_total += tokens.size(0)
+            surface_global = len(self._seen_hashes) / max(self._seen_total, 1)
+
         # Phase 2: re-run decoder with gradients
         hidden = rerun_decoder_multiseg_with_grad(
             self.gen, z_seq, z_weights, tokens, gen_mask, seg_bounds,
@@ -483,19 +501,6 @@ class ExpressionGame(nn.Module):
             seg_bounds, trimmed_mask.size(1), z_seq.size(1), device,
         )
         per_pos_weight = z_weights.gather(1, seg_assign)  # (B, T)
-
-        # Surface path: project hidden → logits → soft tokens → re-embed
-        # Straight-through: forward uses argmax tokens, backward uses softmax
-        logits_per_pos = self.gen.output_head(hidden)  # (B, T, V)
-        soft_probs = F.softmax(logits_per_pos, dim=-1)
-        hard_ids = logits_per_pos.argmax(dim=-1)  # (B, T)
-        hard_onehot = F.one_hot(hard_ids, logits_per_pos.size(-1)).float()
-        straight_through = (hard_onehot - soft_probs).detach() + soft_probs
-        surface_repr = straight_through @ self.gen.token_embedding.weight  # (B, T, H)
-
-        surface_message = self.surface_encoder(
-            surface_repr * per_pos_weight.unsqueeze(-1), trimmed_mask,
-        )
 
         # Prepare candidates (shared between paths)
         candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
@@ -528,6 +533,16 @@ class ExpressionGame(nn.Module):
             surface_weight = 0.0 if hs_weight > 0 else 1.0
 
         if surface_weight > 0:
+            # Surface path: project hidden → logits → soft tokens → re-embed
+            logits_per_pos = self.gen.output_head(hidden)  # (B, T, V)
+            soft_probs = F.softmax(logits_per_pos, dim=-1)
+            hard_ids = logits_per_pos.argmax(dim=-1)  # (B, T)
+            hard_onehot = F.one_hot(hard_ids, logits_per_pos.size(-1)).float()
+            straight_through = (hard_onehot - soft_probs).detach() + soft_probs
+            surface_repr = straight_through @ self.gen.token_embedding.weight
+            surface_message = self.surface_encoder(
+                surface_repr * per_pos_weight.unsqueeze(-1), trimmed_mask,
+            )
             surface_logits = self.receiver(surface_message, candidates)
             surface_loss = F.cross_entropy(surface_logits, target_idx)
         else:
@@ -585,6 +600,8 @@ class ExpressionGame(nn.Module):
             "z_dist_loss": dist_loss.detach(),
             "z_coverage": z_coverage,
             "hs_weight": torch.tensor(hs_weight),
+            "surface_unique": torch.tensor(surface_unique),
+            "surface_global": torch.tensor(surface_global),
             "surface_loss": surface_loss.detach(),
         }
 

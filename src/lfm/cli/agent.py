@@ -152,6 +152,8 @@ class ExpressionCommand(CLICommand):
         parser.add_argument("--encoder-heads", type=int, default=8)
         parser.add_argument("--steps", type=int, default=2000)
         parser.add_argument("--batch-size", type=int, default=256)
+        parser.add_argument("--gradient-accumulation-steps", type=int, default=1,
+                            help="Gradient accumulation steps (default: 1)")
         parser.add_argument("--gru-lr", type=float, default=1e-4)
         parser.add_argument("--receiver-lr", type=float, default=3e-4)
         parser.add_argument("--curriculum-warmup", type=int, default=500)
@@ -220,6 +222,7 @@ class ExpressionCommand(CLICommand):
                 num_heads=args.encoder_heads,
             ),
             batch_size=args.batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
             steps=args.steps,
             gru_lr=args.gru_lr,
             receiver_lr=args.receiver_lr,
