@@ -579,15 +579,12 @@ class ExpressionGame(nn.Module):
             perm_indices = torch.gather(candidate_indices, 1, perm)
             target_idx = (perm == 0).long().argmax(dim=1)
 
-            # Encode candidates one at a time to save VRAM
-            cand_vecs = []
-            for k in range(num_candidates):
-                k_indices = perm_indices[:, k].cpu()
-                k_tokens = self._ipa_cache_tokens[k_indices].to(device)
-                k_masks = self._ipa_cache_masks[k_indices].to(device)
-                with torch.no_grad():
-                    cand_vecs.append(self.ipa_encoder(k_tokens, k_masks))
-            candidate_vecs = torch.stack(cand_vecs, dim=1)  # (B, 16, dim)
+            # Batch-encode all candidates at once (no_grad, no activation storage)
+            cand_tokens = self._ipa_cache_tokens[perm_indices.cpu().reshape(-1)].to(device)
+            cand_masks = self._ipa_cache_masks[perm_indices.cpu().reshape(-1)].to(device)
+            with torch.no_grad():
+                cand_flat = self.ipa_encoder(cand_tokens, cand_masks)
+            candidate_vecs = cand_flat.reshape(batch, num_candidates, -1)
 
             ipa_logits = self.receiver(sender_vec, candidate_vecs)
 
@@ -609,7 +606,13 @@ class ExpressionGame(nn.Module):
             surface_logits = ipa_logits
             surface_loss = ipa_loss
 
-            hs_weight = cfg.hidden_state_weight
+            # Anneal hs weight (scaffold for denoiser z learning)
+            anneal = cfg.hidden_state_anneal_steps
+            if anneal > 0 and cfg.hidden_state_weight > 0:
+                t = min(step / anneal, 1.0)
+                hs_weight = cfg.hidden_state_weight * (1.0 - t)
+            else:
+                hs_weight = cfg.hidden_state_weight
             if hs_weight > 0:
                 hidden_message = self.msg_encoder(
                     hidden * per_pos_weight.unsqueeze(-1), trimmed_mask,
@@ -618,7 +621,8 @@ class ExpressionGame(nn.Module):
                 hidden_loss = F.cross_entropy(hidden_logits, target_idx)
             else:
                 hidden_loss = torch.tensor(0.0, device=device)
-            receiver_loss = ipa_loss + hs_weight * hidden_loss
+            ipa_weight = 1.0 - hs_weight if anneal > 0 else 1.0
+            receiver_loss = ipa_weight * ipa_loss + hs_weight * hidden_loss
         else:
             # --- Original embedding-based receiver path ---
             candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)

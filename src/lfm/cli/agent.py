@@ -134,6 +134,8 @@ class ExpressionCommand(CLICommand):
         return "Train expression game with GRU z-sequence through frozen decoder"
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("config", nargs="?", default=None,
+                            help="Optional YAML config file (CLI args override)")
         parser.add_argument("--decoder-path", default="data/vae_decoder.pt")
         parser.add_argument("--spm-path", default="data/spm.model")
         parser.add_argument("--embedding-store", default="data/embeddings")
@@ -190,6 +192,8 @@ class ExpressionCommand(CLICommand):
         parser.add_argument("--checkpoint-every", type=int, default=100)
 
     def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
         from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
         from lfm.agents.games.expression import (
             ExpressionGame,
@@ -198,49 +202,63 @@ class ExpressionCommand(CLICommand):
         from lfm.agents.trainer import AgentTrainer
         from lfm.faculty.model import LanguageFaculty
 
+        # Load YAML config if provided, then let CLI args override
+        cfg_dict: dict = {}
+        if args.config is not None:
+            with open(args.config) as f:
+                cfg_dict = yaml.safe_load(f) or {}
+
+        def _get(key, cli_val, default=None):
+            """YAML value unless CLI explicitly set."""
+            if cli_val != default:
+                return cli_val
+            return cfg_dict.get(key, cli_val)
+
         config = ExpressionGameConfig(
-            decoder_path=args.decoder_path,
-            spm_path=args.spm_path,
-            embedding_store_dir=args.embedding_store,
-            vq_codebook_path=args.vq_codebook,
-            output_dir=args.output_dir,
-            num_memory_tokens=args.num_memory_tokens,
-            z_hidden_dim=args.z_hidden_dim,
-            max_segments=args.max_segments,
-            max_tokens_per_segment=args.max_tokens_per_segment,
-            use_ipa_receiver=args.use_ipa_receiver,
-            ipa_cache_refresh=args.ipa_cache_refresh,
-            z_generator=args.z_generator,
-            diffusion_steps=args.diffusion_steps,
-            diffusion_layers=args.diffusion_layers,
-            target_segments=args.target_segments,
-            length_weight=args.length_weight,
-            use_halt=not args.no_halt,
-            lambda_p=args.lambda_p,
-            kl_beta=args.kl_beta,
-            z_diversity_weight=args.z_diversity_weight,
-            z_diversity_target=args.z_diversity_target,
-            z_distribution_weight=args.z_distribution_weight,
-            hidden_state_weight=args.hidden_state_weight,
-            hidden_state_anneal_steps=args.hidden_state_anneal_steps,
+            decoder_path=_get("decoder_path", args.decoder_path, "data/vae_decoder.pt"),
+            spm_path=_get("spm_path", args.spm_path, "data/spm.model"),
+            embedding_store_dir=_get("embedding_store_dir", args.embedding_store, "data/embeddings"),
+            vq_codebook_path=_get("vq_codebook_path", args.vq_codebook, None),
+            output_dir=_get("output_dir", args.output_dir, "data/expression_game"),
+            num_memory_tokens=_get("num_memory_tokens", args.num_memory_tokens, 8),
+            z_hidden_dim=_get("z_hidden_dim", args.z_hidden_dim, 512),
+            max_segments=_get("max_segments", args.max_segments, 8),
+            max_tokens_per_segment=_get("max_tokens_per_segment", args.max_tokens_per_segment, 48),
+            use_ipa_receiver=_get("use_ipa_receiver", args.use_ipa_receiver, False),
+            ipa_cache_refresh=_get("ipa_cache_refresh", args.ipa_cache_refresh, 0),
+            z_generator=_get("z_generator", args.z_generator, "gru"),
+            diffusion_steps=_get("diffusion_steps", args.diffusion_steps, 4),
+            diffusion_layers=_get("diffusion_layers", args.diffusion_layers, 4),
+            target_segments=_get("target_segments", args.target_segments, 2.5),
+            length_weight=_get("length_weight", args.length_weight, 0.5),
+            use_halt=_get("use_halt", not args.no_halt, True),
+            lambda_p=_get("lambda_p", args.lambda_p, 0.4),
+            kl_beta=_get("kl_beta", args.kl_beta, 0.5),
+            z_diversity_weight=_get("z_diversity_weight", args.z_diversity_weight, 0.0),
+            z_diversity_target=_get("z_diversity_target", args.z_diversity_target, None),
+            z_distribution_weight=_get("z_distribution_weight", args.z_distribution_weight, 0.0),
+            hidden_state_weight=_get("hidden_state_weight", args.hidden_state_weight, 1.0),
+            hidden_state_anneal_steps=_get("hidden_state_anneal_steps", args.hidden_state_anneal_steps, 1000),
+            batch_size=_get("batch_size", args.batch_size, 256),
+            gradient_accumulation_steps=_get("gradient_accumulation_steps", args.gradient_accumulation_steps, 1),
+            steps=_get("steps", args.steps, 2000),
+            gru_lr=_get("gru_lr", args.gru_lr, 1e-4),
+            receiver_lr=_get("receiver_lr", args.receiver_lr, 3e-4),
+            device=_get("device", args.device, "cuda"),
+            seed=_get("seed", args.seed, 42),
+            log_every=_get("log_every", args.log_every, 50),
+            checkpoint_every=_get("checkpoint_every", args.checkpoint_every, 100),
             encoder=MessageEncoderConfig(
-                num_layers=args.encoder_layers,
-                num_heads=args.encoder_heads,
+                num_layers=_get("encoder_layers", args.encoder_layers, 2),
+                num_heads=_get("encoder_heads", args.encoder_heads, 8),
             ),
-            batch_size=args.batch_size,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            steps=args.steps,
-            gru_lr=args.gru_lr,
-            receiver_lr=args.receiver_lr,
             curriculum=CurriculumConfig(
-                enabled=not args.no_curriculum,
-                warmup_steps=args.curriculum_warmup,
+                enabled=not _get("no_curriculum", args.no_curriculum, False),
+                warmup_steps=_get("curriculum_warmup", args.curriculum_warmup, 500),
             ),
-            device=args.device,
-            seed=args.seed,
-            log_every=args.log_every,
-            checkpoint_every=args.checkpoint_every,
         )
+
+        resume = _get("resume", args.resume, None)
 
         import torch
         device = torch.device(config.device)
@@ -248,7 +266,7 @@ class ExpressionCommand(CLICommand):
         faculty = LanguageFaculty(config.build_faculty_config()).to(device)
         game = ExpressionGame(config, faculty).to(device)
         trainer = AgentTrainer(game, config)
-        trainer.train(resume=args.resume)
+        trainer.train(resume=resume)
 
         return 0
 

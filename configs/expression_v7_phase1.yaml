@@ -1,0 +1,41 @@
+# Expression game phase 1 — v7 full constituency decoder
+# HS-driven, diffusion z-generator, 300K corpus, hard negatives
+z_generator: diffusion
+decoder_path: data/models/v7/vae_decoder.pt
+spm_path: data/models/v7/spm.model
+output_dir: data/expression_game_v7-diffusion-300k
+embedding_store_dir: data/embeddings
+
+# Diffusion
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_segments: 4
+target_segments: 2.5
+length_weight: 0.5
+
+# Loss weights
+hidden_state_weight: 1.0
+hidden_state_anneal_steps: 0
+z_diversity_weight: 0.5
+z_distribution_weight: 0.0
+
+# No IPA receiver in phase 1
+use_ipa_receiver: false
+
+# Training
+batch_size: 96
+gradient_accumulation_steps: 3
+steps: 4000
+gru_lr: 0.0001
+receiver_lr: 0.0003
+num_distractors: 15
+
+# No curriculum — 100% hard negatives
+use_halt: true
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 50
+checkpoint_every: 100
