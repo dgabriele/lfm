@@ -12,7 +12,7 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 2. 🔬 [The Problem](#the-problem) — limitations of existing encoding approaches
 3. ⚙️ [How It Works](#how-it-works) — three-step pipeline overview
 4. 🗣️ [The Linguistic Decoder](#the-linguistic-decoder) — architecture, pretraining, sample outputs
-5. 🌳 [Expression Generation](#expression-generation) — GRU z-sequence generation with PonderNet halting through the decoder
+5. 🌳 [Expression Generation](#expression-generation) — diffusion-based z-sequence generation through the decoder
 6. 🎯 [Agent Game Results](#agent-game-results) — Referential and expression game validation (direct backprop)
 7. 📊 [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
 8. 💾 [Dataset Generation](#dataset-generation) — HDF5 pipeline with constituency augmentation
@@ -174,13 +174,18 @@ Adding noise scaled to the encoder's z distribution to the same z vector. sigma=
 
 ## Expression Generation
 
-LFM includes a learnable **expression system** for multi-segment communication through the linguistic bottleneck. Instead of mapping one embedding to one flat utterance, an agent produces a variable number of segments via a **GRU z-sequence generator** with **PonderNet geometric-prior halting** (Banino et al., ICML 2021). Each segment's z vector is decoded through the frozen decoder, with the KV cache persisting across segment boundaries for phonotactically coherent coarticulation. This replaces the earlier REINFORCE tree topology approach with a fully differentiable architecture.
+LFM includes a learnable **expression system** for multi-segment communication through the linguistic bottleneck. Instead of mapping one embedding to one flat utterance, an agent produces a variable number of segments via a **DiffusionZGenerator** — a small transformer denoiser that refines all K z positions simultaneously using flow matching (T=4 steps), conditioned on the input embedding via cross-attention. Each segment's z vector is decoded through the frozen decoder, with the KV cache persisting across segment boundaries for phonotactically coherent coarticulation.
 
 ```
-    z₀ ← input_proj(embedding)     (discriminative from step 0)
-    z₁ ← GRU(z₀)                   halt? p₁
-    z₂ ← GRU(z₁)                   halt? p₂
-    ...                             (PonderNet geometric prior: λ=0.4 → E[K]=2.5)
+    noise ~ N(z_mean, z_std)          (K positions, from pretrained distribution)
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  Denoiser Transformer (T=4 flow-matching steps)                 │
+    │    self-attention:  z positions co-adapt                        │
+    │    cross-attention: conditioned on input embedding              │
+    │    activity head:   per-position sigmoid → variable length      │
+    │    z_t = (1-t)*z_0 + t*noise, model predicts clean z_0         │
+    └──────────────────────────────────────────────────────────────────┘
+    z₀, z₁, z₂ ← refined in parallel    activity: [1.0, 0.9, 0.1, ...]
 
     Decode:  [BOS ðʌ kwɪk braʊn | fɑks dʒʌmpt | oʊvɝ ðʌ leɪzi dɑɡ EOS]
                   memory=z₀          memory=z₁     memory=z₂
@@ -188,33 +193,42 @@ LFM includes a learnable **expression system** for multi-segment communication t
 ```
 
 **Key design decisions:**
-- **z_0 = direct projection**: The first segment is immediately discriminative, matching the referential game's single-z approach
-- **GRU continuation**: Subsequent z vectors are generated autoregressively, conditioned on prior segments
-- **PonderNet halting**: Per-step halt probability regularized toward geometric prior p(k) = lambda(1-lambda)^{k-1}. KL divergence prevents segment count explosion without manual tuning
+- **Flow matching**: Linear interpolation `z_t = (1-t)*z_0 + t*noise`; the denoiser predicts clean `z_0` directly. Four reverse steps (t=1.0 → 0.75 → 0.5 → 0.25 → 0.0) are fully differentiable end-to-end
+- **Parallel refinement**: All K z positions are refined simultaneously through self-attention, enabling co-adaptation that sequential generation cannot achieve
+- **Per-position activity**: A sigmoid activity head determines which segments are active (first segment always on). Length regularization with entropy bonus encourages variable, Zipf-like expression lengths
+- **Noise from pretrained distribution**: Initial noise is scaled to the pretrained z mean/std, and the output head is initialized to match, ensuring the denoised z vectors land in the decoder's learned manifold
 - **Two-phase backprop**: Same as referential game — no_grad generation, then parallel decoder re-run with gradients through cross-attention
 
-**Components** (`lfm.expression`):
+**Components**:
 
 | Module | Role |
 |--------|------|
-| `ExpressionGenerator` | GRU z-sequence + PonderNet halting + continuous z-switching decode through frozen decoder |
-| `Expression` | Data structure: z vectors, decoded tokens, segment boundaries, halt probabilities |
-| `ExpressionEncoder` | Segment pooling + composition → fixed-size message vector |
-| `ExpressionConfig` | Configuration for all expression system parameters |
+| `DiffusionZGenerator` (`lfm.agents.diffusion`) | Transformer denoiser: flow-matching refinement of K z positions with per-position activity |
+| `ExpressionGenerator` (`lfm.expression`) | Continuous z-switching decode through frozen decoder (KV cache across segments) |
+| `Expression` (`lfm.expression`) | Data structure: z vectors, decoded tokens, segment boundaries, activity weights |
+| `ExpressionEncoder` (`lfm.expression`) | Segment pooling + bottom-up Merge composition → fixed-size message vector |
 
 **Plug-and-play integration** — works with any agent that produces fixed-size embeddings:
 
 ```python
-from lfm.expression import ExpressionGenerator, ExpressionEncoder
+from lfm.agents.diffusion import DiffusionZGenerator
+from lfm.expression import ExpressionEncoder
 
-expr_gen = ExpressionGenerator(generator=frozen_decoder, input_dim=384, ...)
+diff_gen = DiffusionZGenerator(
+    input_dim=384, latent_dim=256, max_segments=8, num_steps=4,
+    z_mean=pretrained_z_mean, z_std=pretrained_z_std,
+)
+
+z_seq, z_weights, num_segments = diff_gen(agent_embedding)
+# z_seq: (B, K, 256) denoised z vectors
+# z_weights: (B, K) per-position activity (first always 1.0)
+# num_segments: (B,) soft segment count
+
 expr_enc = ExpressionEncoder(hidden_dim=512, output_dim=384)
-
-expression = expr_gen(agent_embedding)   # GRU z-sequence + decode
-message = expr_enc(expression)           # fixed-size message vector
+message = expr_enc(expression)  # fixed-size message vector
 ```
 
-No decoder retraining needed. The z-switching mechanism exploits properties the decoder already has from pretraining on natural language.
+No decoder retraining needed. The diffusion denoiser learns to place z vectors where the decoder's pretrained manifold produces discriminative, compositional surface forms.
 
 See [docs/expression-system.md](docs/expression-system.md) for the full design document covering motivation, architecture details, continuous z-switching decode, integration guide, and downstream applications.
 
