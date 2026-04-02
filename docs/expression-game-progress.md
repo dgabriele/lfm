@@ -93,9 +93,17 @@ Neither PonderNet, independent gates, nor zero-bias initialization successfully 
 
 ---
 
+### 8. IPA-to-IPA receiver (current)
+- **Config**: Diffusion + leaf decoder, IPAEncoder (shared, warm-started from decoder embeddings), precomputed IPA cache for candidates, surface-only, hard CE loss
+- **Result at step 2100**: 81.2% IPA-to-IPA accuracy (still climbing), sdiv=100%, gdiv=100%, segs=2.5, expr_len=26
+- **Key insight**: IPA encoder learns to read token-level representations fast (5% → 81% in 500 steps) when denoiser is pretrained from phase 1
+- **Limitation**: Hard cross-entropy treats discrimination as binary. Doesn't encode degrees of semantic similarity — "the dog ran" should be closer to "the cat ran" than to "quantum mechanics."
+
+---
+
 ## Next Steps
 
-1. **Design IPA-to-IPA receiver** — receiver compares IPA token representations, not raw embeddings
+1. **Soft topology loss** — replace hard CE with KL divergence against input embedding cosine similarities. IPA similarity structure mirrors semantic structure.
 2. **Run with v7 decoder** — longer expressions, more LLM-learnable structure
 3. **Evaluate with full pair generation** — 10K pairs, count unique, measure Zipf statistics
 4. **Train LLM translator** — self-supervised next-token prediction on IPA corpus

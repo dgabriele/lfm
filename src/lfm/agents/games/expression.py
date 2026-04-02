@@ -579,15 +579,15 @@ class ExpressionGame(nn.Module):
             perm_indices = torch.gather(candidate_indices, 1, perm)
             target_idx = (perm == 0).long().argmax(dim=1)
 
-            cand_tokens = self._ipa_cache_tokens[perm_indices.cpu()].to(device)
-            cand_masks = self._ipa_cache_masks[perm_indices.cpu()].to(device)
-
-            # Encode each candidate: (B, 16, T) → (B, 16, output_dim)
-            B, K_cand, T_cand = cand_tokens.shape
-            cand_flat = cand_tokens.reshape(B * K_cand, T_cand)
-            mask_flat = cand_masks.reshape(B * K_cand, T_cand)
-            cand_vecs = self.ipa_encoder(cand_flat, mask_flat)
-            candidate_vecs = cand_vecs.reshape(B, K_cand, -1)
+            # Encode candidates one at a time to save VRAM
+            cand_vecs = []
+            for k in range(num_candidates):
+                k_indices = perm_indices[:, k].cpu()
+                k_tokens = self._ipa_cache_tokens[k_indices].to(device)
+                k_masks = self._ipa_cache_masks[k_indices].to(device)
+                with torch.no_grad():
+                    cand_vecs.append(self.ipa_encoder(k_tokens, k_masks))
+            candidate_vecs = torch.stack(cand_vecs, dim=1)  # (B, 16, dim)
 
             ipa_logits = self.receiver(sender_vec, candidate_vecs)
             ipa_loss = F.cross_entropy(ipa_logits, target_idx)
