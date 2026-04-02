@@ -38,12 +38,13 @@ src/lfm/
   _types.py             # Tensor type aliases
   agents/               # Agent communication games
     config.py           # Shared configs (MessageEncoderConfig, CurriculumConfig)
-    components.py       # MessageEncoder (attention), Receiver (dot-product)
+    components.py       # MessageEncoder, Receiver, ZDiversityLoss, ZDistributionLoss
+    diffusion.py        # DiffusionZGenerator (flow-matching z-sequence), DenoiserBlock
     decode.py           # rerun_decoder_with_grad (two-phase differentiable decode)
     trainer.py          # AgentTrainer (game-agnostic training loop)
     games/              # Individual game implementations
       referential.py    # ReferentialGame + ReferentialGameConfig
-      expression.py     # ExpressionGame + ExpressionGameConfig (GRU z-sequence + PonderNet)
+      expression.py     # ExpressionGame + ExpressionGameConfig (GRU or Diffusion z-sequence)
   config/               # LFMBaseConfig, ExperimentConfig
   core/                 # LFMModule (ABC), LFMLoss, CompositeLoss
   expression/           # Learnable expression generation (GRU z-sequence + PonderNet halting, replaces old REINFORCE tree)
@@ -116,18 +117,17 @@ src/lfm/
 
 ## Pretraining Results
 
-**v5-leaf-27 (current, leaf-level phrases)**: 4M leaf-level phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with IPA-converted inline and word-alignment fallback for Vietnamese. Syllable-aligned BPE, max_seq_len=27 (auto-scaled from dataset), 8-token z memory (latent_dim=256, lr=0.0005). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context). Each sample IS a short phrase, so the decoder learns phrase-level EOS naturally.
+**v7 (current, full constituency, training)**: 11.6M phrase constituents at ALL tree levels (leaf + internal: NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages. No word dropout. z variance regularization (z_var_weight=0.01, target=0.03) + DIP-VAE covariance penalty. max_seq_len=109 (auto-scaled). Batch 80, grad_accum=4 (effective 320). Training in progress.
 
-- **Val CE**: short(<20 BPE)=0.006, med(20-50 BPE)=0.065, overall=0.0071
-- **Variable-length output**: mean 2.5 words (16.5 IPA chars), range 1-4 words — atomic phrases
-- **Zipf exponent**: corpus 1.004, decoded 1.058 (near-perfect Zipf law)
-- **Adaptiveness**: input<->output length r=1.000, z_norm<->output_unique r=-0.663
-- **TTR**: 1.000 (every word unique within a phrase)
-- **EOS rate**: 1.00 (always produces well-formed EOS)
-- **Architecture**: same as v4 (8 memory tokens, multi-scale attention, RoPE, weight sharing)
-- **12 languages**: dropped tha, kat, tgl, swa (no parser or too sparse)
+- **Epoch 1 mid-training CE**: short=0.02, med=0.14, long=0.35
+- **Surface diversity**: 100% unique decoded forms for random z draws (64/64)
+- **Architecture**: 8 memory tokens, multi-scale attention [3,3,7,7,15,15,full,full], RoPE, weight-shared layers (2 unique × 4)
+
+**v5-leaf-27 (previous, leaf-level phrases)**: 4M leaf-level phrase constituents from 12 languages. Syllable-aligned BPE, max_seq_len=27 (auto-scaled). Val CE: short=0.006, med=0.065.
+
+- **Key finding**: leaf decoder produced 100% unique forms for diverse z, but expression game's `_input_proj` collapsed to 5.8% of z-space → only 1,519/10,000 unique surface forms
+- **12 languages**: eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin
 - **Vietnamese recovered**: word-alignment of constituents against parent sentence IPA
-- **Key insight**: leaf-only extraction means the decoder learns atoms; the expression game composes them
 
 ## Agent Game Results
 
@@ -145,17 +145,27 @@ Referential game with direct backprop through the v5 frozen decoder (all-MiniLM-
 
 ### Expression Game
 
-Expression game using a GRU-based z-sequence generator with PonderNet geometric-prior halting (Banino et al., ICML 2021), replacing the earlier REINFORCE tree topology approach:
-- **z_0**: Direct projection of input embedding (discriminative from step 0, same as referential game)
-- **z_1..z_K**: GRU autoregressively generates subsequent z vectors conditioned on prior segments
-- **Each z**: Decoded through the frozen decoder until EOS, with KV cache persisting across segments for coarticulation
-- **PonderNet halting**: Per-step halt probability regularized toward geometric prior p(k) = lambda(1-lambda)^{k-1}. lambda=0.4 -> E[K]=2.5 segments. KL divergence prevents segment count explosion without manual tuning
-- **Two-phase backprop**: Same as referential game -- no_grad generation, then parallel decoder re-run with gradients through cross-attention
-- **93.8% peak accuracy** at 100% hard negatives (16-way, within-cluster distractors)
-- ~2.6 segments stable (PonderNet prior prevents expansion to max)
-- Average message length: ~15 tokens across segments (~6 tokens per segment)
-- v5-leaf decoder produces phrase-level expressions
-- Converges in ~50 steps to >95%
+Two z-sequence generators available, selectable via `--z-generator`:
+
+**GRU mode** (`--z-generator gru`, default): Autoregressive z-sequence with independent per-segment gates.
+- **z_0**: Direct projection of input embedding
+- **z_1..z_K**: GRU generates subsequent z vectors conditioned on prior segments
+- **Independent gates**: Each segment has its own sigmoid gate (not cumulative PonderNet). Biased closed at init.
+- **97.7% peak accuracy** at 100% hard negatives with z diversity regularization (z_sim=0.20)
+
+**Diffusion mode** (`--z-generator diffusion`): Flow-matching denoiser refines all K z positions simultaneously.
+- **T=4 reverse steps**: noise → clean z, all differentiable, trained end-to-end through game loss
+- **DenoiserBlock**: self-attention across K positions (segments co-adapt) + cross-attention to input embedding
+- **Activity head**: per-position sigmoid with Zipfian initialization replaces halt gate
+- **Solves by construction**: z-space coverage (noise schedule), segment co-adaptation (parallel refinement), variable length (activity scores)
+
+**Shared components** (both modes):
+- Two-phase backprop: no_grad KV-cached decode → parallel decoder re-run with gradients
+- Dual-path scoring: surface bottleneck (straight-through token re-embedding) + hidden-state path (annealed)
+- ZDistributionLoss: moment-matching keeps projected z spread across decoder's training distribution
+- ZDiversityLoss: hinge loss on intra-expression z cosine similarity
+
+**Key diagnostic**: Surface diversity (unique decoded token sequences per N inputs). Measured via `lfm visualize surface-diversity` and logged per-epoch during pretraining.
 
 ### Evaluation Scripts
 
@@ -200,9 +210,13 @@ Both eval scripts accept `--input_proj data/input_proj.pt` to evaluate a trained
 - `poetry run lfm dataset list --detail` — List installed datasets with per-language stats
 - `poetry run lfm agent referential` — Train referential game (direct backprop)
 - `poetry run lfm agent referential --steps 2000 --batch-size 256` — With custom settings
-- `poetry run lfm agent expression` — Train expression game (GRU z-sequence + PonderNet)
-- `poetry run lfm agent expression --steps 2000 --batch-size 256` — With custom settings
-- `poetry run lfm agent expression --lambda-p 0.3 --kl-beta 1.0` — More segments (lower lambda = higher E[K])
+- `poetry run lfm pretrain configs/pretrain_vae_v7.yaml` — Pretrain VAE decoder from config
+- `poetry run lfm agent expression` — Train expression game (GRU z-sequence)
+- `poetry run lfm agent expression --z-generator diffusion` — Train with diffusion z-sequence
+- `poetry run lfm agent expression --z-distribution-weight 1.0` — With z-space coverage matching
+- `poetry run lfm agent expression --z-diversity-weight 0.01` — With intra-expression diversity
+- `poetry run lfm explore expression-sample --checkpoint data/expression_game/best.pt` — Sample expressions
+- `poetry run lfm visualize surface-diversity --checkpoint data/vae_resume.pt` — Surface diversity analysis
 - `poetry run lfm publish model --repo-id user/lfm-decoder-v1` — Publish decoder to HuggingFace
 - `poetry run lfm publish dataset --repo-id user/lfm-ipa-12lang` — Publish IPA corpus to HuggingFace
 
