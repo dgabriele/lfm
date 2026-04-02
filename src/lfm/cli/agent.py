@@ -168,6 +168,10 @@ class ExpressionCommand(CLICommand):
                             help="Target E[K] for length regularization (default: 2.5)")
         parser.add_argument("--length-weight", type=float, default=0.5,
                             help="Length distribution loss weight (default: 0.5)")
+        parser.add_argument("--use-ipa-receiver", action="store_true",
+                            help="Score based on IPA token representations instead of raw embeddings")
+        parser.add_argument("--ipa-cache-refresh", type=int, default=0,
+                            help="Refresh IPA cache every N steps (0=never)")
         parser.add_argument("--no-halt", action="store_true",
                             help="Disable PonderNet halting (always use all segments)")
         parser.add_argument("--z-diversity-weight", type=float, default=0.0,
@@ -204,6 +208,8 @@ class ExpressionCommand(CLICommand):
             z_hidden_dim=args.z_hidden_dim,
             max_segments=args.max_segments,
             max_tokens_per_segment=args.max_tokens_per_segment,
+            use_ipa_receiver=args.use_ipa_receiver,
+            ipa_cache_refresh=args.ipa_cache_refresh,
             z_generator=args.z_generator,
             diffusion_steps=args.diffusion_steps,
             diffusion_layers=args.diffusion_layers,

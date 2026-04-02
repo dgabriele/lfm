@@ -23,6 +23,7 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 from lfm.agents.components import (
+    IPAEncoder,
     MessageEncoder,
     Receiver,
     ZDistributionLoss,
@@ -88,6 +89,12 @@ class ExpressionGameConfig(LFMBaseConfig):
     # annealed from hidden_state_weight -> 0 over hidden_state_anneal_steps.
     hidden_state_weight: float = 1.0
     hidden_state_anneal_steps: int = 1000
+
+    # IPA-to-IPA receiver: score based on IPA token representations
+    # instead of raw embeddings. Forces surface forms to be discriminative.
+    use_ipa_receiver: bool = False
+    ipa_cache_refresh: int = 0  # 0 = no refresh, N = refresh every N steps
+    ipa_encoder_init_from_decoder: bool = True
 
     # Message encoder
     encoder: MessageEncoderConfig = MessageEncoderConfig()
@@ -369,6 +376,23 @@ class ExpressionGame(nn.Module):
 
         self.receiver = Receiver(config.embedding_dim)
 
+        # IPA-to-IPA receiver
+        if config.use_ipa_receiver:
+            full_vocab = gen._full_vocab
+            self.ipa_encoder = IPAEncoder(
+                full_vocab, hidden_dim, config.embedding_dim,
+                num_heads=config.encoder.num_heads,
+                num_layers=config.encoder.num_layers,
+            )
+            if config.ipa_encoder_init_from_decoder:
+                self.ipa_encoder.init_from_decoder(gen.token_embedding)
+        else:
+            self.ipa_encoder = None
+
+        # IPA cache (populated by build_ipa_cache before training)
+        self._ipa_cache_tokens: Tensor | None = None
+        self._ipa_cache_masks: Tensor | None = None
+
         if config.z_diversity_weight > 0 and gen._z_stats_initialized:
             self.z_diversity = ZDiversityLoss(
                 gen._z_mean, gen._z_std,
@@ -391,6 +415,26 @@ class ExpressionGame(nn.Module):
         """Shortcut to the underlying generator."""
         return self.faculty.generator
 
+    @torch.no_grad()
+    def build_ipa_cache(self, embeddings: Tensor, batch_size: int = 64) -> None:
+        """Decode all embeddings and cache token sequences for IPA receiver."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        self.eval()
+        tokens_list, masks_list = [], []
+        for start in range(0, embeddings.size(0), batch_size):
+            batch = embeddings[start:start + batch_size]
+            z_out = self.z_gen(batch)
+            z_seq, z_weights = z_out[0], z_out[-2]  # works for both 3 and 4 returns
+            tokens, mask, _ = self._multiseg_decode(z_seq, z_weights)
+            tokens_list.append(tokens.cpu())
+            masks_list.append(mask.cpu())
+        self._ipa_cache_tokens = torch.cat(tokens_list)
+        self._ipa_cache_masks = torch.cat(masks_list)
+        self.train()
+        logger.info("Built IPA cache: %d sequences", self._ipa_cache_tokens.size(0))
+
     def checkpoint_state(self) -> dict:
         """Return state dict for checkpointing."""
         cfg = self.config
@@ -399,7 +443,9 @@ class ExpressionGame(nn.Module):
             "msg_encoder": self.msg_encoder.state_dict(),
             "surface_encoder": self.surface_encoder.state_dict(),
             "receiver": self.receiver.state_dict(),
+            **({"ipa_encoder": self.ipa_encoder.state_dict()} if self.ipa_encoder is not None else {}),
             # Architectural config (must match on resume)
+            "use_ipa_receiver": cfg.use_ipa_receiver,
             "z_generator": cfg.z_generator,
             "embedding_dim": cfg.embedding_dim,
             "z_hidden_dim": cfg.z_hidden_dim,
@@ -428,19 +474,25 @@ class ExpressionGame(nn.Module):
         if "surface_encoder" in ckpt:
             self.surface_encoder.load_state_dict(ckpt["surface_encoder"])
         self.receiver.load_state_dict(ckpt["receiver"])
+        if self.ipa_encoder is not None and "ipa_encoder" in ckpt:
+            self.ipa_encoder.load_state_dict(ckpt["ipa_encoder"])
 
     def trainable_param_groups(self) -> list[dict]:
         """Return optimizer param groups with per-group learning rates."""
-        return [
+        groups = [
             {"params": list(self.z_gen.parameters()), "lr": self.config.gru_lr},
             {"params": list(self.msg_encoder.parameters()), "lr": self.config.receiver_lr},
             {"params": list(self.surface_encoder.parameters()), "lr": self.config.receiver_lr},
             {"params": list(self.receiver.parameters()), "lr": self.config.receiver_lr},
         ]
+        if self.ipa_encoder is not None:
+            groups.append({"params": list(self.ipa_encoder.parameters()), "lr": self.config.receiver_lr})
+        return groups
 
     def forward(
         self, anchor: Tensor, distractors: Tensor,
         *, step: int = 0,
+        candidate_indices: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Two-phase expression game forward pass.
 
@@ -502,54 +554,107 @@ class ExpressionGame(nn.Module):
         )
         per_pos_weight = z_weights.gather(1, seg_assign)  # (B, T)
 
-        # Prepare candidates (shared between paths)
-        candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
-        perm = torch.stack([
-            torch.randperm(num_candidates, device=device)
-            for _ in range(batch)
-        ])
-        perm_expanded = perm.unsqueeze(-1).expand_as(candidates)
-        candidates = torch.gather(candidates, 1, perm_expanded)
-        target_idx = (perm == 0).long().argmax(dim=1)
-
         cfg = self.config
 
-        # Hidden-state loss — scale by per-segment gate for direct
-        # gradient to the gate head
-        hidden_message = self.msg_encoder(
-            hidden * per_pos_weight.unsqueeze(-1), trimmed_mask,
-        )
-        hidden_logits = self.receiver(hidden_message, candidates)
-        hidden_loss = F.cross_entropy(hidden_logits, target_idx)
-
-        # Surface loss (anneals IN as hidden-state anneals OUT)
-        anneal = cfg.hidden_state_anneal_steps
-        if anneal > 0 and cfg.hidden_state_weight > 0:
-            t = min(step / anneal, 1.0)
-            hs_weight = cfg.hidden_state_weight * (1.0 - t)
-            surface_weight = t
-        else:
-            hs_weight = cfg.hidden_state_weight
-            surface_weight = 0.0 if hs_weight > 0 else 1.0
-
-        if surface_weight > 0:
-            # Surface path: project hidden → logits → soft tokens → re-embed
-            logits_per_pos = self.gen.output_head(hidden)  # (B, T, V)
+        # --- IPA-to-IPA receiver path ---
+        if self.ipa_encoder is not None and candidate_indices is not None:
+            # Sender: encode live tokens through IPA encoder
+            # Use straight-through surface tokens for gradient flow
+            logits_per_pos = self.gen.output_head(hidden)
             soft_probs = F.softmax(logits_per_pos, dim=-1)
-            hard_ids = logits_per_pos.argmax(dim=-1)  # (B, T)
+            hard_ids = logits_per_pos.argmax(dim=-1)
             hard_onehot = F.one_hot(hard_ids, logits_per_pos.size(-1)).float()
             straight_through = (hard_onehot - soft_probs).detach() + soft_probs
-            surface_repr = straight_through @ self.gen.token_embedding.weight
-            surface_message = self.surface_encoder(
-                surface_repr * per_pos_weight.unsqueeze(-1), trimmed_mask,
+            sender_embedded = straight_through @ self.ipa_encoder.token_embed.weight
+            sender_vec = self.ipa_encoder.encoder(
+                sender_embedded * per_pos_weight.unsqueeze(-1), trimmed_mask,
             )
-            surface_logits = self.receiver(surface_message, candidates)
-            surface_loss = F.cross_entropy(surface_logits, target_idx)
-        else:
-            surface_logits = hidden_logits
-            surface_loss = torch.tensor(0.0, device=device)
 
-        receiver_loss = surface_weight * surface_loss + hs_weight * hidden_loss
+            # Candidates: look up cached IPA, encode (no grad on cache, grad on encoder)
+            # candidate_indices: (B, 16) — indices into the IPA cache
+            perm = torch.stack([
+                torch.randperm(num_candidates, device=device)
+                for _ in range(batch)
+            ])
+            perm_indices = torch.gather(candidate_indices, 1, perm)
+            target_idx = (perm == 0).long().argmax(dim=1)
+
+            cand_tokens = self._ipa_cache_tokens[perm_indices.cpu()].to(device)
+            cand_masks = self._ipa_cache_masks[perm_indices.cpu()].to(device)
+
+            # Encode each candidate: (B, 16, T) → (B, 16, output_dim)
+            B, K_cand, T_cand = cand_tokens.shape
+            cand_flat = cand_tokens.reshape(B * K_cand, T_cand)
+            mask_flat = cand_masks.reshape(B * K_cand, T_cand)
+            cand_vecs = self.ipa_encoder(cand_flat, mask_flat)
+            candidate_vecs = cand_vecs.reshape(B, K_cand, -1)
+
+            ipa_logits = self.receiver(sender_vec, candidate_vecs)
+            ipa_loss = F.cross_entropy(ipa_logits, target_idx)
+
+            # IPA path is the primary loss; hidden-state is auxiliary
+            surface_logits = ipa_logits
+            surface_loss = ipa_loss
+            # Skip the old surface/hidden-state dual-path logic
+            hs_weight = cfg.hidden_state_weight
+            if hs_weight > 0:
+                candidates_emb = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
+                perm_expanded = perm.unsqueeze(-1).expand_as(candidates_emb)
+                candidates_emb = torch.gather(candidates_emb, 1, perm_expanded)
+                hidden_message = self.msg_encoder(
+                    hidden * per_pos_weight.unsqueeze(-1), trimmed_mask,
+                )
+                hidden_logits = self.receiver(hidden_message, candidates_emb)
+                hidden_loss = F.cross_entropy(hidden_logits, target_idx)
+            else:
+                hidden_loss = torch.tensor(0.0, device=device)
+            receiver_loss = ipa_loss + hs_weight * hidden_loss
+        else:
+            # --- Original embedding-based receiver path ---
+            candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
+            perm = torch.stack([
+                torch.randperm(num_candidates, device=device)
+                for _ in range(batch)
+            ])
+            perm_expanded = perm.unsqueeze(-1).expand_as(candidates)
+            candidates = torch.gather(candidates, 1, perm_expanded)
+            target_idx = (perm == 0).long().argmax(dim=1)
+
+            # Hidden-state loss
+            hidden_message = self.msg_encoder(
+                hidden * per_pos_weight.unsqueeze(-1), trimmed_mask,
+            )
+            hidden_logits = self.receiver(hidden_message, candidates)
+            hidden_loss = F.cross_entropy(hidden_logits, target_idx)
+
+            # Surface loss (anneals IN as hidden-state anneals OUT)
+            anneal = cfg.hidden_state_anneal_steps
+            if anneal > 0 and cfg.hidden_state_weight > 0:
+                t = min(step / anneal, 1.0)
+                hs_weight = cfg.hidden_state_weight * (1.0 - t)
+                surface_weight = t
+            else:
+                hs_weight = cfg.hidden_state_weight
+                surface_weight = 0.0 if hs_weight > 0 else 1.0
+
+            if surface_weight > 0:
+                # Surface path: project hidden → logits → soft tokens → re-embed
+                logits_per_pos = self.gen.output_head(hidden)
+                soft_probs = F.softmax(logits_per_pos, dim=-1)
+                hard_ids = logits_per_pos.argmax(dim=-1)
+                hard_onehot = F.one_hot(hard_ids, logits_per_pos.size(-1)).float()
+                straight_through = (hard_onehot - soft_probs).detach() + soft_probs
+                surface_repr = straight_through @ self.gen.token_embedding.weight
+                surface_message = self.surface_encoder(
+                    surface_repr * per_pos_weight.unsqueeze(-1), trimmed_mask,
+                )
+                surface_logits = self.receiver(surface_message, candidates)
+                surface_loss = F.cross_entropy(surface_logits, target_idx)
+            else:
+                surface_logits = hidden_logits
+                surface_loss = torch.tensor(0.0, device=device)
+
+            receiver_loss = surface_weight * surface_loss + hs_weight * hidden_loss
 
         # Length regularization
         total_tokens = trimmed_mask.float().sum(dim=1)

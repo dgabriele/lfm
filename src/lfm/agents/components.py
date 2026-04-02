@@ -206,6 +206,53 @@ class ZDistributionLoss(nn.Module):
         return mean_loss + std_loss, ratio
 
 
+class IPAEncoder(nn.Module):
+    """Encode IPA token sequences into fixed-size vectors.
+
+    Wraps a token embedding lookup + ``MessageEncoder`` (self-attention
+    + learned query readout).  Both the sender's live expression and
+    the cached candidate expressions go through the same encoder,
+    enabling IPA-to-IPA comparison in the receiver.
+
+    Args:
+        vocab_size: Full vocabulary size (including BOS/EOS).
+        hidden_dim: Token embedding and encoder hidden dimension.
+        output_dim: Output message vector dimension.
+        num_heads: Attention heads.
+        num_layers: Self-attention layers.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_dim: int,
+        output_dim: int,
+        num_heads: int = 8,
+        num_layers: int = 2,
+    ) -> None:
+        super().__init__()
+        self.token_embed = nn.Embedding(vocab_size, hidden_dim)
+        self.encoder = MessageEncoder(hidden_dim, output_dim, num_heads, num_layers)
+
+    def init_from_decoder(self, decoder_token_embedding: nn.Embedding) -> None:
+        """Warm-start token embeddings from the frozen decoder."""
+        with torch.no_grad():
+            self.token_embed.weight.copy_(decoder_token_embedding.weight)
+
+    def forward(self, token_ids: Tensor, mask: Tensor) -> Tensor:
+        """Encode IPA tokens to a fixed-size vector.
+
+        Args:
+            token_ids: ``(batch, seq_len)`` token IDs.
+            mask: ``(batch, seq_len)`` boolean mask (True = valid).
+
+        Returns:
+            ``(batch, output_dim)`` message vector.
+        """
+        embedded = self.token_embed(token_ids)
+        return self.encoder(embedded, mask)
+
+
 class Receiver(nn.Module):
     """Score candidates against the message via learned dot-product.
 

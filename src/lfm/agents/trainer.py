@@ -62,7 +62,7 @@ class AgentTrainer:
 
     def _sample_batch(
         self, step: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, float, torch.Tensor | None]:
         """Sample anchor + distractors with curriculum difficulty."""
         cfg = self.config
         curriculum = cfg.curriculum
@@ -101,7 +101,13 @@ class AgentTrainer:
             self._embeddings[dist_indices], dtype=torch.float32,
         ).to(self.device)
 
-        return anchor, distractors, hard_ratio
+        # Build candidate indices for IPA receiver (anchor + distractors)
+        all_indices = np.concatenate(
+            [idx.reshape(-1, 1), dist_indices], axis=1,
+        )  # (batch, 1 + num_distractors)
+        candidate_indices = torch.tensor(all_indices, dtype=torch.long)
+
+        return anchor, distractors, hard_ratio, candidate_indices
 
     def _save_checkpoint(
         self, step: int, accuracy: float, hard_ratio: float = 1.0,
@@ -169,13 +175,28 @@ class AgentTrainer:
         results: dict[str, float] = {}
         accum = getattr(cfg, "gradient_accumulation_steps", 1)
 
+        # Build IPA cache if using IPA receiver
+        use_ipa = getattr(cfg, "use_ipa_receiver", False)
+        if use_ipa and hasattr(game, "build_ipa_cache"):
+            all_embs = torch.tensor(self._embeddings, dtype=torch.float32).to(self.device)
+            game.build_ipa_cache(all_embs, batch_size=64)
+        ipa_refresh = getattr(cfg, "ipa_cache_refresh", 0)
+
         for step in range(start_step, cfg.steps):
+            # Refresh IPA cache periodically
+            if use_ipa and ipa_refresh > 0 and step > 0 and step % ipa_refresh == 0:
+                all_embs = torch.tensor(self._embeddings, dtype=torch.float32).to(self.device)
+                game.build_ipa_cache(all_embs, batch_size=64)
+
             # Accumulate gradients over multiple micro-batches
             self.optimizer.zero_grad()
             acc_sum = 0.0
             for micro in range(accum):
-                anchor, distractors, hard_ratio = self._sample_batch(step)
-                out = game(anchor, distractors, step=step)
+                anchor, distractors, hard_ratio, cand_idx = self._sample_batch(step)
+                out = game(
+                    anchor, distractors, step=step,
+                    candidate_indices=cand_idx.to(self.device) if use_ipa else None,
+                )
                 loss = out["loss"] / accum
                 loss.backward()
                 acc_sum += out["accuracy"].item()
