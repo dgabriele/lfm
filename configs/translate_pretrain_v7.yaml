@@ -1,4 +1,6 @@
 # Self-supervised pretraining on romanized IPA corpus (v7 decoder)
+# For fresh start: Qwen/Qwen2.5-0.5B
+# For resume after epoch 1: data/translator_v7_selfsup/model
 model_name: Qwen/Qwen2.5-0.5B
 corpus_path: data/translator/corpus_v7.txt
 output_dir: data/translator_v7_selfsup
