@@ -1,0 +1,18 @@
+# Self-supervised pretraining on romanized IPA corpus (v7 decoder)
+model_name: Qwen/Qwen2.5-0.5B
+corpus_path: data/translator/corpus_v7.txt
+output_dir: data/translator_v7_selfsup
+
+# Training
+epochs: 3
+lr: 5.0e-5
+batch_size: 2
+gradient_accumulation_steps: 64
+max_len: 128
+use_amp: true
+warmup_fraction: 0.1
+max_grad_norm: 1.0
+
+# Runtime
+device: cuda
+seed: 42
