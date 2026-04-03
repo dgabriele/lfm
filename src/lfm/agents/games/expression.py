@@ -440,18 +440,33 @@ class ExpressionGame(nn.Module):
         logger = logging.getLogger(__name__)
 
         self.eval()
+        total = embeddings.size(0)
+        logger.info("Building IPA cache: %d embeddings, batch_size=%d ...", total, batch_size)
         tokens_list, masks_list = [], []
-        for start in range(0, embeddings.size(0), batch_size):
+        for start in range(0, total, batch_size):
             batch = embeddings[start:start + batch_size]
             z_out = self.z_gen(batch)
-            z_seq, z_weights = z_out[0], z_out[-2]  # works for both 3 and 4 returns
+            z_seq, z_weights = z_out[0], z_out[-2]
             tokens, mask, _ = self._multiseg_decode(z_seq, z_weights)
             tokens_list.append(tokens.cpu())
+            if (start // batch_size) % 50 == 0:
+                pct = (start + batch.size(0)) / total * 100
+                mb = sum(t.nelement() * t.element_size() for t in tokens_list + masks_list) / 1e6
+                logger.info("  IPA cache: %d / %d (%.0f%%) %.0fMB", start + batch.size(0), total, pct, mb)
             masks_list.append(mask.cpu())
         self._ipa_cache_tokens = torch.cat(tokens_list)
         self._ipa_cache_masks = torch.cat(masks_list)
         self.train()
         logger.info("Built IPA cache: %d sequences", self._ipa_cache_tokens.size(0))
+
+        # Persist to disk for fast reload
+        cache_path = Path(self.config.output_dir) / "ipa_cache.pt"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            "tokens": self._ipa_cache_tokens,
+            "masks": self._ipa_cache_masks,
+        }, cache_path)
+        logger.info("Saved IPA cache to %s", cache_path)
 
     def checkpoint_state(self) -> dict:
         """Return state dict for checkpointing."""

@@ -175,11 +175,19 @@ class AgentTrainer:
         results: dict[str, float] = {}
         accum = getattr(cfg, "gradient_accumulation_steps", 1)
 
-        # Build IPA cache if using IPA receiver
+        # Build or load IPA cache if using IPA receiver
         use_ipa = getattr(cfg, "use_ipa_receiver", False)
         if use_ipa and hasattr(game, "build_ipa_cache"):
-            all_embs = torch.tensor(self._embeddings, dtype=torch.float32).to(self.device)
-            game.build_ipa_cache(all_embs, batch_size=64)
+            from pathlib import Path as _Path
+            cache_path = _Path(cfg.output_dir) / "ipa_cache.pt"
+            if cache_path.exists():
+                _cache = torch.load(cache_path, map_location="cpu", weights_only=False)
+                game._ipa_cache_tokens = _cache["tokens"]
+                game._ipa_cache_masks = _cache["masks"]
+                logger.info("Loaded IPA cache from %s (%d sequences)", cache_path, game._ipa_cache_tokens.size(0))
+            else:
+                all_embs = torch.tensor(self._embeddings, dtype=torch.float32).to(self.device)
+                game.build_ipa_cache(all_embs, batch_size=64)
         ipa_refresh = getattr(cfg, "ipa_cache_refresh", 0)
 
         for step in range(start_step, cfg.steps):

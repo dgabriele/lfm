@@ -32,10 +32,13 @@ use_halt: false
 use_ipa_receiver: true
 ipa_cache_refresh: 500
 
+# No curriculum — 100% hard from start (phase 1 already trained)
+no_curriculum: true
+
 # Training — resume from phase 1 checkpoint
 # resume: data/expression_game_v5-leaf-diffusion-300k/best.pt
-batch_size: 128
-gradient_accumulation_steps: 2
+batch_size: 256
+gradient_accumulation_steps: 1
 steps: 6000
 gru_lr: 0.0001
 receiver_lr: 0.0003

@@ -32,8 +32,8 @@ use_halt: false
 use_ipa_receiver: false
 
 # Training
-batch_size: 48
-gradient_accumulation_steps: 5
+batch_size: 80
+gradient_accumulation_steps: 3
 steps: 4000
 gru_lr: 0.0001
 receiver_lr: 0.0003
