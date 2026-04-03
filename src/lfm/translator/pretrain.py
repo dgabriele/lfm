@@ -118,7 +118,10 @@ class SelfSupervisedTrainer:
         from torch.optim.lr_scheduler import CosineAnnealingLR
         scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=cfg.lr * 0.1)
 
-        scaler = torch.amp.GradScaler(enabled=cfg.use_amp)
+        # Disable GradScaler if model uses bfloat16 (Qwen default)
+        model_dtype = next(model.parameters()).dtype
+        use_scaler = cfg.use_amp and model_dtype != torch.bfloat16
+        scaler = torch.amp.GradScaler(enabled=use_scaler)
 
         # Output dir
         output_dir = Path(cfg.output_dir)
@@ -143,7 +146,7 @@ class SelfSupervisedTrainer:
                 attention_mask = batch["attention_mask"].to(device)
                 labels = batch["labels"].to(device)
 
-                with torch.amp.autocast(device_type=device.type, enabled=cfg.use_amp):
+                with torch.amp.autocast(device_type=device.type, enabled=cfg.use_amp, dtype=model_dtype):
                     outputs = model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,

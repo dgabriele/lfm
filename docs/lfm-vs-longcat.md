@@ -85,7 +85,7 @@ This is structurally compositional: the expression is built from discrete atomic
 
 Measured compositionality after curriculum training: topographic similarity 0.335 (p approximately 0), topology preservation 0.366 (p approximately 0), 100% of probed dimensions showing positive R-squared. These are quantitative guarantees that the compositional structure is carrying semantic information.
 
-## Grounding and Semantic Autonomy
+## Grounding, Semantic Autonomy, and Alien Ontology
 
 This is the deepest difference between the two approaches.
 
@@ -93,15 +93,19 @@ This is the deepest difference between the two approaches.
 
 A VQ token's meaning is determined by its co-occurrence patterns with text tokens during multimodal training. The language model learns "this vision token pattern tends to appear near the word 'dog'" and develops an association. The semantics of the multimodal token space are parasitic on the pre-existing text semantics.
 
-This means the system can only express concepts that the language model already has words for. Novel visual concepts -- patterns that don't correspond to any existing text description -- get mapped to the nearest existing concept, because the LM's loss function rewards producing text that matches training captions.
+This means the system can only express concepts that the language model already has words for. Novel visual concepts -- patterns that don't correspond to any existing text description -- get mapped to the nearest existing concept, because the LM's loss function rewards producing text that matches training captions. The system is constrained to the human ontology baked into the LM's training data.
 
-### LFM: semantics from the source domain
+### LFM: the source domain's native ontology
 
-LFM's frozen decoder has no access to English semantics during agent training. The decoder was pretrained on IPA transcriptions of natural language sentences, but during game training, it receives z vectors from the learned projection and produces whatever IPA sequence those z vectors elicit.
+LFM's frozen decoder has no access to English semantics during expression game training. The decoder produces IPA from z vectors that encode the source system's own internal representations -- its native way of carving up the world.
 
-The meaning of a particular IPA utterance is determined entirely by the agent's training signal -- in the referential game, by what distinguishes the target from distractors; in the expression game, by what enables the receiver to recover the original embedding. The semantics are grounded in the source domain's structure, not in pre-existing linguistic associations.
+A sentence-transformer embedding doesn't encode "the dog ran" as a bag of words. It encodes a point in semantic space shaped by the transformer's training -- a perspective that may group "financial crash" with "earthquake" (both sudden collapses) or separate "running for exercise" from "running from danger" (same English word, different embeddings). The IPA expression encodes this alien ontology, not the English description.
 
-This is why LFM's approach to translation is post-hoc: the LLM translates *after* the agent has developed its own semantic system, rather than the agent being forced to express itself in terms the LLM already understands. The LQM comparison document calls this "translation, not alignment" -- the same principle applies here.
+When an LLM learns the alien language through self-supervised pretraining (next-token prediction on a large romanized IPA corpus) and then translates via few-shot cross-lingual transfer, it is performing an act of *interpretation*, not dictionary lookup. The translation reveals how the source system sees the world -- which concepts it groups together, which distinctions it considers important, what structure it perceives in its input domain. The English output might be a paraphrase, an abstract description, or an unexpected reframing, because the source system's conceptual categories don't align with human language.
+
+This applies to any continuous representation: a dynamics model's latent state might produce IPA that an LLM translates as "stable oscillation approaching bifurcation" -- not because anyone labeled dynamics with English, but because the IPA expression's distributional properties activate the LLM's existing concepts in a way that captures the dynamics embedding's native meaning.
+
+The LFM pipeline is thus: **source ontology → alien language → human interpretation**. The alien language is the faithful channel; the LLM is the interpreter. LongCat-Next's pipeline is: **source data → human ontology tokens → human language**. The source system never gets its own voice.
 
 ## Bidirectional Communication
 
@@ -137,8 +141,10 @@ This means the system supports genuine bidirectional communication. An external 
 
 LongCat-Next asks: **"How do we get non-linguistic data into a language model?"** The answer is discretization into the model's token space.
 
-LFM asks: **"How do we give non-linguistic systems the ability to speak?"** The answer is a frozen linguistic decoder that imposes natural language structure on arbitrary continuous representations.
+LFM asks: **"What would this system say if it could speak?"** The answer is a frozen linguistic decoder that gives any continuous representation a voice shaped by human language universals, but speaking from its own perspective.
 
-The first framing treats language as the destination -- the goal is to convert everything into text-like tokens so the language model can process them. The second treats language as a medium -- a structured communication channel whose form is constrained by universal linguistic principles but whose content is determined by the source domain.
+The first framing treats language as the destination -- the goal is to convert everything into text-like tokens so the language model can process them. The source system's native representations are discarded in favor of a shared vocabulary that the LM already understands. The second framing treats language as a medium for expressing alien perspectives -- a structured communication channel whose form is constrained by universal linguistic principles but whose content is the source domain's own ontology.
 
-For tasks where the goal is to produce text (captioning, QA), LongCat-Next's framing is natural and effective. For tasks where the goal is to enable autonomous agents to communicate, to express novel concepts, or to build interpretable interfaces to continuous systems, LFM's framing opens a different design space -- one where the linguistic structure is not a product of the language model's training data, but an architectural prior inherited from the typological diversity of human language.
+The translation step in LFM is not a technical convenience but a philosophical commitment: the source system has something to say that may not reduce to existing human concepts. The LLM translator is an interpreter between worldviews, not a decoder of a cipher. The emergent language encodes the source system's native understanding of its domain -- which structures it considers similar, which distinctions it deems important, how it decomposes complexity into compositional parts. The English translation is one possible human interpretation of that understanding, not the canonical one.
+
+For tasks where the goal is to produce text (captioning, QA), LongCat-Next's framing is natural and effective. For tasks where the goal is to understand what autonomous systems perceive -- to see what they see and understand what they understand -- LFM's framing opens a different design space. One where the linguistic structure is an architectural prior from human language universals, the semantic content comes from the source domain's native representations, and the human interpretation emerges through the LLM's cross-lingual transfer rather than through supervised alignment.
