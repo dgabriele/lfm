@@ -100,3 +100,40 @@ class TranslatorConfig(LFMBaseConfig):
     output_dir: str = "data/translator"
     device: str = "cuda"
     seed: int = 42
+
+
+class CorpusConfig(LFMBaseConfig):
+    """Configuration for generating romanized IPA corpus.
+
+    The corpus is used for self-supervised LLM pretraining:
+    the LLM learns the alien language via next-token prediction,
+    then translates via few-shot cross-lingual transfer.
+    """
+
+    expression_checkpoint: str = "data/expression_game/best.pt"
+    decoder_path: str = "data/vae_decoder.pt"
+    spm_path: str = "data/spm.model"
+    embedding_store_dir: str = "data/embeddings"
+    num_passes: int = 5
+    batch_size: int = 16
+    output_path: str = "data/translator/corpus.txt"
+    device: str = "cuda"
+    seed: int = 42
+
+
+class PretrainConfig(LFMBaseConfig):
+    """Configuration for self-supervised LLM pretraining on IPA corpus."""
+
+    model_name: str = "Qwen/Qwen2.5-0.5B"
+    corpus_path: str = "data/translator/corpus.txt"
+    epochs: int = 5
+    lr: float = 5e-5
+    batch_size: int = 8
+    max_len: int = 128
+    gradient_accumulation_steps: int = 4
+    use_amp: bool = True
+    warmup_fraction: float = 0.1
+    max_grad_norm: float = 1.0
+    output_dir: str = "data/translator"
+    device: str = "cuda"
+    seed: int = 42
