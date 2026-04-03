@@ -313,6 +313,52 @@ class EvalPhonologyCommand(CLICommand):
         return 0
 
 
+class PretrainCommand(CLICommand):
+    """Self-supervised pretraining on romanized IPA corpus."""
+
+    @property
+    def name(self) -> str:
+        return "pretrain"
+
+    @property
+    def help(self) -> str:
+        return "Self-supervised pretraining on IPA corpus (next-token prediction)"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--model-name", default="Qwen/Qwen2.5-0.5B")
+        parser.add_argument("--corpus", default="data/translator/corpus.txt")
+        parser.add_argument("--epochs", type=int, default=5)
+        parser.add_argument("--lr", type=float, default=5e-5)
+        parser.add_argument("--batch-size", type=int, default=8)
+        parser.add_argument("--max-len", type=int, default=128)
+        parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+        parser.add_argument("--output-dir", default="data/translator")
+        parser.add_argument("--device", default="cuda")
+        parser.add_argument("--seed", type=int, default=42)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        from lfm.translator.config import PretrainConfig
+        from lfm.translator.pretrain import SelfSupervisedTrainer
+
+        config = PretrainConfig(
+            model_name=args.model_name,
+            corpus_path=args.corpus,
+            epochs=args.epochs,
+            lr=args.lr,
+            batch_size=args.batch_size,
+            max_len=args.max_len,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            output_dir=args.output_dir,
+            device=args.device,
+            seed=args.seed,
+        )
+
+        trainer = SelfSupervisedTrainer(config)
+        results = trainer.train()
+        print(f"Best val_loss: {results['best_val_loss']:.4f}")
+        return 0
+
+
 class GenerateCorpusCommand(CLICommand):
     """Generate romanized IPA corpus for self-supervised LLM pretraining."""
 
@@ -376,6 +422,7 @@ def register_translate_group(
     commands = [
         GeneratePairsCommand(),
         GenerateCorpusCommand(),
+        PretrainCommand(),
         TrainCommand(),
         EvalCommand(),
         EvalPhonologyCommand(),
