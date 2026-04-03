@@ -110,13 +110,19 @@ class SelfSupervisedTrainer:
 
         logger.info("Train: %d examples, Val: %d examples", len(train_dataset), len(val_dataset))
 
-        # Optimizer + scheduler
+        # Optimizer + scheduler (linear warmup + cosine decay)
         optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=0.01)
         total_steps = len(train_loader) // cfg.gradient_accumulation_steps * cfg.epochs
         warmup_steps = int(total_steps * cfg.warmup_fraction)
 
-        from torch.optim.lr_scheduler import CosineAnnealingLR
-        scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=cfg.lr * 0.1)
+        def _lr_lambda(step: int) -> float:
+            if step < warmup_steps:
+                return step / max(warmup_steps, 1)
+            progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+            return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        from torch.optim.lr_scheduler import LambdaLR
+        scheduler = LambdaLR(optimizer, _lr_lambda)
 
         # Disable GradScaler if model uses bfloat16 (Qwen default)
         model_dtype = next(model.parameters()).dtype
@@ -164,12 +170,6 @@ class SelfSupervisedTrainer:
                     scheduler.step()
                     optimizer.zero_grad()
                     global_step += 1
-
-                    # Warmup
-                    if global_step <= warmup_steps:
-                        lr_scale = global_step / max(warmup_steps, 1)
-                        for pg in optimizer.param_groups:
-                            pg["lr"] = cfg.lr * lr_scale
 
                 epoch_loss += outputs.loss.item()
 
