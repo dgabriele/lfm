@@ -10,14 +10,12 @@ embedding_store_dir: data/embeddings
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_segments: 12
-target_segments: 12.0
+max_segments: 4
+target_segments: 4.0
 length_weight: 0.0
 
-# Phase 2 internal mode: refinement denoiser (lightweight, bidirectional)
-phase2_mode: refinement
-refinement_layers: 2
-refinement_steps: 4
+# Phase 2 internal mode: frozen decoder re-run (refinement denoiser needs more VRAM)
+phase2_mode: decoder
 
 # Loss weights — IPA receiver primary, no hidden-state auxiliary
 hidden_state_weight: 0.0
@@ -37,8 +35,8 @@ no_curriculum: true
 
 # Training — resume from phase 1 checkpoint
 # resume: data/expression_game_v5-leaf-diffusion-300k/best.pt
-batch_size: 256
-gradient_accumulation_steps: 1
+batch_size: 32
+gradient_accumulation_steps: 8
 steps: 6000
 gru_lr: 0.0001
 receiver_lr: 0.0003

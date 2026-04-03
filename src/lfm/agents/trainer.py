@@ -187,14 +187,18 @@ class AgentTrainer:
                 logger.info("Loaded IPA cache from %s (%d sequences)", cache_path, game._ipa_cache_tokens.size(0))
             else:
                 all_embs = torch.tensor(self._embeddings, dtype=torch.float32).to(self.device)
-                game.build_ipa_cache(all_embs, batch_size=64)
+                game.build_ipa_cache(all_embs, batch_size=256)
+                del all_embs
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
         ipa_refresh = getattr(cfg, "ipa_cache_refresh", 0)
 
         for step in range(start_step, cfg.steps):
             # Refresh IPA cache periodically
             if use_ipa and ipa_refresh > 0 and step > 0 and step % ipa_refresh == 0:
                 all_embs = torch.tensor(self._embeddings, dtype=torch.float32).to(self.device)
-                game.build_ipa_cache(all_embs, batch_size=64)
+                game.build_ipa_cache(all_embs, batch_size=256)
 
             # Accumulate gradients over multiple micro-batches
             self.optimizer.zero_grad()

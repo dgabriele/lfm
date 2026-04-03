@@ -460,6 +460,7 @@ class ExpressionGame(nn.Module):
         logger.info("Built IPA cache: %d sequences", self._ipa_cache_tokens.size(0))
 
         # Persist to disk for fast reload
+        from pathlib import Path
         cache_path = Path(self.config.output_dir) / "ipa_cache.pt"
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
@@ -638,12 +639,24 @@ class ExpressionGame(nn.Module):
             perm_indices = torch.gather(candidate_indices, 1, perm)
             target_idx = (perm == 0).long().argmax(dim=1)
 
-            # Batch-encode all candidates at once (no_grad, no activation storage)
-            cand_tokens = self._ipa_cache_tokens[perm_indices.cpu().reshape(-1)].to(device)
-            cand_masks = self._ipa_cache_masks[perm_indices.cpu().reshape(-1)].to(device)
-            with torch.no_grad():
-                cand_flat = self.ipa_encoder(cand_tokens, cand_masks)
-            candidate_vecs = cand_flat.reshape(batch, num_candidates, -1)
+            # Encode candidates (batched if VRAM allows, sequential fallback)
+            if batch < 32:
+                # Batched: all candidates at once
+                cand_tokens = self._ipa_cache_tokens[perm_indices.cpu().reshape(-1)].to(device)
+                cand_masks = self._ipa_cache_masks[perm_indices.cpu().reshape(-1)].to(device)
+                with torch.no_grad():
+                    cand_flat = self.ipa_encoder(cand_tokens, cand_masks)
+                candidate_vecs = cand_flat.reshape(batch, num_candidates, -1)
+            else:
+                # Sequential: one candidate position at a time
+                cand_vecs = []
+                for k in range(num_candidates):
+                    k_idx = perm_indices[:, k].cpu()
+                    k_tok = self._ipa_cache_tokens[k_idx].to(device)
+                    k_msk = self._ipa_cache_masks[k_idx].to(device)
+                    with torch.no_grad():
+                        cand_vecs.append(self.ipa_encoder(k_tok, k_msk))
+                candidate_vecs = torch.stack(cand_vecs, dim=1)
 
             ipa_logits = self.receiver(sender_vec, candidate_vecs)
 
