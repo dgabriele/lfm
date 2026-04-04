@@ -134,6 +134,7 @@ class PretrainConfig(LFMBaseConfig):
     use_amp: bool = True
     warmup_fraction: float = 0.1
     max_grad_norm: float = 1.0
+    checkpoint_fraction: float = 0.1  # save checkpoint every N% of epoch (0.1 = 10%)
     output_dir: str = "data/translator"
     device: str = "cuda"
     seed: int = 42

@@ -188,14 +188,19 @@ class SelfSupervisedTrainer:
 
     # -- Training loop --
 
-    def _train_epoch(self, model, train_loader, optimizer, scheduler, scaler,
-                     model_dtype, state: TrainingState) -> float:
-        """Run one training epoch. Returns mean train loss."""
+    def _train_epoch(
+        self, model, tokenizer, train_loader, optimizer, scheduler, scaler,
+        model_dtype, state: TrainingState,
+    ) -> float:
+        """Run one training epoch with periodic checkpointing. Returns mean train loss."""
         cfg = self.config
         device = torch.device(cfg.device)
         model.train()
         epoch_loss = 0.0
         optimizer.zero_grad()
+
+        num_batches = len(train_loader)
+        checkpoint_interval = max(1, int(num_batches * cfg.checkpoint_fraction))
 
         for i, batch in enumerate(train_loader):
             ids = batch["input_ids"].to(device)
@@ -226,7 +231,22 @@ class SelfSupervisedTrainer:
                     state.epoch, state.global_step, epoch_loss / (i + 1), lr,
                 )
 
-        return epoch_loss / len(train_loader)
+            # Mid-epoch checkpoint
+            if (i + 1) % checkpoint_interval == 0 and (i + 1) < num_batches:
+                avg_loss = epoch_loss / (i + 1)
+                logger.info(
+                    "  Mid-epoch checkpoint (%.0f%%) — step=%d loss=%.4f",
+                    (i + 1) / num_batches * 100, state.global_step, avg_loss,
+                )
+                model.save_pretrained(self.output_dir / "model_latest")
+                tokenizer.save_pretrained(self.output_dir / "model_latest")
+                state.save(
+                    self.output_dir / _CHECKPOINT_NAME,
+                    optimizer, scheduler, scaler,
+                    str(self.output_dir / "model_latest"),
+                )
+
+        return epoch_loss / num_batches
 
     @torch.no_grad()
     def _validate(self, model, val_loader, model_dtype) -> float:
@@ -298,7 +318,7 @@ class SelfSupervisedTrainer:
             epoch_start = time.time()
 
             train_loss = self._train_epoch(
-                model, train_loader, optimizer, scheduler, scaler, model_dtype, state,
+                model, tokenizer, train_loader, optimizer, scheduler, scaler, model_dtype, state,
             )
             val_loss = self._validate(model, val_loader, model_dtype)
 
