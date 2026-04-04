@@ -1,8 +1,9 @@
-"""Differentiable decoder re-run for agent games."""
+"""Decoder utilities for agent games: multi-segment decode and gradient re-run."""
 
 from __future__ import annotations
 
 import torch
+from torch import nn
 from torch import Tensor
 
 from lfm.generator.layers import multiscale_causal_mask
@@ -217,3 +218,193 @@ def _build_xattn_mask(
         batch * nhead, seq_len, total_mem,
     )
     return mask
+
+
+# ---------------------------------------------------------------------------
+# Reusable multi-phrase decoder
+# ---------------------------------------------------------------------------
+
+
+class PhraseDecoder:
+    """Decode multiple latent codes into a multi-phrase expression.
+
+    Each latent code (phrase) is decoded autoregressively through the
+    frozen decoder until EOS, with the KV cache persisting across
+    phrase boundaries for coarticulation.  The result is a variable-
+    length token sequence composed of multiple phrase constituents.
+
+    This class encapsulates the Phase 1 (no-grad) decode logic shared
+    by the expression game, dialogue game, and any future game type.
+
+    Args:
+        generator: The ``MultilingualVAEGenerator`` (frozen decoder).
+    """
+
+    def __init__(self, generator) -> None:
+        self.gen = generator
+
+    @torch.no_grad()
+    def decode(
+        self,
+        z_seq: Tensor,
+        z_weights: Tensor,
+        max_tokens_per_phrase: int = 48,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Decode z-sequence into tokens via KV-cached autoregressive generation.
+
+        Args:
+            z_seq: ``(batch, num_phrases, latent_dim)`` latent codes.
+            z_weights: ``(batch, num_phrases)`` per-phrase activity weights.
+            max_tokens_per_phrase: Hard limit on tokens per phrase.
+
+        Returns:
+            tokens: ``(batch, max_total)`` token IDs.
+            token_mask: ``(batch, max_total)`` boolean (True = valid).
+            phrase_boundaries: ``(batch, num_phrases)`` start position
+                of each phrase in the token sequence.
+        """
+        from lfm.generator.layers import (
+            LinguisticDecoder,
+            multiscale_causal_mask,
+            precompute_rope_freqs,
+        )
+
+        gen = self.gen
+        batch, num_phrases, _ = z_seq.shape
+        device = z_seq.device
+        max_total = max_tokens_per_phrase * num_phrases
+
+        # Project weighted z to decoder memory
+        weighted_z = z_weights.unsqueeze(-1) * z_seq
+        num_memory_tokens = gen._num_memory_tokens
+        hidden_dim = gen.config.decoder_hidden_dim
+
+        z_flat = _calibrate_or_quantize(gen, weighted_z.reshape(batch * num_phrases, -1))
+        memories = gen.latent_to_decoder(z_flat).reshape(
+            batch, num_phrases, num_memory_tokens, hidden_dim,
+        )
+
+        decoder = gen.decoder
+        is_linguistic = isinstance(decoder, LinguisticDecoder)
+
+        # Precompute causal mask
+        if gen._full_causal_mask is None or gen._full_causal_mask.size(1) < max_total + 1:
+            gen._full_causal_mask = multiscale_causal_mask(
+                max_total + 1,
+                num_heads=gen.config.decoder_num_heads,
+                head_windows=gen.config.attention_head_windows,
+                global_every=gen.config.attention_global_every,
+                device=device,
+            )
+
+        # Output buffers
+        tokens = torch.zeros(batch, max_total, dtype=torch.long, device=device)
+        token_mask = torch.zeros(batch, max_total, dtype=torch.bool, device=device)
+        phrase_boundaries = torch.zeros(batch, num_phrases, dtype=torch.long, device=device)
+
+        # Per-sample state
+        current_phrase = torch.zeros(batch, dtype=torch.long, device=device)
+        tokens_in_phrase = torch.zeros(batch, dtype=torch.long, device=device)
+        total_position = torch.zeros(batch, dtype=torch.long, device=device)
+        phrase_active = z_weights > 0.01
+        finished = ~phrase_active[:, 0]
+
+        # Extend RoPE if needed
+        rope_freqs = gen._rope_freqs
+        if rope_freqs is not None and rope_freqs.size(0) < max_total + 1:
+            rope_freqs = precompute_rope_freqs(
+                hidden_dim // gen.config.decoder_num_heads,
+                max_total + 1, device=device,
+            )
+
+        # Initialize KV cache
+        if is_linguistic:
+            kv_cache = decoder.make_kv_cache(batch, max_total + 1, device, dtype=torch.float16)
+
+        # BOS token
+        bos_embed = gen.token_embedding(
+            torch.full((batch, 1), gen.bos_id, dtype=torch.long, device=device),
+        )
+        batch_indices = torch.arange(batch, device=device)
+
+        def _gather_phrase_memory() -> Tensor:
+            idx = current_phrase.clamp(max=num_phrases - 1)
+            mem = memories[batch_indices, idx]
+            active = phrase_active[batch_indices, idx] & ~finished
+            return mem * active.unsqueeze(-1).unsqueeze(-1).float()
+
+        memory = _gather_phrase_memory()
+
+        # Prime with BOS
+        if is_linguistic:
+            mask_row = gen._full_causal_mask[:, 0:1, 0:1]
+            out = decoder.forward_cached(
+                bos_embed, memory, kv_cache,
+                rope_freqs=rope_freqs, tgt_mask_row=mask_row,
+            )
+            kv_cache.advance()
+        else:
+            out = decoder(bos_embed, memory)
+
+        # Autoregressive decode loop
+        for t in range(max_total):
+            logits = gen.output_head(out[:, -1])
+            next_token = logits.argmax(dim=-1)
+
+            # Store tokens
+            active = ~finished
+            tokens[batch_indices, total_position] = next_token * active.long()
+            token_mask[batch_indices, total_position] = active
+            total_position += active.long()
+            tokens_in_phrase += active.long()
+
+            # Phrase switching on EOS or max tokens
+            hit_eos = (next_token == gen.eos_id) & (tokens_in_phrase >= 1)
+            hit_max = tokens_in_phrase >= max_tokens_per_phrase
+            should_switch = (hit_eos | hit_max) & active
+
+            current_phrase += should_switch.long()
+            tokens_in_phrase *= ~should_switch
+
+            # Record phrase boundaries
+            switched_valid = should_switch & (current_phrase < num_phrases)
+            if switched_valid.any():
+                phrase_boundaries[
+                    batch_indices[switched_valid],
+                    current_phrase[switched_valid],
+                ] = total_position[switched_valid]
+
+            # Mark finished
+            clamped = current_phrase.clamp(max=num_phrases - 1)
+            next_inactive = ~phrase_active[batch_indices, clamped]
+            finished = finished | (current_phrase >= num_phrases) | (should_switch & next_inactive)
+
+            if finished.all():
+                break
+
+            memory = _gather_phrase_memory()
+            new_embed = gen.token_embedding(next_token.unsqueeze(1))
+
+            if is_linguistic:
+                seq_so_far = kv_cache.seq_len + 1
+                mask_row = gen._full_causal_mask[
+                    :, kv_cache.seq_len:kv_cache.seq_len + 1, :seq_so_far
+                ]
+                out = decoder.forward_cached(
+                    new_embed, memory, kv_cache,
+                    rope_freqs=rope_freqs, tgt_mask_row=mask_row,
+                )
+                kv_cache.advance()
+            else:
+                # Fallback: non-linguistic decoder (no KV cache)
+                cur_ids = torch.cat(
+                    [torch.full((batch, 1), gen.bos_id, dtype=torch.long, device=device),
+                     tokens[:, :t + 1]], dim=1,
+                )
+                all_embed = gen.token_embedding(cur_ids)
+                tgt_mask = torch.nn.Transformer.generate_square_subsequent_mask(
+                    cur_ids.size(1), device=device,
+                )
+                out = decoder(all_embed, memory, tgt_mask=tgt_mask)
+
+        return tokens, token_mask, phrase_boundaries

@@ -23,7 +23,7 @@ from torch import Tensor, nn
 
 from lfm.agents.components import MessageEncoder, Receiver
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
-from lfm.agents.decode import rerun_decoder_multiseg_with_grad
+from lfm.agents.decode import PhraseDecoder, rerun_decoder_multiseg_with_grad
 from lfm.agents.diffusion import DiffusionZGenerator
 from lfm.config.base import LFMBaseConfig
 from lfm.faculty.config import FacultyConfig
@@ -220,6 +220,9 @@ class DialogueGame(nn.Module):
             torch.randn(2, config.context_hidden_dim) * 0.02,
         )
 
+        # Phrase decoder (shared autoregressive decode logic)
+        self.phrase_decoder = PhraseDecoder(gen)
+
         # Context projection (decoder hidden → context dim)
         self.hidden_to_context = nn.Linear(hidden_dim, config.context_hidden_dim)
 
@@ -272,90 +275,6 @@ class DialogueGame(nn.Module):
             {"params": list(self.receiver.parameters()), "lr": cfg.receiver_lr},
         ]
 
-    # -- Multi-segment decode (reused from expression game) --
-
-    @torch.no_grad()
-    def _multiseg_decode(self, z_seq, z_weights):
-        """Phase 1: KV-cached multi-segment decode with z-switching.
-
-        Delegates to the expression game's decode logic via the generator.
-        """
-        from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
-
-        gen = self.gen
-        batch, K, _ = z_seq.shape
-        device = z_seq.device
-        max_tok = gen.config.max_output_len * K
-        n_mem = gen._num_memory_tokens
-        hidden_dim = gen.config.decoder_hidden_dim
-
-        weighted_z = z_weights.unsqueeze(-1) * z_seq
-        z_flat = weighted_z.reshape(batch * K, -1)
-        if gen._vq_codebook is not None:
-            z_flat = gen._quantize_z(z_flat)
-        elif gen._z_stats_initialized:
-            z_flat = gen.calibrate_z(z_flat)
-        memories = gen.latent_to_decoder(z_flat).reshape(batch, K, n_mem, hidden_dim)
-
-        all_tokens = torch.zeros(batch, max_tok, dtype=torch.long, device=device)
-        all_mask = torch.zeros(batch, max_tok, dtype=torch.bool, device=device)
-        seg_bounds = torch.zeros(batch, K, dtype=torch.long, device=device)
-
-        bos_id = gen.bos_id
-        eos_id = gen.eos_id
-        cur_seg = torch.zeros(batch, dtype=torch.long, device=device)
-        total_pos = torch.zeros(batch, dtype=torch.long, device=device)
-        active = torch.ones(batch, dtype=torch.bool, device=device)
-
-        cur_ids = torch.full((batch, 1), bos_id, dtype=torch.long, device=device)
-        is_linguistic = isinstance(gen.decoder, LinguisticDecoder)
-
-        for t in range(max_tok):
-            if not active.any():
-                break
-
-            idx = cur_seg.clamp(max=K - 1)
-            mem = memories[torch.arange(batch, device=device), idx]
-
-            if is_linguistic:
-                tgt = gen.token_embedding(cur_ids[:, -1:])
-                cm = multiscale_causal_mask(
-                    1, num_heads=gen.config.decoder_num_heads,
-                    head_windows=gen.config.attention_head_windows,
-                    global_every=gen.config.attention_global_every,
-                    device=device,
-                )
-                out = gen.decoder(tgt, mem, tgt_mask=cm)
-            else:
-                tgt = gen.token_embedding(cur_ids)
-                out = gen.decoder(tgt, mem)
-
-            logits = gen.output_head(out[:, -1])
-            next_token = logits.argmax(dim=-1)
-
-            for b in range(batch):
-                if not active[b]:
-                    continue
-                pos = total_pos[b].item()
-                if pos >= max_tok:
-                    active[b] = False
-                    continue
-                all_tokens[b, pos] = next_token[b]
-                all_mask[b, pos] = True
-                total_pos[b] += 1
-
-                if next_token[b].item() == eos_id:
-                    new_seg = cur_seg[b] + 1
-                    if new_seg >= K:
-                        active[b] = False
-                    else:
-                        cur_seg[b] = new_seg
-                        seg_bounds[b, new_seg] = total_pos[b]
-
-            cur_ids = torch.cat([cur_ids, next_token.unsqueeze(1)], dim=1)
-
-        return all_tokens, all_mask, seg_bounds
-
     # -- Forward pass --
 
     def forward(
@@ -388,9 +307,8 @@ class DialogueGame(nn.Module):
             # Generate z-sequence for this turn
             z_seq, z_weights, _ = self.z_gen(conditioning)
 
-            # Phase 1: no_grad decode
-            with torch.no_grad():
-                tokens, gen_mask, seg_bounds = self._multiseg_decode(z_seq, z_weights)
+            # Phase 1: no_grad decode through frozen decoder
+            tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(z_seq, z_weights)
 
             # Phase 2: re-run with gradients
             hidden = rerun_decoder_multiseg_with_grad(
