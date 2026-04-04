@@ -278,6 +278,77 @@ class ExpressionCommand(CLICommand):
         return 0
 
 
+class DialogueCommand(CLICommand):
+    """Train dialogue game with multi-turn self-play."""
+
+    @property
+    def name(self) -> str:
+        return "dialogue"
+
+    @property
+    def help(self) -> str:
+        return "Train multi-turn dialogue game through frozen decoder"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("config", nargs="?", default=None,
+                            help="Optional YAML config file")
+        parser.add_argument("--decoder-path", default="data/vae_decoder.pt")
+        parser.add_argument("--spm-path", default="data/spm.model")
+        parser.add_argument("--embedding-store", default="data/embeddings")
+        parser.add_argument("--output-dir", default="data/dialogue_game")
+        parser.add_argument("--resume", default=None)
+        parser.add_argument("--num-turns", type=int, default=4)
+        parser.add_argument("--max-segments", type=int, default=4)
+        parser.add_argument("--batch-size", type=int, default=20)
+        parser.add_argument("--gradient-accumulation-steps", type=int, default=12)
+        parser.add_argument("--steps", type=int, default=4000)
+        parser.add_argument("--device", default="cuda")
+        parser.add_argument("--seed", type=int, default=42)
+        parser.add_argument("--log-every", type=int, default=50)
+        parser.add_argument("--checkpoint-every", type=int, default=100)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
+        from lfm.agents.games.dialogue import DialogueGame, DialogueGameConfig
+        from lfm.agents.trainer import AgentTrainer
+        from lfm.faculty.model import LanguageFaculty
+
+        cfg_dict: dict = {}
+        if args.config is not None:
+            with open(args.config) as f:
+                cfg_dict = yaml.safe_load(f) or {}
+
+        def _get(key, cli_val, default=None):
+            if cli_val != default:
+                return cli_val
+            return cfg_dict.get(key, cli_val)
+
+        import torch
+        config = DialogueGameConfig(
+            decoder_path=_get("decoder_path", args.decoder_path, "data/vae_decoder.pt"),
+            spm_path=_get("spm_path", args.spm_path, "data/spm.model"),
+            embedding_store_dir=_get("embedding_store_dir", args.embedding_store, "data/embeddings"),
+            output_dir=_get("output_dir", args.output_dir, "data/dialogue_game"),
+            num_turns=_get("num_turns", args.num_turns, 4),
+            max_segments=_get("max_segments", args.max_segments, 4),
+            batch_size=_get("batch_size", args.batch_size, 20),
+            gradient_accumulation_steps=_get("gradient_accumulation_steps", args.gradient_accumulation_steps, 12),
+            steps=_get("steps", args.steps, 4000),
+            device=_get("device", args.device, "cuda"),
+            seed=_get("seed", args.seed, 42),
+            log_every=_get("log_every", args.log_every, 50),
+            checkpoint_every=_get("checkpoint_every", args.checkpoint_every, 100),
+        )
+
+        device = torch.device(config.device)
+        faculty = LanguageFaculty(config.build_faculty_config()).to(device)
+        game = DialogueGame(config, faculty).to(device)
+        trainer = AgentTrainer(game, config)
+        trainer.train(resume=_get("resume", args.resume, None))
+        return 0
+
+
 def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
     """Register the ``lfm agent`` subcommand group."""
     agent_parser = parent_subparsers.add_parser(
@@ -294,6 +365,7 @@ def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
     commands = [
         ReferentialCommand(),
         ExpressionCommand(),
+        DialogueCommand(),
     ]
 
     for cmd in commands:

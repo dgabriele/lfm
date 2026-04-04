@@ -1,0 +1,37 @@
+# Dialogue game — multi-turn self-play through frozen decoder
+# Observer/Analyst roles alternate, each turn conditioned on data + history.
+# Produces multi-turn corpus with discourse structure for LLM pretraining.
+
+decoder_path: data/models/v5-leaf-27/vae_decoder.pt
+spm_path: data/models/v5-leaf-27/spm.model
+output_dir: data/dialogue_game
+embedding_store_dir: data/embeddings
+
+# Dialogue structure
+num_turns: 4
+context_hidden_dim: 512
+context_heads: 4
+
+# Diffusion z-generator (shared across turns)
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_segments: 4
+variable_segments: true
+
+# Training
+batch_size: 20
+gradient_accumulation_steps: 12
+steps: 4000
+gru_lr: 0.0001
+receiver_lr: 0.0003
+num_distractors: 15
+
+# No curriculum — 100% hard negatives
+no_curriculum: true
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 50
+checkpoint_every: 100
