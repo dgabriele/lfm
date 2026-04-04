@@ -225,7 +225,7 @@ def _build_xattn_mask(
 # ---------------------------------------------------------------------------
 
 
-class PhraseDecoder:
+class ExpressionDecoder:
     """Decode multiple latent codes into a multi-phrase expression.
 
     Each latent code (phrase) is decoded autoregressively through the

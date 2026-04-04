@@ -23,7 +23,7 @@ from torch import Tensor, nn
 
 from lfm.agents.components import MessageEncoder, Receiver
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
-from lfm.agents.decode import PhraseDecoder, rerun_decoder_multiseg_with_grad
+from lfm.agents.decode import ExpressionDecoder, rerun_decoder_multiseg_with_grad
 from lfm.agents.diffusion import DiffusionZGenerator
 from lfm.config.base import LFMBaseConfig
 from lfm.faculty.config import FacultyConfig
@@ -221,7 +221,7 @@ class DialogueGame(nn.Module):
         )
 
         # Phrase decoder (shared autoregressive decode logic)
-        self.phrase_decoder = PhraseDecoder(gen)
+        self.phrase_decoder = ExpressionDecoder(gen)
 
         # Context projection (decoder hidden → context dim)
         self.hidden_to_context = nn.Linear(hidden_dim, config.context_hidden_dim)
