@@ -41,7 +41,7 @@ def _load_resume_checkpoint(
     ckpt: dict, config: VisualizeConfig, device: torch.device
 ) -> dict:
     """Load from full training resume checkpoint (vae_resume.pt)."""
-    from lfm.generator.layers import LinguisticDecoder, precompute_rope_freqs
+    from lfm.generator.layers import PhraseDecoder, precompute_rope_freqs
     from lfm.generator.pretrain import VAEPretrainConfig
 
     # Build config from checkpoint metadata (patched into ckpt at save time)
@@ -87,7 +87,7 @@ def _load_resume_checkpoint(
     else:
         dec_pos_embedding = nn.Embedding(cfg.max_seq_len, hidden).to(device)
 
-    decoder = LinguisticDecoder(
+    decoder = PhraseDecoder(
         d_model=hidden,
         nhead=cfg.decoder_num_heads,
         num_layers=cfg.decoder_num_layers,
@@ -154,7 +154,7 @@ def _load_decoder_checkpoint(
 ) -> dict:
     """Load from decoder-only checkpoint (vae_decoder.pt)."""
     from lfm.generator.layers import (
-        LinguisticDecoder,
+        PhraseDecoder,
         multiscale_causal_mask,
         precompute_rope_freqs,
     )
@@ -176,7 +176,7 @@ def _load_decoder_checkpoint(
     dec_token_embedding = nn.Embedding(full_vocab, hidden).to(device)
     dec_token_embedding.load_state_dict(ckpt["token_embedding"])
 
-    decoder = LinguisticDecoder(
+    decoder = PhraseDecoder(
         d_model=hidden,
         nhead=num_heads,
         num_layers=num_layers,
@@ -500,7 +500,7 @@ def decode_z(
 ) -> list[list[int]]:
     """Decode latent z vectors through the decoder using nucleus sampling.
 
-    Uses KV caching when the decoder is a ``LinguisticDecoder`` — each
+    Uses KV caching when the decoder is a ``PhraseDecoder`` — each
     step only computes Q/K/V for the new token, reusing cached K/V from
     previous steps.  This is O(n) per step instead of O(n²).
 
@@ -514,7 +514,7 @@ def decode_z(
     Returns:
         List of decoded token ID lists.
     """
-    from lfm.generator.layers import LinguisticDecoder
+    from lfm.generator.layers import PhraseDecoder
 
     device = model_data["device"]
     modules = model_data["modules"]
@@ -533,7 +533,7 @@ def decode_z(
         if isinstance(m, nn.Module):
             m.eval()
 
-    use_kv_cache = isinstance(decoder, LinguisticDecoder) and cached_mask is not None
+    use_kv_cache = isinstance(decoder, PhraseDecoder) and cached_mask is not None
     all_tokens: list[list[int]] = []
     max_len = cfg.max_seq_len
 
@@ -577,7 +577,7 @@ def decode_z(
                 )
                 kv_cache.advance()
         else:
-            # Fallback: no KV cache (non-LinguisticDecoder)
+            # Fallback: no KV cache (non-PhraseDecoder)
             for t in range(max_len):
                 seq_len = cur_ids.size(1)
                 tgt = dec_tok(cur_ids)

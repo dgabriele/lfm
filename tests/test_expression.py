@@ -38,7 +38,7 @@ class MockGenerator(nn.Module):
 
 
 class MockDecoder(nn.Module):
-    """Mock decoder that returns random states (not a LinguisticDecoder)."""
+    """Mock decoder that returns random states (not a PhraseDecoder)."""
 
     def __init__(self, hidden_dim: int) -> None:
         super().__init__()

@@ -38,12 +38,12 @@ def sample_decode(
     produces diverse, non-repetitive output.
     """
     from lfm.generator.layers import (
-        LinguisticDecoder,
+        PhraseDecoder,
         multiscale_causal_mask,
     )
 
     _dec = modules["decoder"]
-    _is_ling = isinstance(_dec, LinguisticDecoder)
+    _is_ling = isinstance(_dec, PhraseDecoder)
     n = z.size(0)
     _n_mem = getattr(cfg, "num_memory_tokens", 1)
     mem = modules["latent_to_decoder"](z).reshape(n, _n_mem, -1)

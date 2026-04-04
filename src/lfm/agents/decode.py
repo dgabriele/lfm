@@ -264,7 +264,7 @@ class ExpressionDecoder:
                 of each phrase in the token sequence.
         """
         from lfm.generator.layers import (
-            LinguisticDecoder,
+            PhraseDecoder,
             multiscale_causal_mask,
             precompute_rope_freqs,
         )
@@ -285,7 +285,7 @@ class ExpressionDecoder:
         )
 
         decoder = gen.decoder
-        is_linguistic = isinstance(decoder, LinguisticDecoder)
+        is_linguistic = isinstance(decoder, PhraseDecoder)
 
         # Precompute causal mask
         if gen._full_causal_mask is None or gen._full_causal_mask.size(1) < max_total + 1:

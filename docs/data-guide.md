@@ -72,7 +72,7 @@ Saved when validation CE improves. Used by the agent game and visualizations. Co
 | `latent_to_decoder` | State dict: z → decoder memory projection |
 | `token_embedding` | State dict: token embedding table |
 | `pos_embedding` | State dict: positional embedding (Identity if RoPE) |
-| `decoder` | State dict: LinguisticDecoder (multi-scale attention + RoPE) |
+| `decoder` | State dict: PhraseDecoder (multi-scale attention + RoPE) |
 | `output_head` | State dict: decoder hidden → logits projection |
 | `z_mean` | (latent_dim,) running mean of encoder z distribution |
 | `z_std` | (latent_dim,) running std of encoder z distribution |

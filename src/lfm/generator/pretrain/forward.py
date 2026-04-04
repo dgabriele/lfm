@@ -112,7 +112,7 @@ def _vae_forward(
     Returns:
         Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden, mu, logvar, vq_loss)``.
     """
-    from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
+    from lfm.generator.layers import PhraseDecoder, multiscale_causal_mask
 
     device = batch_tokens.device
     b, dec_seq_len = batch_tokens.shape
@@ -191,7 +191,7 @@ def _vae_forward(
     teacher_input_ids = torch.cat([bos_col, batch_tokens[:, :-1]], dim=1)
 
     # Precompute mask
-    if isinstance(decoder, LinguisticDecoder):
+    if isinstance(decoder, PhraseDecoder):
         if _cached_mask is not None:
             tgt_mask = _cached_mask[:, :seq_len, :seq_len]
         else:
@@ -211,7 +211,7 @@ def _vae_forward(
     _word_drop_p = _word_dropout_p if dec_token_embedding.training else 0.0
 
     def _run_decoder(input_ids: Tensor) -> Tensor:
-        if isinstance(decoder, LinguisticDecoder):
+        if isinstance(decoder, PhraseDecoder):
             dec_input = dec_token_embedding(input_ids)
             # Word dropout: zero out embeddings to force decoder to use z
             if _word_drop_p > 0:

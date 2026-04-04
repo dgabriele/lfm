@@ -239,7 +239,7 @@ def multiscale_causal_mask(
 # ---------------------------------------------------------------------------
 
 
-class LinguisticDecoderLayer(nn.Module):
+class PhraseDecoderLayer(nn.Module):
     """Transformer decoder layer with RoPE and multi-scale attention.
 
     Replaces ``nn.TransformerDecoderLayer`` with a custom implementation
@@ -441,7 +441,7 @@ class LinguisticDecoderLayer(nn.Module):
         return tgt
 
 
-class LinguisticDecoder(nn.Module):
+class PhraseDecoder(nn.Module):
     """Decoder stack with optional weight sharing for recursive application.
 
     When ``share_layers=True``, creates ``num_layers // 2`` unique layers
@@ -450,7 +450,7 @@ class LinguisticDecoder(nn.Module):
     every level of recursive embedding.
 
     Args:
-        layer: A ``LinguisticDecoderLayer`` instance (or compatible).
+        layer: A ``PhraseDecoderLayer`` instance (or compatible).
         num_layers: Total number of layer applications.
         share_layers: If ``True``, use ``num_layers // 2`` unique layers
             each applied twice.
@@ -472,7 +472,7 @@ class LinguisticDecoder(nn.Module):
         if share_layers:
             n_unique = max(1, num_layers // 2)
             unique_layers = nn.ModuleList([
-                LinguisticDecoderLayer(d_model, nhead, dim_feedforward, dropout)
+                PhraseDecoderLayer(d_model, nhead, dim_feedforward, dropout)
                 for _ in range(n_unique)
             ])
             # Build application order: [0, 1, 0, 1, ...] for n_unique=2
@@ -482,7 +482,7 @@ class LinguisticDecoder(nn.Module):
                 self.layer_order.append(i % n_unique)
         else:
             self.layers = nn.ModuleList([
-                LinguisticDecoderLayer(d_model, nhead, dim_feedforward, dropout)
+                PhraseDecoderLayer(d_model, nhead, dim_feedforward, dropout)
                 for _ in range(num_layers)
             ])
             self.layer_order = list(range(num_layers))

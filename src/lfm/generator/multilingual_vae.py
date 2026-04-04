@@ -66,7 +66,7 @@ class MultilingualVAEGenerator(GeneratorModule):
 
         # -- Decoder (linguistic architecture) --
         from lfm.generator.layers import (
-            LinguisticDecoder,
+            PhraseDecoder,
             precompute_rope_freqs,
         )
 
@@ -85,7 +85,7 @@ class MultilingualVAEGenerator(GeneratorModule):
                 config.max_output_len, config.decoder_hidden_dim
             )
 
-        self.decoder = LinguisticDecoder(
+        self.decoder = PhraseDecoder(
             d_model=config.decoder_hidden_dim,
             nhead=config.decoder_num_heads,
             num_layers=config.decoder_num_layers,
@@ -460,7 +460,7 @@ class MultilingualVAEGenerator(GeneratorModule):
         Returns:
             Tuple of ``(token_ids, token_probs, decoder_states, lengths, mask)``.
         """
-        from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
+        from lfm.generator.layers import PhraseDecoder, multiscale_causal_mask
 
         batch = z.size(0)
         device = z.device
@@ -497,7 +497,7 @@ class MultilingualVAEGenerator(GeneratorModule):
         bos_ids = torch.full((batch, 1), self.bos_id, dtype=torch.long, device=device)
         bos_embed = self.token_embedding(bos_ids)
 
-        use_cache = isinstance(self.decoder, LinguisticDecoder)
+        use_cache = isinstance(self.decoder, PhraseDecoder)
         if use_cache:
             all_probs, all_states = self._decode_cached(
                 memory, bos_embed, max_len, batch, device,

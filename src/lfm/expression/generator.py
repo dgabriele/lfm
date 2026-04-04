@@ -249,7 +249,7 @@ class ExpressionGenerator(nn.Module):
         Populates expr.tokens, expr.states, expr.lengths, expr.mask,
         expr.segment_boundaries, and expr.leaf_order in-place.
         """
-        from lfm.generator.layers import LinguisticDecoder
+        from lfm.generator.layers import PhraseDecoder
 
         gen = self.generator
         device = expr.leaf_z.device
@@ -291,7 +291,7 @@ class ExpressionGenerator(nn.Module):
         hidden_dim = gen.config.decoder_hidden_dim
 
         max_total = self.max_tokens_per_leaf * max_leaves
-        is_linguistic = isinstance(decoder, LinguisticDecoder)
+        is_linguistic = isinstance(decoder, PhraseDecoder)
 
         # Precompute causal mask if needed
         if gen._full_causal_mask is None or gen._full_causal_mask.size(1) < max_total + 1:

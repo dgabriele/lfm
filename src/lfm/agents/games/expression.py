@@ -803,7 +803,7 @@ class ExpressionGame(nn.Module):
         self, z_seq: Tensor, z_weights: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Phase 1: KV-cached multi-segment decode with z-switching."""
-        from lfm.generator.layers import LinguisticDecoder, multiscale_causal_mask
+        from lfm.generator.layers import PhraseDecoder, multiscale_causal_mask
 
         gen = self.gen
         cfg = self.config
@@ -820,7 +820,7 @@ class ExpressionGame(nn.Module):
         ).reshape(batch, K, n_mem, hidden_dim)
 
         decoder = gen.decoder
-        is_linguistic = isinstance(decoder, LinguisticDecoder)
+        is_linguistic = isinstance(decoder, PhraseDecoder)
 
         if gen._full_causal_mask is None or gen._full_causal_mask.size(1) < max_total + 1:
             gen._full_causal_mask = multiscale_causal_mask(

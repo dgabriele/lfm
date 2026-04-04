@@ -36,7 +36,7 @@ def build_model(
 
     # Decoder (linguistic architecture — must match GeneratorConfig)
     from lfm.generator.layers import (
-        LinguisticDecoder,
+        PhraseDecoder,
         multiscale_causal_mask,
         precompute_rope_freqs,
     )
@@ -87,7 +87,7 @@ def build_model(
     else:
         dec_pos_embedding = nn.Embedding(cfg.max_seq_len, hidden).to(device)
 
-    decoder = LinguisticDecoder(
+    decoder = PhraseDecoder(
         d_model=hidden,
         nhead=cfg.decoder_num_heads,
         num_layers=cfg.decoder_num_layers,

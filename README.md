@@ -80,7 +80,7 @@ A multilingual VAE is trained on IPA-transcribed phrase-level constituents from 
 
 The training corpus consists of 4M **leaf-level** phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) extracted via unified UD dependency-to-constituency conversion with Stanza dependency parsers. Only leaf constituents are kept -- the atomic building blocks of syntax. Vietnamese IPA is recovered via word-alignment of constituents against parent sentence IPA (fallback for languages where epitran's word-level IPA doesn't align with constituent spans). v5-leaf trains on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally. The expression game then composes these atomic phrases into multi-segment utterances. Text is converted to IPA via epitran (non-English) and the CMU Pronouncing Dictionary (English), tokenized with syllable-aligned sentencepiece BPE (`max_seq_len=27`, auto-scaled from dataset).
 
-The decoder uses a **LinguisticDecoder** with architectural biases for natural language:
+The decoder uses a **PhraseDecoder** with architectural biases for natural language:
 - **Rotary Positional Embeddings (RoPE)**: translation-invariant pattern learning — a morpheme works the same way regardless of position
 - **Multi-scale attention heads**: window sizes of 3 (phonotactic), 7 (morpheme), 15 (word), and full (clause) — a multi-resolution linguistic filter bank
 - **Weight-shared layers**: 2 unique layers applied 4 times = literal recursion, mirroring syntactic Merge
@@ -115,14 +115,14 @@ The core of LFM is a **pretrained multilingual VAE decoder** that produces lingu
 ```
 z (384-dim latent vector)
   → latent_to_decoder projection
-  → frozen LinguisticDecoder
+  → frozen PhraseDecoder
       |-- RoPE (translation-invariant positions)
       |-- Multi-scale attention heads (3/7/15/full token windows)
       +-- Weight-shared layers (2 unique × 4 applications = recursion)
   → variable-length IPA tokens (max_seq_len=27)
 ```
 
-The **LinguisticDecoder** has architectural biases for natural language:
+The **PhraseDecoder** has architectural biases for natural language:
 - **Rotary Positional Embeddings (RoPE)**: a morpheme works the same way regardless of position
 - **Multi-scale attention heads**: window sizes of 3 (phonotactic), 7 (morpheme), 15 (word), and full (clause) — a multi-resolution linguistic filter bank
 - **Weight-shared layers**: 2 unique layers applied 4 times = literal recursion, mirroring syntactic Merge
@@ -264,7 +264,7 @@ src/lfm/
     expression.py       # Expression dataclass
   faculty/              # LanguageFaculty compositor
   generator/            # VAE generator, linguistic decoder, pretraining
-    layers.py           # LinguisticDecoder (RoPE + multi-scale attention)
+    layers.py           # PhraseDecoder (RoPE + multi-scale attention)
     multilingual_vae.py # MultilingualVAEGenerator
     pretrain.py         # Full pretraining pipeline
   data/                 # Corpus datasets, loaders, IPA conversion

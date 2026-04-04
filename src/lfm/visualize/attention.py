@@ -1,4 +1,4 @@
-"""Multi-scale attention pattern visualization for the LinguisticDecoder.
+"""Multi-scale attention pattern visualization for the PhraseDecoder.
 
 Captures attention weights from every decoder layer via forward hooks,
 then generates:
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class AttentionVisualization(BaseVisualization):
-    """Visualize multi-scale attention patterns from the LinguisticDecoder."""
+    """Visualize multi-scale attention patterns from the PhraseDecoder."""
 
     name = "attention"
 
@@ -122,7 +122,7 @@ class AttentionVisualization(BaseVisualization):
     def _capture_attention(self, data: dict) -> list[Tensor]:
         """Run teacher-forced decoding and capture attention weights.
 
-        For each sentence, hooks on every ``LinguisticDecoderLayer``
+        For each sentence, hooks on every ``PhraseDecoderLayer``
         recompute the self-attention weights (pre-dropout) from the
         layer's QKV projection weights and the input hidden states.
 
@@ -130,7 +130,7 @@ class AttentionVisualization(BaseVisualization):
             List of tensors, each of shape ``(L, H, S, S)`` where
             ``L`` is the number of layer applications.
         """
-        from lfm.generator.layers import LinguisticDecoder, apply_rope
+        from lfm.generator.layers import PhraseDecoder, apply_rope
 
         device = data["device"]
         modules = data["modules"]
@@ -143,7 +143,7 @@ class AttentionVisualization(BaseVisualization):
 
         latent_to_decoder = modules["latent_to_decoder"]
         dec_tok = modules["dec_token_embedding"]
-        decoder: LinguisticDecoder = modules["decoder"]
+        decoder: PhraseDecoder = modules["decoder"]
         output_head = modules["output_head"]
 
         for m in modules.values():

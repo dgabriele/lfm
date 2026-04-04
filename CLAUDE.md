@@ -35,7 +35,7 @@ The system expresses what neural networks perceive. An LLM trained on the emerge
 Input Embedding (any dim)
   → DiffusionZGenerator (flow-matching denoiser, T=4 reverse steps)
   → K latent codes (each a "semantic instruction" to the decoder)
-  → Frozen LinguisticDecoder (RoPE + multi-scale attention + weight sharing)
+  → Frozen PhraseDecoder (RoPE + multi-scale attention + weight sharing)
   → Variable-length IPA token sequence per code
   → Phrases concatenate into full expression
   → Romanize → natural-looking Latin-script text
@@ -44,7 +44,7 @@ Input Embedding (any dim)
 
 ### Key Components
 
-- **LinguisticDecoder** (`generator/layers.py`): Frozen transformer with RoPE, multi-scale attention (3/7/15/full windows), weight-shared layers (2 unique × 4)
+- **PhraseDecoder** (`generator/layers.py`): Frozen transformer with RoPE, multi-scale attention (3/7/15/full windows), weight-shared layers (2 unique × 4)
 - **DiffusionZGenerator** (`agents/diffusion.py`): Flow-matching denoiser that produces all K latent codes simultaneously via self-attention + cross-attention to input embedding
 - **ExpressionDecoder** (`agents/decode.py`): Reusable multi-phrase autoregressive decode with KV cache persistence across phrase boundaries
 - **ExpressionGame** (`agents/games/expression.py`): Referential game training via hidden-state discrimination
@@ -71,7 +71,7 @@ src/lfm/
       expression.py     # ExpressionGame (GRU or Diffusion z-sequence)
       dialogue.py       # DialogueGame (multi-turn self-play)
   generator/            # VAE decoder, pretraining
-    layers.py           # LinguisticDecoder (RoPE + multi-scale attention)
+    layers.py           # PhraseDecoder (RoPE + multi-scale attention)
     multilingual_vae.py # MultilingualVAEGenerator
     pretrain/           # VAE pretraining pipeline
     config.py           # GeneratorConfig
@@ -163,6 +163,4 @@ poetry run lfm explore expression-sample --checkpoint data/expression_game/best.
 ## Planned Refactor
 
 - Rename `segment` → `phrase` throughout codebase (segments are phrase constituents)
-- Rename `LinguisticDecoder` → `PhraseDecoder` (it decodes a single phrase from one latent code)
-- `ExpressionDecoder` already named correctly (it composes multiple phrases into a full expression)
 - Migrate expression game's `_multiseg_decode` to use shared `ExpressionDecoder` class

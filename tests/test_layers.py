@@ -1,12 +1,12 @@
-"""Tests for linguistic decoder layers."""
+"""Tests for phrase decoder layers."""
 
 from __future__ import annotations
 
 import torch
 
 from lfm.generator.layers import (
-    LinguisticDecoder,
-    LinguisticDecoderLayer,
+    PhraseDecoder,
+    PhraseDecoderLayer,
     apply_rope,
     multiscale_causal_mask,
     precompute_rope_freqs,
@@ -77,9 +77,9 @@ def test_multiscale_mask_global():
         assert mask[0, 14, j] == 0.0, f"Global pos 14 can't attend to {j}"
 
 
-def test_linguistic_decoder_layer_forward():
-    """LinguisticDecoderLayer produces correct output shape."""
-    layer = LinguisticDecoderLayer(d_model=64, nhead=4)
+def test_phrase_decoder_layer_forward():
+    """PhraseDecoderLayer produces correct output shape."""
+    layer = PhraseDecoderLayer(d_model=64, nhead=4)
     tgt = torch.randn(2, 10, 64)
     memory = torch.randn(2, 1, 64)
     freqs = precompute_rope_freqs(16, 10)  # head_dim=64/4=16
@@ -88,9 +88,9 @@ def test_linguistic_decoder_layer_forward():
     assert out.shape == (2, 10, 64)
 
 
-def test_linguistic_decoder_layer_no_rope():
+def test_phrase_decoder_layer_no_rope():
     """Layer works without RoPE."""
-    layer = LinguisticDecoderLayer(d_model=64, nhead=4)
+    layer = PhraseDecoderLayer(d_model=64, nhead=4)
     tgt = torch.randn(2, 10, 64)
     memory = torch.randn(2, 1, 64)
 
@@ -98,12 +98,12 @@ def test_linguistic_decoder_layer_no_rope():
     assert out.shape == (2, 10, 64)
 
 
-def test_linguistic_decoder_shared():
+def test_phrase_decoder_shared():
     """Shared-layer decoder has fewer parameters."""
-    shared = LinguisticDecoder(
+    shared = PhraseDecoder(
         d_model=64, nhead=4, num_layers=4, share_layers=True
     )
-    independent = LinguisticDecoder(
+    independent = PhraseDecoder(
         d_model=64, nhead=4, num_layers=4, share_layers=False
     )
 
@@ -113,9 +113,9 @@ def test_linguistic_decoder_shared():
     assert shared_params < indep_params
 
 
-def test_linguistic_decoder_forward():
-    """Full linguistic decoder forward pass."""
-    dec = LinguisticDecoder(
+def test_phrase_decoder_forward():
+    """Full phrase decoder forward pass."""
+    dec = PhraseDecoder(
         d_model=64, nhead=4, num_layers=4, share_layers=True
     )
     tgt = torch.randn(2, 10, 64)
@@ -127,9 +127,9 @@ def test_linguistic_decoder_forward():
     assert out.shape == (2, 10, 64)
 
 
-def test_linguistic_decoder_gradient_flow():
-    """Gradients flow through the linguistic decoder."""
-    dec = LinguisticDecoder(
+def test_phrase_decoder_gradient_flow():
+    """Gradients flow through the phrase decoder."""
+    dec = PhraseDecoder(
         d_model=64, nhead=4, num_layers=4, share_layers=True
     )
     tgt = torch.randn(2, 10, 64, requires_grad=True)
