@@ -263,6 +263,8 @@ class AgentTrainer:
                         vocab_size = sp.vocab_size()
                         eos_id = vocab_size + 1
 
+                        from lfm.translator.romanize import syllable_hyphenate
+
                         if "_dialogue_tokens" in out:
                             # Dialogue game: print one full monologue
                             roles = ["OBS", "ANA"]
@@ -272,7 +274,7 @@ class AgentTrainer:
                             ):
                                 ids = [t.item() for t, m in zip(toks[0], mask[0])
                                        if m and t.item() != eos_id and t.item() < vocab_size]
-                                ipa = sp.decode(ids)
+                                ipa = syllable_hyphenate(sp.decode(ids))
                                 role = roles[turn_i % 2]
                                 logger.info("  [%s] %s  (%d tok)", role, ipa[:120], len(ids))
                         else:
@@ -281,7 +283,7 @@ class AgentTrainer:
                             for j in range(min(5, toks.size(0))):
                                 ids = [t.item() for t, m in zip(toks[j], mask[j])
                                        if m and t.item() != eos_id and t.item() < vocab_size]
-                                ipa = sp.decode(ids)
+                                ipa = syllable_hyphenate(sp.decode(ids))
                                 logger.info("  sample[%d]: %s  (%d tok)", j, ipa[:100], len(ids))
                     except Exception:
                         pass

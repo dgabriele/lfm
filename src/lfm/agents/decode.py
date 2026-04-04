@@ -143,10 +143,19 @@ def rerun_decoder_multiphrase_with_grad(
         else:
             rope = gen._rope_freqs[:seq_len]
 
-    return gen.decoder(
-        tok_emb, all_memory,
-        tgt_mask=causal_mask, rope_freqs=rope, xattn_mask=xattn_mask,
-    )
+    # Use gradient checkpointing to reduce activation memory ~3x.
+    # Phase 2 stores activations for backward through all decoder layers;
+    # checkpointing recomputes them during backward instead, trading
+    # ~30% more compute for much lower peak VRAM.
+    from torch.utils.checkpoint import checkpoint
+
+    def _decoder_forward():
+        return gen.decoder(
+            tok_emb, all_memory,
+            tgt_mask=causal_mask, rope_freqs=rope, xattn_mask=xattn_mask,
+        )
+
+    return checkpoint(_decoder_forward, use_reentrant=False)
 
 
 def _compute_phrase_assignment(

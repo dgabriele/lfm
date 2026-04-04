@@ -322,7 +322,11 @@ class DialogueGame(nn.Module):
             )
             teacher_probs = F.softmax(teacher_sims / 0.1, dim=-1)
 
-        # ── Phase A: Generate all turns (decoder on GPU) ──
+        # ── Phase A: Generate turns with aggressive cleanup ──
+        # After each turn's Phase 1+2, we keep only the small output
+        # tensors (hidden, mask, z_seq, z_weights) and explicitly free
+        # the large generation intermediates (KV cache, Phase 1 tokens).
+        # This isolates VRAM spikes from variable-length decoder output.
         context = None
         all_hidden: list[Tensor] = []
         all_masks: list[Tensor] = []
@@ -344,16 +348,45 @@ class DialogueGame(nn.Module):
             # Phase 1: no_grad decode through frozen decoder
             tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(z_seq, z_weights)
 
-            # Phase 2: re-run with gradients
-            hidden = rerun_decoder_multiphrase_with_grad(
-                self.gen, z_seq, z_weights, tokens, gen_mask, seg_bounds,
-            )
+            # Phase 2: re-run with gradients (checkpointed).
+            # Micro-batch to bound peak VRAM — this is the only
+            # operation whose memory scales with sequence length.
+            phase2_chunk = max(1, batch // 4)
+            hidden_chunks = []
+            max_seq = 0
+            for c_start in range(0, batch, phase2_chunk):
+                c_end = min(c_start + phase2_chunk, batch)
+                chunk_h = rerun_decoder_multiphrase_with_grad(
+                    self.gen,
+                    z_seq[c_start:c_end],
+                    z_weights[c_start:c_end],
+                    tokens[c_start:c_end],
+                    gen_mask[c_start:c_end],
+                    seg_bounds[c_start:c_end],
+                )
+                hidden_chunks.append(chunk_h)
+                max_seq = max(max_seq, chunk_h.size(1))
+            # Pad chunks to same seq length before cat
+            if any(h.size(1) < max_seq for h in hidden_chunks):
+                padded = []
+                for h in hidden_chunks:
+                    if h.size(1) < max_seq:
+                        pad = torch.zeros(
+                            h.size(0), max_seq - h.size(1), h.size(2),
+                            device=h.device, dtype=h.dtype,
+                        )
+                        padded.append(torch.cat([h, pad], dim=1))
+                    else:
+                        padded.append(h)
+                hidden_chunks = padded
+            hidden = torch.cat(hidden_chunks, dim=0)
             trimmed_mask = gen_mask[:, :hidden.size(1)]
 
             all_hidden.append(hidden)
             all_masks.append(trimmed_mask)
-            all_tokens_list.append(tokens)
-            all_gen_masks.append(gen_mask)
+            # Keep tokens/masks on CPU — only needed for diagnostics
+            all_tokens_list.append(tokens.cpu())
+            all_gen_masks.append(gen_mask.cpu())
 
             # Context for next turn (detached — no gradient through context)
             turn_context = self.hidden_to_context(hidden.detach())
@@ -362,29 +395,42 @@ class DialogueGame(nn.Module):
             else:
                 context = torch.cat([context, turn_context], dim=1)
 
-        # ── Phase B: Offload decoder, score progressively ──
-        # The frozen decoder is no longer needed.  Move to CPU to free
-        # ~160MB VRAM for the progressive encoder/receiver passes.
+            # Free generation intermediates (Phase 1 tokens, bounds)
+            del tokens, gen_mask, seg_bounds
+            torch.cuda.empty_cache()
+
+        # ── Phase B: Offload decoder, score on GPU ──
         gen = self.gen
         gen.cpu()
+        del context
         torch.cuda.empty_cache()
 
+        # Progressive topology matching with bounded VRAM.
+        # Encode each turn independently (fixed-size per turn), then
+        # accumulate message vectors via running mean.  At each turn,
+        # the accumulated message represents the dialogue so far.
+        # This gives progressive information gain without concatenating
+        # all turns into one growing sequence (which causes OOM from
+        # quadratic attention in the encoder).
         progressive_loss = torch.tensor(0.0, device=device)
+        accumulated_msg = torch.zeros(
+            batch, cfg.embedding_dim, device=device,
+        )
         for turn in range(num_turns):
-            # Progressive topology matching: encode dialogue-so-far,
-            # score against all candidates via KL divergence to the
-            # true embedding cosine similarity structure.
-            so_far_hidden = torch.cat(all_hidden[:turn + 1], dim=1)
-            so_far_mask = torch.cat(all_masks[:turn + 1], dim=1)
-            so_far_msg = self.dialogue_encoder(so_far_hidden, so_far_mask)
-            turn_logits = self.receiver(so_far_msg, candidates)
+            turn_msg = self.dialogue_encoder(
+                all_hidden[turn], all_masks[turn],
+            )
+            # Running mean: accumulated message represents dialogue-so-far
+            accumulated_msg = (accumulated_msg * turn + turn_msg) / (turn + 1)
+
+            turn_logits = self.receiver(accumulated_msg, candidates)
             student_log_probs = F.log_softmax(turn_logits, dim=-1)
             progressive_loss = progressive_loss + F.kl_div(
                 student_log_probs, teacher_probs, reduction="batchmean",
             )
 
-        # Final full-dialogue score (for accuracy reporting)
-        logits = turn_logits  # last turn's logits = full dialogue
+        # Last turn's logits = full dialogue for accuracy reporting
+        logits = turn_logits
 
         # Move decoder back to GPU for next forward pass
         gen.to(device)

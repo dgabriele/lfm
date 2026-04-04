@@ -23,11 +23,11 @@ length_weight: 0.5
 z_diversity_weight: 0.3
 
 # Training
-batch_size: 12
-gradient_accumulation_steps: 20
+batch_size: 48
+gradient_accumulation_steps: 4
 steps: 4000
-gru_lr: 0.0001
-receiver_lr: 0.0003
+gru_lr: 0.0003
+receiver_lr: 0.001
 num_distractors: 15
 
 # No curriculum — 100% hard negatives
@@ -36,5 +36,5 @@ no_curriculum: true
 # Runtime
 device: cuda
 seed: 42
-log_every: 50
+log_every: 20
 checkpoint_every: 100
