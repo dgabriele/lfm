@@ -125,9 +125,11 @@ def syllabify_ipa(text: str) -> list[str]:
                 s = sonorities[-1] if sonorities else 0
             sonorities.append(s)
 
-        # Find syllable boundaries at sonority troughs.
-        # A trough is a position where sonority is lower than both
-        # neighbors.  We place the boundary before the trough.
+        # Find syllable boundaries using Maximum Onset Principle.
+        # At each sonority trough between vowels, assign as many
+        # consonants as possible to the onset of the following syllable.
+        # The boundary falls at the lowest point of the trough, pushing
+        # rising-sonority consonants rightward into the next onset.
         boundaries: list[int] = [0]  # always start at 0
 
         for i in range(1, len(sonorities) - 1):
@@ -135,9 +137,20 @@ def syllabify_ipa(text: str) -> list[str]:
             cur_s = sonorities[i]
             next_s = sonorities[i + 1]
 
-            # Trough: current sonority < both neighbors
+            # Trough: current sonority < both neighbors.
+            # Maximum Onset: place boundary so the trough consonant
+            # joins the following syllable (onset), not the preceding
+            # one (coda).  Only split *before* the lowest point if
+            # the previous segment is higher sonority (falling into
+            # the trough = end of coda).
             if cur_s < prev_s and cur_s <= next_s:
-                boundaries.append(i)
+                # Look ahead: if next consonant is higher sonority,
+                # current consonant starts the onset → split before it.
+                # If next is same/lower, current is still coda → split after.
+                if next_s > cur_s:
+                    boundaries.append(i)  # split before onset
+                else:
+                    boundaries.append(i + 1)  # split after coda
             # Plateau followed by rise after a fall: split at the rise
             elif (
                 cur_s == next_s
@@ -148,12 +161,37 @@ def syllabify_ipa(text: str) -> list[str]:
                 boundaries.append(i)
 
         # Build syllable strings
+        raw_syls: list[str] = []
+        raw_sons: list[list[int]] = []
         for bi in range(len(boundaries)):
             start = boundaries[bi]
             end = boundaries[bi + 1] if bi + 1 < len(boundaries) else len(phonemes)
             syl = "".join(phonemes[start:end])
             if syl:
-                result.append(syl)
+                raw_syls.append(syl)
+                raw_sons.append(sonorities[start:end])
+
+        # Merge vowelless syllables into their neighbors.
+        # A syllable with no vowel (max sonority < 6) is a stray
+        # consonant cluster — attach it to the following syllable
+        # (onset) or previous syllable (coda) if it's the last.
+        merged: list[str] = []
+        for i, (syl, sons) in enumerate(zip(raw_syls, raw_sons)):
+            has_vowel = any(s >= 6 for s in sons)
+            if has_vowel or not merged:
+                merged.append(syl)
+            else:
+                # No vowel — merge with previous syllable
+                merged[-1] += syl
+
+        # If the first syllable has no vowel, merge it forward
+        if len(merged) > 1:
+            first_sons = raw_sons[0] if raw_sons else []
+            if first_sons and all(s < 6 for s in first_sons):
+                merged[1] = merged[0] + merged[1]
+                merged = merged[1:]
+
+        result.extend(merged)
 
     return result
 

@@ -103,17 +103,25 @@ class TranslatorConfig(LFMBaseConfig):
 
 
 class CorpusConfig(LFMBaseConfig):
-    """Configuration for generating romanized IPA corpus.
+    """Configuration for generating IPA corpus for LLM pretraining.
 
     The corpus is used for self-supervised LLM pretraining:
     the LLM learns the alien language via next-token prediction,
     then translates via few-shot cross-lingual transfer.
+
+    Attributes:
+        output_mode: Corpus text format.
+            ``"hyphenated_ipa"`` (default): syllable-hyphenated IPA —
+            lossless, exposes phonotactic structure to the LLM tokenizer.
+            ``"romanized"``: ASCII romanization (legacy, lossy vowel merges).
+            ``"hyphenated_romanized"``: romanized with syllable hyphens.
     """
 
     expression_checkpoint: str = "data/expression_game/best.pt"
     decoder_path: str = "data/vae_decoder.pt"
     spm_path: str = "data/spm.model"
     embedding_store_dir: str = "data/embeddings"
+    output_mode: str = "hyphenated_ipa"
     num_passes: int = 5
     batch_size: int = 16
     output_path: str = "data/translator/corpus.txt"

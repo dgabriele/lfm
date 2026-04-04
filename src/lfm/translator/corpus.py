@@ -18,9 +18,25 @@ import sentencepiece as spm_lib
 import torch
 
 from lfm.translator.config import CorpusConfig
-from lfm.translator.romanize import romanize
+from lfm.translator.romanize import romanize, syllable_hyphenate
+
+# Corpus output modes
+MODE_HYPHENATED_IPA = "hyphenated_ipa"  # default: syllable-hyphenated IPA
+MODE_ROMANIZED = "romanized"  # legacy: romanized ASCII (lossy)
+MODE_HYPHENATED_ROMANIZED = "hyphenated_romanized"  # romanized + syllable hyphens
 
 logger = logging.getLogger(__name__)
+
+
+def _format_expression(ipa: str, mode: str) -> str:
+    """Format a single IPA expression according to the output mode."""
+    if mode == MODE_HYPHENATED_IPA:
+        return syllable_hyphenate(ipa)
+    if mode == MODE_HYPHENATED_ROMANIZED:
+        return romanize(syllable_hyphenate(ipa))
+    if mode == MODE_ROMANIZED:
+        return romanize(ipa)
+    return syllable_hyphenate(ipa)  # default
 
 
 class CorpusGenerator:
@@ -117,14 +133,14 @@ class CorpusGenerator:
                             if not ipa:
                                 continue
 
-                            roman = romanize(ipa)
-                            if not roman:
+                            line = _format_expression(ipa, cfg.output_mode)
+                            if not line:
                                 continue
 
-                            f.write(roman + "\n")
+                            f.write(line + "\n")
                             total_lines += 1
-                            total_tokens += len(roman.split())
-                            seen_hashes.add(hash(roman))
+                            total_tokens += len(line.split())
+                            seen_hashes.add(hash(line))
 
                         if (start // cfg.batch_size) % 100 == 0:
                             pct = (pass_idx * n_emb + end) / (cfg.num_passes * n_emb) * 100

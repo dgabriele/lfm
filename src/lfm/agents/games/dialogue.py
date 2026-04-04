@@ -21,10 +21,10 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from lfm.agents.components import MessageEncoder, Receiver
+from lfm.agents.components import MessageEncoder, Receiver, ZDiversityLoss
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
 from lfm.agents.decode import ExpressionDecoder, rerun_decoder_multiphrase_with_grad
-from lfm.agents.diffusion import DiffusionZGenerator
+from lfm.agents.diffusion import DiffusionZGenerator, length_distribution_loss
 from lfm.config.base import LFMBaseConfig
 from lfm.faculty.config import FacultyConfig
 from lfm.faculty.model import LanguageFaculty
@@ -59,6 +59,9 @@ class DialogueGameConfig(LFMBaseConfig):
     diffusion_layers: int = 4
     diffusion_heads: int = 8
     variable_phrases: bool = True
+    target_phrases: float = 2.5
+    length_weight: float = 0.5
+    z_diversity_weight: float = 0.0
 
     # Message encoder (reads full dialogue)
     encoder: MessageEncoderConfig = MessageEncoderConfig()
@@ -206,6 +209,7 @@ class DialogueGame(nn.Module):
             variable_phrases=config.variable_phrases,
             z_mean=gen._z_mean if gen._z_stats_initialized else None,
             z_std=gen._z_std if gen._z_stats_initialized else None,
+            target_phrases=config.target_phrases,
         )
 
         # Context transformer (merges data + role + history)
@@ -234,6 +238,12 @@ class DialogueGame(nn.Module):
         )
 
         self.receiver = Receiver(config.embedding_dim)
+
+        # z diversity regularization
+        if config.z_diversity_weight > 0 and gen._z_stats_initialized:
+            self.z_diversity = ZDiversityLoss(gen._z_mean, gen._z_std)
+        else:
+            self.z_diversity = None
 
     @property
     def gen(self):
@@ -292,20 +302,44 @@ class DialogueGame(nn.Module):
         device = anchor.device
         num_candidates = distractors.size(1) + 1
 
+        cfg = self.config
+        num_turns = cfg.num_turns
+
+        # Prepare candidates and permutation once (shared across turns)
+        candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
+        perm = torch.stack([
+            torch.randperm(num_candidates, device=device)
+            for _ in range(batch)
+        ])
+        perm_expanded = perm.unsqueeze(-1).expand_as(candidates)
+        candidates = torch.gather(candidates, 1, perm_expanded)
+        target_idx = (perm == 0).long().argmax(dim=1)
+
+        # Precompute teacher topology (same for all turns)
+        with torch.no_grad():
+            teacher_sims = F.cosine_similarity(
+                anchor.unsqueeze(1), candidates, dim=-1,
+            )
+            teacher_probs = F.softmax(teacher_sims / 0.1, dim=-1)
+
+        # ── Phase A: Generate all turns (decoder on GPU) ──
         context = None
         all_hidden: list[Tensor] = []
         all_masks: list[Tensor] = []
         all_tokens_list: list[Tensor] = []
         all_gen_masks: list[Tensor] = []
+        all_z_weights: list[Tensor] = []
+        all_z_seqs: list[Tensor] = []
+        total_num_phrases = torch.zeros(batch, device=device)
 
-        for turn in range(self.config.num_turns):
+        for turn in range(num_turns):
             role = self.role_embeddings[turn % 2]
-
-            # Condition this turn on data + role + history
             conditioning = self.context_transformer(anchor, role, context)
 
-            # Generate z-sequence for this turn
-            z_seq, z_weights, _ = self.z_gen(conditioning)
+            z_seq, z_weights, num_phrases = self.z_gen(conditioning)
+            all_z_seqs.append(z_seq)
+            all_z_weights.append(z_weights)
+            total_num_phrases += num_phrases
 
             # Phase 1: no_grad decode through frozen decoder
             tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(z_seq, z_weights)
@@ -321,32 +355,54 @@ class DialogueGame(nn.Module):
             all_tokens_list.append(tokens)
             all_gen_masks.append(gen_mask)
 
-            # Update context: project hidden states and accumulate
+            # Context for next turn (detached — no gradient through context)
             turn_context = self.hidden_to_context(hidden.detach())
             if context is None:
                 context = turn_context
             else:
                 context = torch.cat([context, turn_context], dim=1)
 
-        # Concatenate full dialogue
-        full_hidden = torch.cat(all_hidden, dim=1)
-        full_mask = torch.cat(all_masks, dim=1)
+        # ── Phase B: Offload decoder, score progressively ──
+        # The frozen decoder is no longer needed.  Move to CPU to free
+        # ~160MB VRAM for the progressive encoder/receiver passes.
+        gen = self.gen
+        gen.cpu()
+        torch.cuda.empty_cache()
 
-        # Encode full dialogue → message vector
-        message = self.dialogue_encoder(full_hidden, full_mask)
+        progressive_loss = torch.tensor(0.0, device=device)
+        for turn in range(num_turns):
+            # Progressive topology matching: encode dialogue-so-far,
+            # score against all candidates via KL divergence to the
+            # true embedding cosine similarity structure.
+            so_far_hidden = torch.cat(all_hidden[:turn + 1], dim=1)
+            so_far_mask = torch.cat(all_masks[:turn + 1], dim=1)
+            so_far_msg = self.dialogue_encoder(so_far_hidden, so_far_mask)
+            turn_logits = self.receiver(so_far_msg, candidates)
+            student_log_probs = F.log_softmax(turn_logits, dim=-1)
+            progressive_loss = progressive_loss + F.kl_div(
+                student_log_probs, teacher_probs, reduction="batchmean",
+            )
 
-        # Score against candidates
-        candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
-        perm = torch.stack([
-            torch.randperm(num_candidates, device=device)
-            for _ in range(batch)
-        ])
-        perm_expanded = perm.unsqueeze(-1).expand_as(candidates)
-        candidates = torch.gather(candidates, 1, perm_expanded)
-        target_idx = (perm == 0).long().argmax(dim=1)
+        # Final full-dialogue score (for accuracy reporting)
+        logits = turn_logits  # last turn's logits = full dialogue
 
-        logits = self.receiver(message, candidates)
-        loss = F.cross_entropy(logits, target_idx)
+        # Move decoder back to GPU for next forward pass
+        gen.to(device)
+
+        loss = progressive_loss / num_turns
+
+        # Length regularization (across all turns)
+        if cfg.length_weight > 0:
+            for zw in all_z_weights:
+                loss = loss + cfg.length_weight * length_distribution_loss(
+                    zw, cfg.target_phrases,
+                )
+
+        # z diversity regularization (across all turns)
+        if self.z_diversity is not None:
+            for zs, zw in zip(all_z_seqs, all_z_weights):
+                div_loss, _ = self.z_diversity(zs, zw)
+                loss = loss + cfg.z_diversity_weight * div_loss
 
         with torch.no_grad():
             accuracy = (logits.argmax(1) == target_idx).float().mean()
@@ -360,15 +416,18 @@ class DialogueGame(nn.Module):
                 _seqs.add(hash(ids))
             surface_unique = len(_seqs) / max(t0.size(0), 1)
 
-            total_tokens = full_mask.float().sum(dim=1).mean()
+            all_mask_cat = torch.cat(all_masks, dim=1)
+            total_tokens = all_mask_cat.float().sum(dim=1).mean()
 
         return {
             "loss": loss,
             "accuracy": accuracy,
             "msg_lengths": total_tokens.detach(),
-            "num_phrases": torch.tensor(float(self.config.num_turns * self.config.max_phrases)),
+            "num_phrases": (total_num_phrases / cfg.num_turns).mean().detach(),
             "surface_unique": torch.tensor(surface_unique),
             "hs_weight": torch.tensor(1.0),
             "_tokens": all_tokens_list[0].detach(),
             "_gen_mask": all_gen_masks[0].detach(),
+            "_dialogue_tokens": [t.detach() for t in all_tokens_list],
+            "_dialogue_masks": [m.detach() for m in all_gen_masks],
         }

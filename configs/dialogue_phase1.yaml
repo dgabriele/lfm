@@ -16,12 +16,15 @@ context_heads: 4
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_phrases: 4
+max_phrases: 6
 variable_phrases: true
+target_phrases: 3.0
+length_weight: 0.5
+z_diversity_weight: 0.3
 
 # Training
-batch_size: 20
-gradient_accumulation_steps: 12
+batch_size: 12
+gradient_accumulation_steps: 20
 steps: 4000
 gru_lr: 0.0001
 receiver_lr: 0.0003

@@ -97,6 +97,53 @@ _REPLACEMENTS: list[tuple[str, str]] = [
 ]
 
 
+def syllable_hyphenate(ipa_text: str) -> str:
+    """Hyphenate IPA text at syllable boundaries within words.
+
+    Uses the Sonority Sequencing Principle to find natural syllable
+    breaks, then joins syllables with hyphens within each word.
+    Word boundaries (spaces) are preserved as spaces.
+
+    This exposes phonotactic structure to the LLM's tokenizer —
+    the BPE will split at hyphens, producing tokens that align with
+    syllable boundaries rather than arbitrary character offsets.
+
+    Args:
+        ipa_text: IPA string (spaces between words).
+
+    Returns:
+        IPA string with intra-word hyphens at syllable boundaries.
+
+    Example::
+
+        >>> syllable_hyphenate("malatɯnɰithɯntaɰithɯlɯn")
+        'ma-la-tɯn-ɰi-thɯn-ta-ɰi-thɯ-lɯn'
+    """
+    from lfm.data.syllabify import syllabify_ipa
+
+    syllables = syllabify_ipa(ipa_text)
+    if not syllables:
+        return ipa_text
+
+    # syllabify_ipa returns syllable strings with " " entries for
+    # word boundaries.  Join syllables with hyphens, spaces with spaces.
+    parts: list[str] = []
+    word_syls: list[str] = []
+
+    for syl in syllables:
+        if syl == " ":
+            if word_syls:
+                parts.append("-".join(word_syls))
+                word_syls = []
+            continue
+        word_syls.append(syl)
+
+    if word_syls:
+        parts.append("-".join(word_syls))
+
+    return " ".join(parts)
+
+
 def romanize(ipa_text: str) -> str:
     """Convert IPA text to natural ASCII orthography.
 

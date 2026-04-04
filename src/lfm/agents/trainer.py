@@ -222,10 +222,17 @@ class AgentTrainer:
                 extra = ""
                 if "num_phrases" in out:
                     n_phr = out['num_phrases'].item()
-                    extra += f"  phrases={n_phr:.1f}"
-                    expr_len = out['msg_lengths'].item()
-                    phr_len = expr_len / max(n_phr, 1)
-                    extra += f"  expr_len={expr_len:.0f}  phr_len={phr_len:.0f}"
+                    total_tok = out['msg_lengths'].item()
+                    is_dialogue = "_dialogue_tokens" in out
+                    if is_dialogue:
+                        num_turns = len(out["_dialogue_tokens"])
+                        extra += f"  phr/turn={n_phr:.1f}"
+                        extra += f"  tok/turn={total_tok / num_turns:.0f}"
+                        extra += f"  total_tok={total_tok:.0f}"
+                    else:
+                        extra += f"  phrases={n_phr:.1f}"
+                        tok_per_phr = total_tok / max(n_phr, 1)
+                        extra += f"  total_tok={total_tok:.0f}  tok/phr={tok_per_phr:.0f}"
                 if "z_intra_sim" in out:
                     extra += f"  z_sim={out['z_intra_sim'].item():.3f}"
                 if "halt_cost" in out:
@@ -234,10 +241,6 @@ class AgentTrainer:
                     extra += f"  div={out['z_div_loss'].item():.3f}"
                 if "z_coverage" in out and out["z_coverage"].item() > 0:
                     extra += f"  zcov={out['z_coverage'].item():.2f}"
-                if "surface_unique" in out:
-                    extra += f"  sdiv={out['surface_unique'].item():.0%}"
-                if "surface_global" in out:
-                    extra += f"  gdiv={out['surface_global'].item():.0%}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
                 logger.info(
@@ -259,13 +262,27 @@ class AgentTrainer:
                             sp = _spm.SentencePieceProcessor(model_file=cfg.spm_path)
                         vocab_size = sp.vocab_size()
                         eos_id = vocab_size + 1
-                        toks = out["_tokens"]
-                        mask = out["_gen_mask"]
-                        for j in range(min(5, toks.size(0))):
-                            ids = [t.item() for t, m in zip(toks[j], mask[j])
-                                   if m and t.item() != eos_id and t.item() < vocab_size]
-                            ipa = sp.decode(ids)
-                            logger.info("  sample[%d]: %s  (%d tok)", j, ipa[:100], len(ids))
+
+                        if "_dialogue_tokens" in out:
+                            # Dialogue game: print one full monologue
+                            roles = ["OBS", "ANA"]
+                            logger.info("  --- monologue (sample 0) ---")
+                            for turn_i, (toks, mask) in enumerate(
+                                zip(out["_dialogue_tokens"], out["_dialogue_masks"]),
+                            ):
+                                ids = [t.item() for t, m in zip(toks[0], mask[0])
+                                       if m and t.item() != eos_id and t.item() < vocab_size]
+                                ipa = sp.decode(ids)
+                                role = roles[turn_i % 2]
+                                logger.info("  [%s] %s  (%d tok)", role, ipa[:120], len(ids))
+                        else:
+                            toks = out["_tokens"]
+                            mask = out["_gen_mask"]
+                            for j in range(min(5, toks.size(0))):
+                                ids = [t.item() for t, m in zip(toks[j], mask[j])
+                                       if m and t.item() != eos_id and t.item() < vocab_size]
+                                ipa = sp.decode(ids)
+                                logger.info("  sample[%d]: %s  (%d tok)", j, ipa[:100], len(ids))
                     except Exception:
                         pass
 
