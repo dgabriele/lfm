@@ -15,7 +15,7 @@ class ExpressionConfig(LFMBaseConfig):
         output_dim: ExpressionEncoder output message dimension.
         max_depth: Maximum tree depth (root = depth 0).
         min_depth: Minimum forced depth before leaf decisions are allowed.
-        max_tokens_per_leaf: Maximum tokens per leaf segment before z-switch.
+        max_tokens_per_leaf: Maximum tokens per leaf phrase before z-switch.
         transition_on_eos: Whether to switch z when decoder emits EOS.
     """
 

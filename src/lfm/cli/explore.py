@@ -221,8 +221,8 @@ class ExpressionSampleCommand(CLICommand):
             help="Number of samples to decode (default: 10)",
         )
         parser.add_argument(
-            "--max-segments", type=int, default=16,
-            help="Max segments (must match training, default: 16)",
+            "--max-phrases", type=int, default=16,
+            help="Max phrases (must match training, default: 16)",
         )
         parser.add_argument(
             "--seed", type=int, default=42,
@@ -256,7 +256,7 @@ class ExpressionSampleCommand(CLICommand):
             decoder_path=args.decoder_path,
             spm_path=args.spm_path,
             z_generator=ckpt.get("z_generator", "gru"),
-            max_segments=ckpt.get("max_segments", args.max_segments),
+            max_phrases=ckpt.get("max_phrases", ckpt.get("max_segments", args.max_phrases)),
             diffusion_steps=ckpt.get("diffusion_steps", 4),
             diffusion_layers=ckpt.get("diffusion_layers", 4),
             device=device,
@@ -290,8 +290,8 @@ class ExpressionSampleCommand(CLICommand):
                 # GRU z-sequence
                 z_seq, halt_probs, z_weights, num_segs = game.z_gen(emb)
 
-                # Multi-segment decode
-                tokens, gen_mask, seg_bounds = game._multiseg_decode(z_seq, z_weights)
+                # Multi-phrase decode
+                tokens, gen_mask, phrase_bounds = game._multiphrase_decode(z_seq, z_weights)
 
                 # Decode to IPA
                 token_ids = tokens[0].tolist()
@@ -299,13 +299,13 @@ class ExpressionSampleCommand(CLICommand):
                 valid_ids = [t for t, m in zip(token_ids, mask) if m and t != eos_id and t < vocab_size]
                 ipa = sp.decode(valid_ids)
 
-                n_segs = int(num_segs[0].item())
+                n_phr = int(num_segs[0].item())
                 if passages and idx < len(passages):
                     print(f'[{i + 1}] ENG: "{passages[idx][:100]}"')
                 else:
                     print(f'[{i + 1}] embedding #{idx}')
                 print(f'    IPA: {ipa}')
-                print(f'    ({len(valid_ids)} tokens, {n_segs} segments)')
+                print(f'    ({len(valid_ids)} tokens, {n_phr} phrases)')
                 print()
 
         return 0

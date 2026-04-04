@@ -89,7 +89,7 @@ class PairGenerator:
         embeddings: np.ndarray,
         device: torch.device,
     ) -> list[tuple[str, str]]:
-        """Load expression game, decode multi-segment expressions."""
+        """Load expression game, decode multi-phrase expressions."""
         from lfm.agents.games.expression import ExpressionGame, ExpressionGameConfig
         from lfm.faculty.model import LanguageFaculty
 
@@ -101,11 +101,11 @@ class PairGenerator:
             decoder_path=cfg.decoder_path,
             spm_path=cfg.spm_path,
             z_generator=ckpt.get("z_generator", "gru"),
-            max_segments=ckpt.get("max_segments", cfg.max_segments),
+            max_phrases=ckpt.get("max_phrases", ckpt.get("max_segments", cfg.max_phrases)),
             embedding_dim=ckpt.get("embedding_dim", 384),
             z_hidden_dim=ckpt.get("z_hidden_dim", 512),
             num_memory_tokens=ckpt.get("num_memory_tokens", 8),
-            max_tokens_per_segment=ckpt.get("max_tokens_per_segment", 48),
+            max_tokens_per_phrase=ckpt.get("max_tokens_per_phrase", ckpt.get("max_tokens_per_segment", 48)),
             diffusion_steps=ckpt.get("diffusion_steps", 4),
             diffusion_layers=ckpt.get("diffusion_layers", 4),
             device=cfg.device,
@@ -138,13 +138,13 @@ class PairGenerator:
                     embeddings[start:end], dtype=torch.float32, device=device,
                 )
 
-                # z-sequence + multi-segment decode
+                # z-sequence + multi-phrase decode
                 z_out = game.z_gen(emb)
                 if len(z_out) == 4:
                     z_seq, _, z_weights, _ = z_out
                 else:
                     z_seq, z_weights, _ = z_out
-                tokens, gen_mask, _ = game._multiseg_decode(z_seq, z_weights)
+                tokens, gen_mask, _ = game._multiphrase_decode(z_seq, z_weights)
 
                 # Detokenize each expression
                 for i in range(end - start):

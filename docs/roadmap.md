@@ -123,7 +123,7 @@ The phonetic embedding module (`generator/phonetic_embeddings.py`) maps BPE toke
 
 Map non-human vocalizations to IPA via acoustic-to-articulatory inversion: click trains → plosives, tonal sweeps → vowel formant transitions, frequency bands → place of articulation. The transcription would be lossy but systematic.
 
-The decoder, trained on human + whale IPA, would learn "whale phonotactics" alongside human phonotactics. The expression system could then generate whale-like segments when encoding marine biology data.
+The decoder, trained on human + whale IPA, would learn "whale phonotactics" alongside human phonotactics. The expression system could then generate whale-like phrases when encoding marine biology data.
 
 **Risk:** Mixing radically different phonotactic systems may degrade human language quality. Safer approach: train on human languages first, then test whether the frozen decoder can decode whale-mapped IPA at all. If it produces valid output, the mapping is compatible. If not, the decoder rejects it — useful diagnostic information.
 

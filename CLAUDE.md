@@ -162,5 +162,4 @@ poetry run lfm explore expression-sample --checkpoint data/expression_game/best.
 
 ## Planned Refactor
 
-- Rename `segment` → `phrase` throughout codebase (segments are phrase constituents)
-- Migrate expression game's `_multiseg_decode` to use shared `ExpressionDecoder` class
+- Migrate expression game's `_multiphrase_decode` to use shared `ExpressionDecoder` class

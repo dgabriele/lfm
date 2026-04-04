@@ -38,7 +38,7 @@ class ExpressionGenerator(nn.Module):
       2. Leaf content — z vectors decoded through the frozen decoder.
 
     Decoding uses continuous z-switching: one AR pass where the
-    cross-attention memory switches between leaf z vectors at segment
+    cross-attention memory switches between leaf z vectors at phrase
     transitions.  The KV cache carries across boundaries, enabling
     natural coarticulation.
 
@@ -49,7 +49,7 @@ class ExpressionGenerator(nn.Module):
         hidden_dim: Internal hidden dimension for tree decisions.
         max_depth: Maximum tree depth (root = 0).
         min_depth: Minimum forced expansion depth.
-        max_tokens_per_leaf: Max tokens per segment before z-switch.
+        max_tokens_per_leaf: Max tokens per phrase before z-switch.
         transition_on_eos: Switch z when decoder emits EOS.
     """
 
@@ -247,7 +247,7 @@ class ExpressionGenerator(nn.Module):
         """Continuous AR decode with z-switching at leaf boundaries.
 
         Populates expr.tokens, expr.states, expr.lengths, expr.mask,
-        expr.segment_boundaries, and expr.leaf_order in-place.
+        expr.phrase_boundaries, and expr.leaf_order in-place.
         """
         from lfm.generator.layers import PhraseDecoder
 
@@ -309,7 +309,7 @@ class ExpressionGenerator(nn.Module):
         all_tokens = torch.zeros(b, max_total, dtype=torch.long, device=device)
         all_states = torch.zeros(b, max_total, hidden_dim, device=device)
         all_mask = torch.zeros(b, max_total, dtype=torch.bool, device=device)
-        segment_starts = torch.zeros(b, max_leaves, dtype=torch.long, device=device)
+        phrase_starts = torch.zeros(b, max_leaves, dtype=torch.long, device=device)
 
         # Per-sample state
         cur_leaf = torch.zeros(b, dtype=torch.long, device=device)
@@ -366,7 +366,7 @@ class ExpressionGenerator(nn.Module):
                     total_pos[bi] += 1
                     tokens_in_seg[bi] += 1
 
-            # Check for segment transitions (z-switch points)
+            # Check for phrase transitions (z-switch points)
             for bi in range(b):
                 if finished[bi]:
                     continue
@@ -382,7 +382,7 @@ class ExpressionGenerator(nn.Module):
                     tokens_in_seg[bi] = 0
                     if cur_leaf[bi] < max_leaves:
                         li = cur_leaf[bi].item()
-                        segment_starts[bi, li] = total_pos[bi]
+                        phrase_starts[bi, li] = total_pos[bi]
                     cl = min(cur_leaf[bi].item(), max_leaves - 1)
                     if cur_leaf[bi] >= max_leaves or not leaf_active[bi, cl]:
                         finished[bi] = True
@@ -422,7 +422,7 @@ class ExpressionGenerator(nn.Module):
         expr.states = all_states
         expr.lengths = total_pos
         expr.mask = all_mask
-        expr.segment_boundaries = segment_starts
+        expr.phrase_boundaries = phrase_starts
 
     @staticmethod
     def _inorder_leaves(expr: Expression) -> Tensor:

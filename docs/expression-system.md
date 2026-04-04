@@ -51,10 +51,10 @@ through the linguistic bottleneck.
 The key innovation is **continuous z-switching**: instead of decoding each
 leaf independently (producing disjoint IPA fragments), one continuous
 autoregressive pass runs through all leaves in tree order, switching the
-cross-attention memory at segment boundaries while the KV cache persists.
+cross-attention memory at phrase boundaries while the KV cache persists.
 This produces phonotactically coherent output — natural coarticulation and
 prosodic bridging across constituents — because the decoder's language model
-state carries context from one segment to the next.
+state carries context from one phrase to the next.
 
 ```
     Tree:        ○ (root — learned topology)
@@ -87,7 +87,7 @@ through the frozen LFM decoder.
 **Continuous decode** (left-to-right):
 4. Leaves are collected in in-order traversal (left-to-right tree ordering).
 5. One autoregressive pass runs through all leaves, switching the cross-attention
-   memory vector at segment transitions (EOS or max tokens per leaf).
+   memory vector at phrase transitions (EOS or max tokens per leaf).
 6. The KV cache carries continuously across z-switch boundaries.
 
 The expand/leaf decisions are discrete (sampled from Bernoulli) and trained
@@ -108,7 +108,7 @@ reparameterization trick through the receiver's gradient.
 | `tokens` | (B, T) long | Continuous decoded token sequence |
 | `states` | (B, T, H) | Decoder hidden states |
 | `lengths` | (B,) int | Total valid tokens |
-| `segment_boundaries` | (B, L) int | Token position of each segment start |
+| `phrase_boundaries` | (B, L) int | Token position of each phrase start |
 | `leaf_order` | (B, L) int | Node indices in left-to-right order |
 
 Nodes are indexed in BFS order (root=0, left child of i = 2i+1, right child = 2i+2).
@@ -118,7 +118,7 @@ Nodes are indexed in BFS order (root=0, left child of i = 2i+1, right child = 2i
 `lfm.expression.ExpressionEncoder` — composes a decoded expression into a
 fixed-size message vector for downstream use.
 
-1. **Segment pooling**: Mean-pool decoder hidden states within each segment
+1. **Phrase pooling**: Mean-pool decoder hidden states within each phrase
    (bounded by z-switch points).
 2. **Tree-guided composition**: Bottom-up Merge from leaves to root. Each
    internal node's representation is a learned function of its children's
@@ -136,16 +136,16 @@ and how they combine.
 The defining feature of this architecture. Why it matters:
 
 **Without z-switching** (independent per-leaf decode): Each leaf is decoded
-in isolation. The decoder starts fresh for each segment. The output is
+in isolation. The decoder starts fresh for each phrase. The output is
 disjoint IPA fragments stitched together — phonotactically incoherent at
 boundaries, with no prosodic continuity.
 
 **With z-switching** (this system): One continuous AR pass. The KV cache
-accumulates context from all previous segments. When the memory vector switches
+accumulates context from all previous phrases. When the memory vector switches
 from z₁ to z₂, the decoder "knows" what came before because the self-attention
 history is intact. This enables:
 
-- **Coarticulation**: Final phonemes of one segment blend naturally into the
+- **Coarticulation**: Final phonemes of one phrase blend naturally into the
   initial phonemes of the next.
 - **Prosodic bridging**: Intonation and rhythm carry across constituent
   boundaries, producing utterance-level coherence.
@@ -177,7 +177,7 @@ expr_gen = ExpressionGenerator(
     hidden_dim=512,          # internal hidden dim
     max_depth=3,             # max tree depth
     min_depth=1,             # forced expansion depth
-    max_tokens_per_leaf=96,  # max tokens per segment
+    max_tokens_per_leaf=96,  # max tokens per phrase
 )
 
 expr_enc = ExpressionEncoder(
@@ -199,7 +199,7 @@ message = expr_enc(expression)           # fixed-size message vector
 **What's frozen vs. learned:**
 - Frozen: The LFM decoder (all parameters in `faculty.generator`)
 - Learned: `ExpressionGenerator` (root_proj, expand_head, leaf_proj) and
-  `ExpressionEncoder` (segment_enc, merge, depth_embed, shape_embed)
+  `ExpressionEncoder` (phrase_enc, merge, depth_embed, shape_embed)
 
 **Training**: The tree topology decisions (expand/leaf) are discrete and
 trained via REINFORCE. The leaf z vectors and encoder are continuous and

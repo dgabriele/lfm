@@ -4,7 +4,7 @@ This package provides modular components for learning compositional
 tree-structured expressions through a frozen multilingual VAE decoder.
 An agent produces a binary constituency tree where the topology is learned
 and each leaf carries a latent z vector.  The leaves are decoded as one
-continuous autoregressive IPA sequence with z-switching at segment
+continuous autoregressive IPA sequence with z-switching at phrase
 boundaries — the KV cache carries across transitions, producing natural
 coarticulation and prosodic coherence.
 
@@ -15,9 +15,9 @@ Architecture::
           → learn tree topology (expand/leaf decisions via REINFORCE)
           → project leaf hidden states → (μ, σ) → sample z
           → continuous AR decode: z₁ → z₂ → z₃ (KV cache persists)
-      → Expression (topology + decoded token sequence + segment boundaries)
+      → Expression (topology + decoded token sequence + phrase boundaries)
       → ExpressionEncoder
-          → segment-level pooling + tree-guided composition
+          → phrase-level pooling + tree-guided composition
           → fixed-size message vector for downstream use
 
 Usage::

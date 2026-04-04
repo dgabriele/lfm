@@ -24,13 +24,13 @@ Continuous embedding (384-dim)
   → variable-length IPA token sequence
 ```
 
-Or, for multi-segment expressions:
+Or, for multi-phrase expressions:
 
 ```
 Continuous embedding (384-dim)
   → DiffusionZGenerator (flow-matching denoiser, T=4 reverse steps)
   → K z-vectors with per-position activity scores
-  → frozen decoder decodes each z into a phrase (KV cache persists across segments)
+  → frozen decoder decodes each z into a phrase (KV cache persists across phrases)
   → concatenated IPA expression (variable-length, multi-phrase)
 ```
 
@@ -65,7 +65,7 @@ LFM's decoder doesn't add tokens to an existing vocabulary. It generates output 
 - **Zipfian token frequency** (decoded Zipf exponent 0.980 vs corpus 1.004)
 - **Variable length** correlated with input complexity (input-output length r=1.000)
 - **Phonotactic validity** (pronounceable sound sequences)
-- **Phrase-level compositionality** (multi-segment expressions from DiffusionZGenerator compose atomic phrases into utterances)
+- **Phrase-level compositionality** (multi-phrase expressions from DiffusionZGenerator compose atomic phrases into utterances)
 
 This structure is not designed or imposed -- it emerges from the frozen decoder's inductive biases (multi-scale attention at 3/7/15/full token windows, weight sharing for recursive application, RoPE for translation invariance). The decoder forces any input to be expressed in a form that respects the structural constraints of natural language.
 
@@ -77,11 +77,11 @@ The consequence is that the output is interpretable without knowing anything abo
 
 LongCat-Next's compositionality comes from the language model's attention patterns. If the LM learns that certain vision token sequences correspond to compositional visual concepts (object + attribute, scene + relation), the system is compositional. But this compositionality is neither guaranteed nor measurable -- it depends on what the LM happens to learn during training.
 
-### LFM: compositionality through multi-segment expression generation
+### LFM: compositionality through multi-phrase expression generation
 
-LFM's expression game produces multi-segment utterances where each segment is an atomic phrase decoded from a separate z vector. The DiffusionZGenerator produces K z-vectors simultaneously via flow-matching (all segments see each other through self-attention during refinement), and per-position activity scores determine which segments contribute.
+LFM's expression game produces multi-phrase utterances where each phrase is an atomic unit decoded from a separate z vector. The DiffusionZGenerator produces K z-vectors simultaneously via flow-matching (all phrases see each other through self-attention during refinement), and per-position activity scores determine which phrases contribute.
 
-This is structurally compositional: the expression is built from discrete atomic units (phrases), each decoded through the same frozen decoder but from different z values. The z values are co-adapted (the denoiser's self-attention across K positions ensures segments are complementary, not redundant), and the decoder's KV cache persists across segments, enabling coarticulation at segment boundaries.
+This is structurally compositional: the expression is built from discrete atomic units (phrases), each decoded through the same frozen decoder but from different z values. The z values are co-adapted (the denoiser's self-attention across K positions ensures phrases are complementary, not redundant), and the decoder's KV cache persists across phrases, enabling coarticulation at phrase boundaries.
 
 Measured compositionality after curriculum training: topographic similarity 0.335 (p approximately 0), topology preservation 0.366 (p approximately 0), 100% of probed dimensions showing positive R-squared. These are quantitative guarantees that the compositional structure is carrying semantic information.
 

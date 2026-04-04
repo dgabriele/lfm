@@ -1,7 +1,7 @@
 """ExpressionEncoder: compose a decoded expression into a fixed-size message.
 
 Operates on the continuous decoded output from ExpressionGenerator.
-Segments (defined by z-switch boundaries) are pooled individually,
+Phrases (defined by z-switch boundaries) are pooled individually,
 then composed bottom-up following the tree topology via learned Merge —
 the same operation as syntactic Merge in generative linguistics.
 
@@ -21,8 +21,8 @@ class ExpressionEncoder(nn.Module):
     """Encode a decoded Expression into a fixed-size message vector.
 
     Pipeline:
-      1. Pool each segment's decoder hidden states → segment representation.
-      2. Map segments to leaf positions in the tree.
+      1. Pool each phrase's decoder hidden states → phrase representation.
+      2. Map phrases to leaf positions in the tree.
       3. Bottom-up Merge: compose children → parent, leaf to root.
       4. Add shape embedding (topology signature) to root.
 
@@ -44,8 +44,8 @@ class ExpressionEncoder(nn.Module):
         self.max_nodes = 2 ** max_depth - 1
         self.output_dim = output_dim
 
-        # Segment encoder: pool decoder states → segment representation
-        self.segment_enc = nn.Sequential(
+        # Phrase encoder: pool decoder states → phrase representation
+        self.phrase_enc = nn.Sequential(
             nn.Linear(hidden_dim, output_dim),
             nn.GELU(),
             nn.Linear(output_dim, output_dim),
@@ -84,36 +84,36 @@ class ExpressionEncoder(nn.Module):
             b, self.max_nodes, self.output_dim, device=device,
         )
 
-        # 1. Encode segments → leaf representations
-        # Map each segment (from continuous decode) back to its leaf node.
+        # 1. Encode phrases → leaf representations
+        # Map each phrase (from continuous decode) back to its leaf node.
         max_leaves = expr.leaf_order.size(1)
-        for seg_idx in range(max_leaves):
-            # Get segment boundaries
-            seg_start = expr.segment_boundaries[:, seg_idx]  # (B,)
-            if seg_idx + 1 < max_leaves:
-                seg_end = expr.segment_boundaries[:, seg_idx + 1]
+        for phr_idx in range(max_leaves):
+            # Get phrase boundaries
+            phr_start = expr.phrase_boundaries[:, phr_idx]  # (B,)
+            if phr_idx + 1 < max_leaves:
+                phr_end = expr.phrase_boundaries[:, phr_idx + 1]
             else:
-                seg_end = expr.lengths
+                phr_end = expr.lengths
 
-            # Pool segment hidden states
+            # Pool phrase hidden states
             for bi in range(b):
-                node_idx = expr.leaf_order[bi, seg_idx].item()
+                node_idx = expr.leaf_order[bi, phr_idx].item()
                 if node_idx < 0 or not expr.is_leaf[bi, node_idx]:
                     continue
 
-                s = seg_start[bi].item()
-                e = seg_end[bi].item()
+                s = phr_start[bi].item()
+                e = phr_end[bi].item()
                 if e <= s:
                     continue
 
-                seg_states = expr.states[bi, s:e]  # (seg_len, H)
-                seg_mask = expr.mask[bi, s:e]       # (seg_len,)
-                if not seg_mask.any():
+                phr_states = expr.states[bi, s:e]  # (phr_len, H)
+                phr_mask = expr.mask[bi, s:e]       # (phr_len,)
+                if not phr_mask.any():
                     continue
 
-                mask_f = seg_mask.unsqueeze(-1).float()
-                pooled = (seg_states * mask_f).sum(0) / mask_f.sum(0).clamp(min=1)
-                encoded = self.segment_enc(pooled.unsqueeze(0)).squeeze(0)
+                mask_f = phr_mask.unsqueeze(-1).float()
+                pooled = (phr_states * mask_f).sum(0) / mask_f.sum(0).clamp(min=1)
+                encoded = self.phrase_enc(pooled.unsqueeze(0)).squeeze(0)
                 depth = expr.depth[node_idx]
                 encoded = encoded + self.depth_embed(depth)
                 node_repr[bi, node_idx] = encoded

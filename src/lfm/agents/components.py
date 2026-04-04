@@ -74,7 +74,7 @@ class ZDiversityLoss(nn.Module):
     Penalizes when z vectors within an expression are more similar
     (higher cosine similarity) than typical vectors drawn from the
     pretrained latent distribution.  This prevents the GRU from
-    collapsing all segments to near-identical z's while keeping them
+    collapsing all phrases to near-identical z's while keeping them
     close enough to maintain linguistic coherence for downstream
     translation.
 
@@ -116,8 +116,8 @@ class ZDiversityLoss(nn.Module):
         """Compute diversity hinge loss and mean similarity.
 
         Args:
-            z_seq: ``(batch, K, latent_dim)`` z vectors per segment.
-            z_weights: ``(batch, K)`` segment weights from PonderNet.
+            z_seq: ``(batch, K, latent_dim)`` z vectors per phrase.
+            z_weights: ``(batch, K)`` phrase weights from PonderNet.
 
         Returns:
             Tuple of ``(loss, mean_sim)`` — scalar hinge loss and

@@ -1,4 +1,4 @@
-# Expression game phase 1 — leaf-only decoder, 8 fixed segments
+# Expression game phase 1 — leaf-only decoder, 8 fixed phrases
 # HS-driven, diffusion z-generator, 300K corpus, hard negatives
 z_generator: diffusion
 decoder_path: data/models/v5-leaf-27/vae_decoder.pt
@@ -10,10 +10,10 @@ embedding_store_dir: data/embeddings
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_segments: 12
-# Length regularization disabled — all segments forced active via use_halt: false.
-# target_segments and length_weight only apply when variable_segments is enabled.
-target_segments: 12.0
+max_phrases: 12
+# Length regularization disabled — all phrases forced active via use_halt: false.
+# target_phrases and length_weight only apply when variable_phrases is enabled.
+target_phrases: 12.0
 length_weight: 0.0
 
 # Phase 2 internal mode: frozen decoder re-run (standard for phase 1)
@@ -25,7 +25,7 @@ hidden_state_anneal_steps: 0
 z_diversity_weight: 0.0
 z_distribution_weight: 0.0
 
-# No halting — use all 8 segments
+# No halting — use all phrases
 use_halt: false
 
 # No IPA receiver in phase 1

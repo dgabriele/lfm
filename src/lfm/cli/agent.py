@@ -144,8 +144,8 @@ class ExpressionCommand(CLICommand):
         parser.add_argument("--resume", default=None)
         parser.add_argument("--num-memory-tokens", type=int, default=8)
         parser.add_argument("--z-hidden-dim", type=int, default=512)
-        parser.add_argument("--max-segments", type=int, default=8)
-        parser.add_argument("--max-tokens-per-segment", type=int, default=48)
+        parser.add_argument("--max-phrases", type=int, default=8)
+        parser.add_argument("--max-tokens-per-phrase", type=int, default=48)
         parser.add_argument("--lambda-p", type=float, default=0.4,
                             help="Geometric prior param (E[K]=1/lambda_p, default: 0.4)")
         parser.add_argument("--kl-beta", type=float, default=0.5,
@@ -166,7 +166,7 @@ class ExpressionCommand(CLICommand):
                             help="Diffusion reverse steps (default: 4)")
         parser.add_argument("--diffusion-layers", type=int, default=4,
                             help="Diffusion denoiser layers (default: 4)")
-        parser.add_argument("--target-segments", type=float, default=2.5,
+        parser.add_argument("--target-phrases", type=float, default=2.5,
                             help="Target E[K] for length regularization (default: 2.5)")
         parser.add_argument("--length-weight", type=float, default=0.5,
                             help="Length distribution loss weight (default: 0.5)")
@@ -179,7 +179,7 @@ class ExpressionCommand(CLICommand):
         parser.add_argument("--ipa-cache-refresh", type=int, default=0,
                             help="Refresh IPA cache every N steps (0=never)")
         parser.add_argument("--no-halt", action="store_true",
-                            help="Disable PonderNet halting (always use all segments)")
+                            help="Disable PonderNet halting (always use all phrases)")
         parser.add_argument("--z-diversity-weight", type=float, default=0.0,
                             help="z diversity regularization weight (default: 0, disabled)")
         parser.add_argument("--z-diversity-target", type=float, default=None,
@@ -226,8 +226,8 @@ class ExpressionCommand(CLICommand):
             output_dir=_get("output_dir", args.output_dir, "data/expression_game"),
             num_memory_tokens=_get("num_memory_tokens", args.num_memory_tokens, 8),
             z_hidden_dim=_get("z_hidden_dim", args.z_hidden_dim, 512),
-            max_segments=_get("max_segments", args.max_segments, 8),
-            max_tokens_per_segment=_get("max_tokens_per_segment", args.max_tokens_per_segment, 48),
+            max_phrases=_get("max_phrases", args.max_phrases, 8),
+            max_tokens_per_phrase=_get("max_tokens_per_phrase", args.max_tokens_per_phrase, 48),
             phase2_mode=_get("phase2_mode", args.phase2_mode, "decoder"),
             refinement_layers=_get("refinement_layers", args.refinement_layers, 4),
             refinement_steps=_get("refinement_steps", args.refinement_steps, 4),
@@ -236,7 +236,7 @@ class ExpressionCommand(CLICommand):
             z_generator=_get("z_generator", args.z_generator, "gru"),
             diffusion_steps=_get("diffusion_steps", args.diffusion_steps, 4),
             diffusion_layers=_get("diffusion_layers", args.diffusion_layers, 4),
-            target_segments=_get("target_segments", args.target_segments, 2.5),
+            target_phrases=_get("target_phrases", args.target_phrases, 2.5),
             length_weight=_get("length_weight", args.length_weight, 0.5),
             use_halt=_get("use_halt", not args.no_halt, True),
             lambda_p=_get("lambda_p", args.lambda_p, 0.4),
@@ -298,7 +298,7 @@ class DialogueCommand(CLICommand):
         parser.add_argument("--output-dir", default="data/dialogue_game")
         parser.add_argument("--resume", default=None)
         parser.add_argument("--num-turns", type=int, default=4)
-        parser.add_argument("--max-segments", type=int, default=4)
+        parser.add_argument("--max-phrases", type=int, default=4)
         parser.add_argument("--batch-size", type=int, default=20)
         parser.add_argument("--gradient-accumulation-steps", type=int, default=12)
         parser.add_argument("--steps", type=int, default=4000)
@@ -331,7 +331,7 @@ class DialogueCommand(CLICommand):
             embedding_store_dir=_get("embedding_store_dir", args.embedding_store, "data/embeddings"),
             output_dir=_get("output_dir", args.output_dir, "data/dialogue_game"),
             num_turns=_get("num_turns", args.num_turns, 4),
-            max_segments=_get("max_segments", args.max_segments, 4),
+            max_phrases=_get("max_phrases", args.max_phrases, 4),
             batch_size=_get("batch_size", args.batch_size, 20),
             gradient_accumulation_steps=_get("gradient_accumulation_steps", args.gradient_accumulation_steps, 12),
             steps=_get("steps", args.steps, 4000),

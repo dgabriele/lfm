@@ -36,8 +36,8 @@ class GeneratePairsCommand(CLICommand):
             help="Trained expression game checkpoint",
         )
         parser.add_argument(
-            "--max-segments", type=int, default=16,
-            help="Max segments (must match training, default: 16)",
+            "--max-phrases", type=int, default=16,
+            help="Max phrases (must match training, default: 16)",
         )
         parser.add_argument(
             "--batch-size", type=int, default=64,
@@ -59,7 +59,7 @@ class GeneratePairsCommand(CLICommand):
             decoder_path=args.decoder_path,
             spm_path=args.spm_path,
             expression_checkpoint=args.expression_checkpoint,
-            max_segments=args.max_segments,
+            max_phrases=args.max_phrases,
             batch_size=args.batch_size,
             output_path=args.output,
             device=args.device,

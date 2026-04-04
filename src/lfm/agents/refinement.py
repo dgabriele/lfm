@@ -3,7 +3,7 @@
 Takes token embeddings from Phase 1 AR decode as a "rough draft" and
 refines them via iterative denoising conditioned on z memories.  Produces
 hidden states with gradients flowing to z, same interface as
-``rerun_decoder_multiseg_with_grad`` but at ~10x lower VRAM.
+``rerun_decoder_multiphrase_with_grad`` but at ~10x lower VRAM.
 
 Supports reverse mode for bidirectional communication: given observed
 IPA token embeddings, denoise to recover the z that produced them.
@@ -20,7 +20,7 @@ from lfm.agents.diffusion import DenoiserBlock, sinusoidal_embedding
 class RefinementDenoiser(nn.Module):
     """Refine AR decoder token embeddings via iterative denoising.
 
-    Replaces Phase 2 (``rerun_decoder_multiseg_with_grad``).  The frozen
+    Replaces Phase 2 (``rerun_decoder_multiphrase_with_grad``).  The frozen
     decoder generates tokens in Phase 1; this module produces refined
     hidden representations from those tokens, conditioned on z memories
     via cross-attention.

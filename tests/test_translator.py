@@ -16,7 +16,7 @@ from lfm.translator.config import PairGenerationConfig, TranslatorConfig
 def test_pair_generation_config_defaults():
     """PairGenerationConfig has sensible defaults."""
     cfg = PairGenerationConfig()
-    assert cfg.max_segments == 16
+    assert cfg.max_phrases == 16
     assert cfg.device == "cuda"
 
 
@@ -24,7 +24,7 @@ def test_pair_generation_config_is_frozen():
     """PairGenerationConfig is immutable."""
     cfg = PairGenerationConfig()
     with pytest.raises(ValidationError):
-        cfg.max_segments = 100  # type: ignore[misc]
+        cfg.max_phrases = 100  # type: ignore[misc]
 
 
 def test_pair_generation_config_forbids_extra():

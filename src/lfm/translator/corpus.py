@@ -51,7 +51,7 @@ class CorpusGenerator:
             decoder_path=cfg.decoder_path,
             spm_path=cfg.spm_path,
             z_generator=ckpt.get("z_generator", "gru"),
-            max_segments=ckpt.get("max_segments", 4),
+            max_phrases=ckpt.get("max_phrases", ckpt.get("max_segments", 4)),
             embedding_dim=ckpt.get("embedding_dim", 384),
             z_hidden_dim=ckpt.get("z_hidden_dim", 512),
             num_memory_tokens=ckpt.get("num_memory_tokens", 8),
@@ -106,7 +106,7 @@ class CorpusGenerator:
 
                         z_out = game.z_gen(emb)
                         z_seq, z_weights = z_out[0], z_out[-2]
-                        tokens, mask, _ = game._multiseg_decode(z_seq, z_weights)
+                        tokens, mask, _ = game._multiphrase_decode(z_seq, z_weights)
 
                         for i in range(end - start):
                             ids = [

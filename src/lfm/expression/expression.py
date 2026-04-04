@@ -15,7 +15,7 @@ class Expression:
     Each expression is a binary constituency tree where the topology is
     learned and leaf nodes carry latent z vectors decoded through the
     frozen LFM decoder.  The decoded output is a single continuous token
-    sequence with z-switching at segment boundaries.
+    sequence with z-switching at phrase boundaries.
 
     Nodes are indexed in BFS order (root=0, left child of i = 2i+1,
     right child of i = 2i+2).
@@ -42,7 +42,7 @@ class Expression:
     states: Tensor = field(default_factory=lambda: torch.empty(0))
     lengths: Tensor = field(default_factory=lambda: torch.empty(0))
     mask: Tensor = field(default_factory=lambda: torch.empty(0))
-    segment_boundaries: Tensor = field(default_factory=lambda: torch.empty(0))
+    phrase_boundaries: Tensor = field(default_factory=lambda: torch.empty(0))
     # leaf_order[b, i] = node index of the i-th leaf in left-to-right order
     leaf_order: Tensor = field(default_factory=lambda: torch.empty(0))
 

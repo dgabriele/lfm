@@ -23,7 +23,7 @@ from torch import Tensor, nn
 
 from lfm.agents.components import MessageEncoder, Receiver
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
-from lfm.agents.decode import ExpressionDecoder, rerun_decoder_multiseg_with_grad
+from lfm.agents.decode import ExpressionDecoder, rerun_decoder_multiphrase_with_grad
 from lfm.agents.diffusion import DiffusionZGenerator
 from lfm.config.base import LFMBaseConfig
 from lfm.faculty.config import FacultyConfig
@@ -54,11 +54,11 @@ class DialogueGameConfig(LFMBaseConfig):
 
     # Diffusion z-generator (shared across turns)
     z_hidden_dim: int = 512
-    max_segments: int = 4
+    max_phrases: int = 4
     diffusion_steps: int = 4
     diffusion_layers: int = 4
     diffusion_heads: int = 8
-    variable_segments: bool = True
+    variable_phrases: bool = True
 
     # Message encoder (reads full dialogue)
     encoder: MessageEncoderConfig = MessageEncoderConfig()
@@ -199,11 +199,11 @@ class DialogueGame(nn.Module):
             input_dim=config.embedding_dim,
             latent_dim=gen._latent_dim,
             d_model=config.z_hidden_dim,
-            max_segments=config.max_segments,
+            max_phrases=config.max_phrases,
             num_steps=config.diffusion_steps,
             num_layers=config.diffusion_layers,
             num_heads=config.diffusion_heads,
-            variable_segments=config.variable_segments,
+            variable_phrases=config.variable_phrases,
             z_mean=gen._z_mean if gen._z_stats_initialized else None,
             z_std=gen._z_std if gen._z_stats_initialized else None,
         )
@@ -250,7 +250,7 @@ class DialogueGame(nn.Module):
             "dialogue_encoder": self.dialogue_encoder.state_dict(),
             "receiver": self.receiver.state_dict(),
             "num_turns": self.config.num_turns,
-            "max_segments": self.config.max_segments,
+            "max_phrases": self.config.max_phrases,
             "z_generator": "diffusion",
         }
 
@@ -311,7 +311,7 @@ class DialogueGame(nn.Module):
             tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(z_seq, z_weights)
 
             # Phase 2: re-run with gradients
-            hidden = rerun_decoder_multiseg_with_grad(
+            hidden = rerun_decoder_multiphrase_with_grad(
                 self.gen, z_seq, z_weights, tokens, gen_mask, seg_bounds,
             )
             trimmed_mask = gen_mask[:, :hidden.size(1)]
@@ -366,7 +366,7 @@ class DialogueGame(nn.Module):
             "loss": loss,
             "accuracy": accuracy,
             "msg_lengths": total_tokens.detach(),
-            "num_segments": torch.tensor(float(self.config.num_turns * self.config.max_segments)),
+            "num_phrases": torch.tensor(float(self.config.num_turns * self.config.max_phrases)),
             "surface_unique": torch.tensor(surface_unique),
             "hs_weight": torch.tensor(1.0),
             "_tokens": all_tokens_list[0].detach(),

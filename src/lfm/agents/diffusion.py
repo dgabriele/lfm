@@ -5,7 +5,7 @@ denoiser that refines all K z positions simultaneously, conditioned
 on the input embedding via cross-attention.  Uses flow matching
 (linear interpolation between data and noise) for T=4 steps.
 
-All segments see each other during refinement, enabling co-adaptation
+All phrases see each other during refinement, enabling co-adaptation
 that the sequential GRU cannot achieve.  Variable length emerges from
 learned per-position activity scores rather than a halt gate.
 """
@@ -104,7 +104,7 @@ class DiffusionZGenerator(nn.Module):
 
     Starts from noise drawn from the pretrained z distribution, then
     refines all K positions simultaneously over T steps.  A per-position
-    activity head determines which segments contribute to the expression.
+    activity head determines which phrases contribute to the expression.
 
     Uses flow matching: forward ``z_t = (1-t)*z_0 + t*ε``, model predicts
     the clean ``z_0`` directly.  At T=4 steps the full reverse process is
@@ -114,13 +114,13 @@ class DiffusionZGenerator(nn.Module):
         input_dim: Conditioning embedding dimension (384).
         latent_dim: VAE latent dimensionality (256).
         d_model: Denoiser hidden dimension.
-        max_segments: Number of z positions (K).
+        max_phrases: Number of z positions (K).
         num_steps: Reverse diffusion steps (T).
         num_layers: Denoiser transformer blocks.
         num_heads: Attention heads per block.
         z_mean: Per-dim latent mean from pretraining.
         z_std: Per-dim latent std from pretraining.
-        target_segments: Target E[K] for length regularization.
+        target_phrases: Target E[K] for length regularization.
     """
 
     def __init__(
@@ -128,22 +128,22 @@ class DiffusionZGenerator(nn.Module):
         input_dim: int,
         latent_dim: int,
         d_model: int = 512,
-        max_segments: int = 8,
+        max_phrases: int = 8,
         num_steps: int = 4,
         num_layers: int = 4,
         num_heads: int = 8,
-        variable_segments: bool = True,
+        variable_phrases: bool = True,
         z_mean: Tensor | None = None,
         z_std: Tensor | None = None,
-        target_segments: float = 2.5,
+        target_phrases: float = 2.5,
     ) -> None:
         super().__init__()
         self.latent_dim = latent_dim
         self.d_model = d_model
-        self.max_segments = max_segments
+        self.max_phrases = max_phrases
         self.num_steps = num_steps
-        self.target_segments = target_segments
-        self.variable_segments = variable_segments
+        self.target_phrases = target_phrases
+        self.variable_phrases = variable_phrases
 
         # Project noisy z into denoiser space
         self.z_in = nn.Linear(latent_dim, d_model)
@@ -159,7 +159,7 @@ class DiffusionZGenerator(nn.Module):
         )
 
         # Learned per-slot position embeddings
-        self.pos_embed = nn.Parameter(torch.randn(max_segments, d_model) * 0.02)
+        self.pos_embed = nn.Parameter(torch.randn(max_phrases, d_model) * 0.02)
 
         # Denoiser stack
         self.denoiser_layers = nn.ModuleList([
@@ -172,11 +172,11 @@ class DiffusionZGenerator(nn.Module):
         self.activity_head = nn.Linear(d_model, 1)
 
         # Activity bias: start at 0 (sigmoid=0.5, half-active).
-        # Let the surface loss decide which segments to keep open
+        # Let the surface loss decide which phrases to keep open
         # and which to close, rather than fighting a strong prior.
         with torch.no_grad():
             self.activity_head.bias.fill_(0.0)
-            self.register_buffer("_activity_bias", torch.zeros(max_segments))
+            self.register_buffer("_activity_bias", torch.zeros(max_phrases))
 
         # z distribution stats from pretraining
         if z_mean is not None:
@@ -239,7 +239,7 @@ class DiffusionZGenerator(nn.Module):
 
         # Start from noise scaled to pretrained z distribution
         z_t = (
-            torch.randn(B, self.max_segments, self.latent_dim, device=device)
+            torch.randn(B, self.max_phrases, self.latent_dim, device=device)
             * self.z_std
             + self.z_mean
         )
@@ -281,42 +281,42 @@ class DiffusionZGenerator(nn.Module):
         Returns:
             z_seq: ``(B, K, latent_dim)`` denoised z vectors.
             z_weights: ``(B, K)`` per-position activity weights.
-            num_segments: ``(B,)`` soft segment count.
+            num_phrases: ``(B,)`` soft phrase count.
         """
         z_seq, activity_logits = self._reverse_sample(embedding)
 
-        if self.variable_segments:
-            # First segment always active; concat 1.0 with sigmoid of remaining
+        if self.variable_phrases:
+            # First phrase always active; concat 1.0 with sigmoid of remaining
             ones = torch.ones(embedding.size(0), 1, device=embedding.device)
             z_weights = torch.cat([ones, torch.sigmoid(activity_logits[:, 1:])], dim=1)
         else:
-            # All segments always active
-            z_weights = torch.ones(embedding.size(0), self.max_segments, device=embedding.device)
+            # All phrases always active
+            z_weights = torch.ones(embedding.size(0), self.max_phrases, device=embedding.device)
 
-        num_segments = z_weights.sum(dim=-1)
+        num_phrases = z_weights.sum(dim=-1)
 
-        return z_seq, z_weights, num_segments
+        return z_seq, z_weights, num_phrases
 
 
 def length_distribution_loss(
     z_weights: Tensor, target_mean: float = 2.5,
 ) -> Tensor:
-    """Regularize segment count toward a target mean.
+    """Regularize phrase count toward a target mean.
 
-    Soft penalty on mean segment count plus entropy bonus to encourage
+    Soft penalty on mean phrase count plus entropy bonus to encourage
     variable lengths across the batch (Zipfian distribution).
 
     Args:
         z_weights: ``(B, K)`` per-position activity weights.
-        target_mean: Target expected segment count.
+        target_mean: Target expected phrase count.
 
     Returns:
         Scalar loss.
     """
-    num_segments = z_weights.sum(dim=-1)
+    num_phrases = z_weights.sum(dim=-1)
 
     # Mean penalty
-    mean_loss = (num_segments.mean() - target_mean).pow(2)
+    mean_loss = (num_phrases.mean() - target_mean).pow(2)
 
     # Entropy bonus: encourage diverse lengths across the batch
     p = z_weights.mean(dim=0)  # (K,) average activity per position

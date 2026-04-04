@@ -10,8 +10,8 @@ embedding_store_dir: data/embeddings
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_segments: 4
-target_segments: 4.0
+max_phrases: 4
+target_phrases: 4.0
 length_weight: 0.0
 
 # Phase 2 internal mode: frozen decoder re-run (refinement denoiser needs more VRAM)
@@ -23,7 +23,7 @@ hidden_state_anneal_steps: 0
 z_diversity_weight: 0.0
 z_distribution_weight: 0.0
 
-# No halting — use all segments
+# No halting — use all phrases
 use_halt: false
 
 # IPA-to-IPA receiver with topology loss

@@ -2,7 +2,7 @@
 
 Replaces the REINFORCE tree-topology expression system with a fully
 differentiable GRU that autoregressively produces z vectors.  The
-frozen decoder decodes each z as a segment (until EOS), with KV cache
+frozen decoder decodes each z as a phrase (until EOS), with KV cache
 persisting across boundaries for coarticulation.
 
 Halting uses a geometric prior KL (PonderNet, Banino et al. 2021):
@@ -11,7 +11,7 @@ distribution p(k) = lambda * (1-lambda)^{k-1}, naturally producing
 Zipf-like expression lengths.
 
 Two-phase forward (same as referential):
-  1. GRU emits z sequence, decode segments with no_grad (KV-cached).
+  1. GRU emits z sequence, decode phrases with no_grad (KV-cached).
   2. Re-run GRU + decoder in parallel with gradients through
      cross-attention to position-wise memory.
 """
@@ -32,7 +32,7 @@ from lfm.agents.components import (
 from lfm.agents.diffusion import DiffusionZGenerator, length_distribution_loss
 from lfm.agents.refinement import RefinementDenoiser
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
-from lfm.agents.decode import rerun_decoder_multiseg_with_grad
+from lfm.agents.decode import rerun_decoder_multiphrase_with_grad
 from lfm.config.base import LFMBaseConfig
 from lfm.faculty.config import FacultyConfig
 from lfm.faculty.model import LanguageFaculty
@@ -59,26 +59,26 @@ class ExpressionGameConfig(LFMBaseConfig):
     # z-sequence generator
     z_generator: str = "gru"  # "gru" or "diffusion"
     z_hidden_dim: int = 512
-    max_segments: int = 8
-    max_tokens_per_segment: int = 48
+    max_phrases: int = 8
+    max_tokens_per_phrase: int = 48
 
     # Diffusion-specific (only when z_generator="diffusion")
     diffusion_steps: int = 4
     diffusion_layers: int = 4
     diffusion_heads: int = 8
-    target_segments: float = 2.5
+    target_phrases: float = 2.5
     length_weight: float = 0.5
 
-    # PonderNet geometric prior: lambda_p controls expected segment count.
-    # E[K] = 1/lambda_p.  lambda_p=0.5 → ~2 segments, 0.3 → ~3.3, 0.2 → ~5.
-    # Set use_halt=False to always generate all max_segments (no halting).
+    # PonderNet geometric prior: lambda_p controls expected phrase count.
+    # E[K] = 1/lambda_p.  lambda_p=0.5 → ~2 phrases, 0.3 → ~3.3, 0.2 → ~5.
+    # Set use_halt=False to always generate all max_phrases (no halting).
     use_halt: bool = True
     lambda_p: float = 0.4
     kl_beta: float = 0.5
 
     # z diversity: penalize intra-expression z similarity above a data-driven
     # target (auto-computed from pretrained z distribution).  Prevents the GRU
-    # from collapsing all segments to near-identical z's while keeping them
+    # from collapsing all phrases to near-identical z's while keeping them
     # close enough for linguistic coherence.
     z_diversity_weight: float = 0.0
     z_diversity_target: float | None = None
@@ -162,7 +162,7 @@ class ZSequenceGenerator(nn.Module):
         input_dim: Anchor embedding dimension.
         hidden_dim: GRU hidden dimension.
         latent_dim: Output z dimension (must match decoder).
-        max_segments: Upper bound on segment count.
+        max_phrases: Upper bound on phrase count.
         z_mean: Pretrained z distribution mean for initialization.
         z_std: Pretrained z distribution std for initialization.
     """
@@ -172,13 +172,13 @@ class ZSequenceGenerator(nn.Module):
         input_dim: int,
         hidden_dim: int,
         latent_dim: int,
-        max_segments: int = 8,
+        max_phrases: int = 8,
         use_halt: bool = True,
         z_mean: Tensor | None = None,
         z_std: Tensor | None = None,
     ) -> None:
         super().__init__()
-        self.max_segments = max_segments
+        self.max_phrases = max_phrases
         self.latent_dim = latent_dim
         self.use_halt = use_halt
 
@@ -196,7 +196,7 @@ class ZSequenceGenerator(nn.Module):
         self.halt_head = nn.Linear(hidden_dim, 1)
 
         # Initialize gate bias to start closed (sigmoid(-3) ≈ 0.05).
-        # Segment 0 always has weight 1.0; later segments must learn
+        # Phrase 0 always has weight 1.0; later phrases must learn
         # to open their gates when the content demands it.
         with torch.no_grad():
             self.halt_head.bias.fill_(-3.0)
@@ -221,14 +221,14 @@ class ZSequenceGenerator(nn.Module):
             embedding: ``(batch, input_dim)`` anchor embeddings.
 
         Returns:
-            z_sequence: ``(batch, max_segments, latent_dim)``.
-            halt_probs: ``(batch, max_segments)`` per-step halt probs.
-            z_weights: ``(batch, max_segments)`` effective weights.
-            num_segments: ``(batch,)`` soft segment count.
+            z_sequence: ``(batch, max_phrases, latent_dim)``.
+            halt_probs: ``(batch, max_phrases)`` per-step halt probs.
+            z_weights: ``(batch, max_phrases)`` effective weights.
+            num_phrases: ``(batch,)`` soft phrase count.
         """
         batch = embedding.size(0)
         device = embedding.device
-        K = self.max_segments
+        K = self.max_phrases
 
         z_seq = torch.zeros(batch, K, self.latent_dim, device=device)
         halts = torch.zeros(batch, K, device=device)
@@ -247,17 +247,17 @@ class ZSequenceGenerator(nn.Module):
             z_seq[:, i] = z
 
             if self.use_halt:
-                # Independent gate: each segment decides its own weight.
-                # No cumulative product — segment 3 can contribute
-                # even if segment 2 doesn't.
+                # Independent gate: each phrase decides its own weight.
+                # No cumulative product — phrase 3 can contribute
+                # even if phrase 2 doesn't.
                 gate = torch.sigmoid(self.halt_head(h)).squeeze(-1)
                 halts[:, i] = gate
                 weights[:, i] = gate
 
-        # Soft segment count = sum of weights
-        num_segments = weights.sum(dim=-1)
+        # Soft phrase count = sum of weights
+        num_phrases = weights.sum(dim=-1)
 
-        return z_seq, halts, weights, num_segments
+        return z_seq, halts, weights, num_phrases
 
 
 def geometric_kl(halt_probs: Tensor, lambda_p: float) -> Tensor:
@@ -271,8 +271,8 @@ def geometric_kl(halt_probs: Tensor, lambda_p: float) -> Tensor:
     The geometric prior is p(k) = lambda_p * (1 - lambda_p)^{k-1}.
 
     Args:
-        halt_probs: ``(batch, max_segments)`` per-step halt probabilities.
-            halt_probs[:, 0] is unused (first segment always active).
+        halt_probs: ``(batch, max_phrases)`` per-step halt probabilities.
+            halt_probs[:, 0] is unused (first phrase always active).
         lambda_p: Geometric prior parameter (E[K] = 1/lambda_p).
 
     Returns:
@@ -283,7 +283,7 @@ def geometric_kl(halt_probs: Tensor, lambda_p: float) -> Tensor:
 
     # Build q(k): probability of halting at step k
     # q(k) = halt_probs[k] * prod(1 - halt_probs[j] for j < k)
-    # For k=0: q(0) = 1 (always use first segment... actually we model
+    # For k=0: q(0) = 1 (always use first phrase... actually we model
     # halting starting from step 1)
     # Simpler: treat halt_probs[1:] as the per-step stopping probability
     q_continue = torch.ones_like(halt_probs[:, 0])
@@ -347,21 +347,21 @@ class ExpressionGame(nn.Module):
                 input_dim=config.embedding_dim,
                 latent_dim=gen._latent_dim,
                 d_model=config.z_hidden_dim,
-                max_segments=config.max_segments,
+                max_phrases=config.max_phrases,
                 num_steps=config.diffusion_steps,
                 num_layers=config.diffusion_layers,
                 num_heads=config.diffusion_heads,
-                variable_segments=config.use_halt,
+                variable_phrases=config.use_halt,
                 z_mean=_z_mean,
                 z_std=_z_std,
-                target_segments=config.target_segments,
+                target_phrases=config.target_phrases,
             )
         else:
             self.z_gen = ZSequenceGenerator(
                 input_dim=config.embedding_dim,
                 hidden_dim=config.z_hidden_dim,
                 latent_dim=gen._latent_dim,
-                max_segments=config.max_segments,
+                max_phrases=config.max_phrases,
                 use_halt=config.use_halt,
                 z_mean=_z_mean,
                 z_std=_z_std,
@@ -447,7 +447,7 @@ class ExpressionGame(nn.Module):
             batch = embeddings[start:start + batch_size]
             z_out = self.z_gen(batch)
             z_seq, z_weights = z_out[0], z_out[-2]
-            tokens, mask, _ = self._multiseg_decode(z_seq, z_weights)
+            tokens, mask, _ = self._multiphrase_decode(z_seq, z_weights)
             tokens_list.append(tokens.cpu())
             if (start // batch_size) % 50 == 0:
                 pct = (start + batch.size(0)) / total * 100
@@ -485,8 +485,8 @@ class ExpressionGame(nn.Module):
             "z_generator": cfg.z_generator,
             "embedding_dim": cfg.embedding_dim,
             "z_hidden_dim": cfg.z_hidden_dim,
-            "max_segments": cfg.max_segments,
-            "max_tokens_per_segment": cfg.max_tokens_per_segment,
+            "max_phrases": cfg.max_phrases,
+            "max_tokens_per_phrase": cfg.max_tokens_per_phrase,
             "num_memory_tokens": cfg.num_memory_tokens,
             "use_halt": cfg.use_halt,
             "lambda_p": cfg.lambda_p,
@@ -555,14 +555,14 @@ class ExpressionGame(nn.Module):
 
         # z-sequence generation (with grad)
         if isinstance(self.z_gen, DiffusionZGenerator):
-            z_seq, z_weights, num_segments = self.z_gen(anchor)
+            z_seq, z_weights, num_phrases = self.z_gen(anchor)
             halt_probs = None
         else:
-            z_seq, halt_probs, z_weights, num_segments = self.z_gen(anchor)
+            z_seq, halt_probs, z_weights, num_phrases = self.z_gen(anchor)
 
-        # Phase 1: multi-segment decode (no_grad)
+        # Phase 1: multi-phrase decode (no_grad)
         with torch.no_grad():
-            tokens, gen_mask, seg_bounds = self._multiseg_decode(
+            tokens, gen_mask, phrase_bounds = self._multiphrase_decode(
                 z_seq, z_weights,
             )
 
@@ -600,19 +600,19 @@ class ExpressionGame(nn.Module):
             trimmed_mask = _mask_trim
         else:
             # Original: frozen decoder re-run with gradients
-            hidden = rerun_decoder_multiseg_with_grad(
-                self.gen, z_seq, z_weights, tokens, gen_mask, seg_bounds,
+            hidden = rerun_decoder_multiphrase_with_grad(
+                self.gen, z_seq, z_weights, tokens, gen_mask, phrase_bounds,
             )
             trimmed_mask = gen_mask[:, :hidden.size(1)]
 
-        # Per-position segment weights for halt gradient flow.
-        # All segments contribute equally to the message (no attenuation),
+        # Per-position phrase weights for halt gradient flow.
+        # All phrases contribute equally to the message (no attenuation),
         # but the weights are available for auxiliary losses.
-        from lfm.agents.decode import _compute_segment_assignment
-        seg_assign = _compute_segment_assignment(
-            seg_bounds, trimmed_mask.size(1), z_seq.size(1), device,
+        from lfm.agents.decode import _compute_phrase_assignment
+        phrase_assign = _compute_phrase_assignment(
+            phrase_bounds, trimmed_mask.size(1), z_seq.size(1), device,
         )
-        per_pos_weight = z_weights.gather(1, seg_assign)  # (B, T)
+        per_pos_weight = z_weights.gather(1, phrase_assign)  # (B, T)
 
         cfg = self.config
 
@@ -745,7 +745,7 @@ class ExpressionGame(nn.Module):
         # Length regularization
         total_tokens = trimmed_mask.float().sum(dim=1)
         if isinstance(self.z_gen, DiffusionZGenerator) and cfg.length_weight > 0:
-            len_loss = length_distribution_loss(z_weights, cfg.target_segments)
+            len_loss = length_distribution_loss(z_weights, cfg.target_phrases)
             loss = receiver_loss + cfg.length_weight * len_loss
             kl_loss = len_loss
         elif cfg.use_halt and cfg.kl_beta > 0:
@@ -785,7 +785,7 @@ class ExpressionGame(nn.Module):
             "logits": surface_logits,
             "target_idx": target_idx,
             "halt_cost": kl_loss.detach(),
-            "num_segments": num_segments.mean().detach(),
+            "num_phrases": num_phrases.mean().detach(),
             "z_intra_sim": z_intra_sim,
             "z_div_loss": div_loss.detach(),
             "z_dist_loss": dist_loss.detach(),
@@ -799,18 +799,18 @@ class ExpressionGame(nn.Module):
         }
 
     @torch.no_grad()
-    def _multiseg_decode(
+    def _multiphrase_decode(
         self, z_seq: Tensor, z_weights: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Phase 1: KV-cached multi-segment decode with z-switching."""
+        """Phase 1: KV-cached multi-phrase decode with z-switching."""
         from lfm.generator.layers import PhraseDecoder, multiscale_causal_mask
 
         gen = self.gen
         cfg = self.config
         batch, K, _ = z_seq.shape
         device = z_seq.device
-        max_tok_per_seg = cfg.max_tokens_per_segment
-        max_total = max_tok_per_seg * K
+        max_tok_per_phrase = cfg.max_tokens_per_phrase
+        max_total = max_tok_per_phrase * K
 
         weighted_z = z_weights.unsqueeze(-1) * z_seq
         n_mem = gen._num_memory_tokens
@@ -833,16 +833,16 @@ class ExpressionGame(nn.Module):
 
         all_tokens = torch.zeros(batch, max_total, dtype=torch.long, device=device)
         all_mask = torch.zeros(batch, max_total, dtype=torch.bool, device=device)
-        seg_bounds = torch.zeros(batch, K, dtype=torch.long, device=device)
+        phrase_bounds = torch.zeros(batch, K, dtype=torch.long, device=device)
 
-        cur_seg = torch.zeros(batch, dtype=torch.long, device=device)
-        tokens_in_seg = torch.zeros(batch, dtype=torch.long, device=device)
+        cur_phrase = torch.zeros(batch, dtype=torch.long, device=device)
+        tokens_in_phrase = torch.zeros(batch, dtype=torch.long, device=device)
         total_pos = torch.zeros(batch, dtype=torch.long, device=device)
 
-        seg_active = z_weights > 0.01
-        finished = ~seg_active[:, 0]
+        phrase_active = z_weights > 0.01
+        finished = ~phrase_active[:, 0]
 
-        # Extend RoPE freqs for multi-segment decode beyond max_seq_len
+        # Extend RoPE freqs for multi-phrase decode beyond max_seq_len
         rope_freqs = gen._rope_freqs
         if rope_freqs is not None and rope_freqs.size(0) < max_total + 1:
             from lfm.generator.layers import precompute_rope_freqs
@@ -862,9 +862,9 @@ class ExpressionGame(nn.Module):
         batch_idx = torch.arange(batch, device=device)
 
         def _gather_memory() -> Tensor:
-            idx = cur_seg.clamp(max=K - 1)
+            idx = cur_phrase.clamp(max=K - 1)
             mem = memories[batch_idx, idx]
-            active_mask = seg_active[batch_idx, idx] & ~finished
+            active_mask = phrase_active[batch_idx, idx] & ~finished
             return mem * active_mask.unsqueeze(-1).unsqueeze(-1).float()
 
         memory = _gather_memory()
@@ -888,27 +888,27 @@ class ExpressionGame(nn.Module):
             all_tokens[batch_idx, total_pos] = next_token * active.long()
             all_mask[batch_idx, total_pos] = active
             total_pos += active.long()
-            tokens_in_seg += active.long()
+            tokens_in_phrase += active.long()
 
             # Vectorized z-switch
-            hit_eos = (next_token == gen.eos_id) & (tokens_in_seg >= 1)
-            hit_max = tokens_in_seg >= max_tok_per_seg
+            hit_eos = (next_token == gen.eos_id) & (tokens_in_phrase >= 1)
+            hit_max = tokens_in_phrase >= max_tok_per_phrase
             should_switch = (hit_eos | hit_max) & active
 
-            cur_seg += should_switch.long()
-            tokens_in_seg *= ~should_switch
+            cur_phrase += should_switch.long()
+            tokens_in_phrase *= ~should_switch
 
-            # Record segment boundaries
-            switched_valid = should_switch & (cur_seg < K)
+            # Record phrase boundaries
+            switched_valid = should_switch & (cur_phrase < K)
             if switched_valid.any():
-                seg_bounds[batch_idx[switched_valid], cur_seg[switched_valid]] = (
+                phrase_bounds[batch_idx[switched_valid], cur_phrase[switched_valid]] = (
                     total_pos[switched_valid]
                 )
 
             # Mark finished
-            clamped = cur_seg.clamp(max=K - 1)
-            next_inactive = ~seg_active[batch_idx, clamped]
-            finished = finished | (cur_seg >= K) | (should_switch & next_inactive)
+            clamped = cur_phrase.clamp(max=K - 1)
+            next_inactive = ~phrase_active[batch_idx, clamped]
+            finished = finished | (cur_phrase >= K) | (should_switch & next_inactive)
 
             if finished.all():
                 break
@@ -934,4 +934,4 @@ class ExpressionGame(nn.Module):
                 )
                 out = decoder(all_embed, memory, tgt_mask=tgt_mask)
 
-        return all_tokens, all_mask, seg_bounds
+        return all_tokens, all_mask, phrase_bounds

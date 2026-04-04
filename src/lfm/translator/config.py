@@ -11,7 +11,7 @@ class PairGenerationConfig(LFMBaseConfig):
     The pair generation pipeline:
     1. Load English sentences from Leipzig corpus
     2. Encode with sentence-transformer -> embeddings
-    3. Pass through trained expression game -> multi-segment IPA
+    3. Pass through trained expression game -> multi-phrase IPA
     4. Save as JSONL for downstream training
 
     Attributes:
@@ -22,7 +22,7 @@ class PairGenerationConfig(LFMBaseConfig):
         decoder_path: Path to pretrained VAE decoder checkpoint.
         spm_path: Path to sentencepiece model.
         expression_checkpoint: Path to trained expression game checkpoint.
-        max_segments: Max segments (must match expression game training).
+        max_phrases: Max phrases (must match expression game training).
         encoder_model: Sentence-transformer model name for encoding.
         encode_batch_size: Batch size for encoding and generation.
         output_path: Where to save the JSONL pairs file.
@@ -34,7 +34,7 @@ class PairGenerationConfig(LFMBaseConfig):
     decoder_path: str = "data/vae_decoder.pt"
     spm_path: str = "data/spm.model"
     expression_checkpoint: str = "data/expression_game/best.pt"
-    max_segments: int = 16
+    max_phrases: int = 16
     batch_size: int = 64
     output_path: str = "data/translator/pairs.jsonl"
     device: str = "cuda"

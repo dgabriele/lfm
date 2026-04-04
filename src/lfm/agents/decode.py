@@ -1,4 +1,4 @@
-"""Decoder utilities for agent games: multi-segment decode and gradient re-run."""
+"""Decoder utilities for agent games: multi-phrase decode and gradient re-run."""
 
 from __future__ import annotations
 
@@ -66,39 +66,39 @@ def rerun_decoder_with_grad(
     )
 
 
-def rerun_decoder_multiseg_with_grad(
+def rerun_decoder_multiphrase_with_grad(
     gen,
     z_sequence: Tensor,
     z_weights: Tensor,
     tokens: Tensor,
     mask: Tensor,
-    segment_boundaries: Tensor,
+    phrase_boundaries: Tensor,
 ) -> Tensor:
-    """Re-run decoder with gradients for multi-segment z-switching.
+    """Re-run decoder with gradients for multi-phrase z-switching.
 
     Each position cross-attends only to the memory from the z that
-    generated it.  All segment memories are concatenated and a
-    cross-attention mask restricts each position to its segment's
+    generated it.  All phrase memories are concatenated and a
+    cross-attention mask restricts each position to its phrase's
     memory tokens.
 
     Args:
         gen: The ``MultilingualVAEGenerator`` (frozen decoder).
-        z_sequence: ``(batch, max_segments, latent_dim)`` with gradients.
-        z_weights: ``(batch, max_segments)`` ACT weights per segment.
+        z_sequence: ``(batch, max_phrases, latent_dim)`` with gradients.
+        z_weights: ``(batch, max_phrases)`` ACT weights per phrase.
         tokens: ``(batch, seq_len)`` from phase 1.
         mask: ``(batch, seq_len)`` boolean mask.
-        segment_boundaries: ``(batch, max_segments)`` start position of
-            each segment (0 for unused segments).
+        phrase_boundaries: ``(batch, max_phrases)`` start position of
+            each phrase (0 for unused phrases).
 
     Returns:
         Decoder hidden states ``(batch, seq_len, hidden_dim)`` with gradients.
     """
-    batch, max_segs, latent_dim = z_sequence.shape
+    batch, max_phr, latent_dim = z_sequence.shape
     # Trim to actual max length (avoids exceeding precomputed RoPE)
     actual_max = int(mask.float().sum(dim=1).max().item())
     tokens = tokens[:, :actual_max]
     mask = mask[:, :actual_max]
-    segment_boundaries = segment_boundaries.clamp(max=actual_max)
+    phrase_boundaries = phrase_boundaries.clamp(max=actual_max)
     seq_len = actual_max
     num_mem = gen._num_memory_tokens
     nhead = gen.config.decoder_num_heads
@@ -106,21 +106,21 @@ def rerun_decoder_multiseg_with_grad(
 
     # Weight each z by its ACT weight, then calibrate/quantize
     weighted_z = z_weights.unsqueeze(-1) * z_sequence  # (B, K, latent)
-    z_flat = weighted_z.reshape(batch * max_segs, latent_dim)
+    z_flat = weighted_z.reshape(batch * max_phr, latent_dim)
     z_dec = _calibrate_or_quantize(gen, z_flat)
 
     # All memories concatenated: (B, K * num_mem, hidden)
     all_memory = gen.latent_to_decoder(z_dec).reshape(
-        batch, max_segs * num_mem, -1,
+        batch, max_phr * num_mem, -1,
     )
 
-    # Segment assignment: which segment generated each position
-    seg_idx = _compute_segment_assignment(
-        segment_boundaries, seq_len, max_segs, device,
+    # Phrase assignment: which phrase generated each position
+    phr_idx = _compute_phrase_assignment(
+        phrase_boundaries, seq_len, max_phr, device,
     )
 
-    # Cross-attention mask: each position only attends to its segment's memory
-    xattn_mask = _build_xattn_mask(seg_idx, max_segs, num_mem, nhead, device)
+    # Cross-attention mask: each position only attends to its phrase's memory
+    xattn_mask = _build_xattn_mask(phr_idx, max_phr, num_mem, nhead, device)
 
     tok_emb = gen.token_embedding(tokens)
 
@@ -149,38 +149,38 @@ def rerun_decoder_multiseg_with_grad(
     )
 
 
-def _compute_segment_assignment(
-    segment_boundaries: Tensor,
+def _compute_phrase_assignment(
+    phrase_boundaries: Tensor,
     seq_len: int,
-    max_segs: int,
+    max_phr: int,
     device: torch.device,
 ) -> Tensor:
-    """Map each position to its segment index.
+    """Map each position to its phrase index.
 
     Args:
-        segment_boundaries: ``(batch, max_segments)`` start positions.
+        phrase_boundaries: ``(batch, max_phrases)`` start positions.
         seq_len: Total sequence length.
-        max_segs: Maximum number of segments.
+        max_phr: Maximum number of phrases.
         device: Torch device.
 
     Returns:
-        ``(batch, seq_len)`` segment index per position.
+        ``(batch, seq_len)`` phrase index per position.
     """
-    batch = segment_boundaries.size(0)
+    batch = phrase_boundaries.size(0)
     positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, -1)
 
     # searchsorted: find which bin each position falls into
     # boundaries are sorted; searchsorted returns the index of the first
-    # boundary > position, so subtract 1 to get the segment index
-    seg_idx = torch.searchsorted(
-        segment_boundaries.contiguous(), positions.contiguous(), right=True,
+    # boundary > position, so subtract 1 to get the phrase index
+    phr_idx = torch.searchsorted(
+        phrase_boundaries.contiguous(), positions.contiguous(), right=True,
     ) - 1
-    return seg_idx.clamp(0, max_segs - 1)
+    return phr_idx.clamp(0, max_phr - 1)
 
 
 def _build_xattn_mask(
-    seg_idx: Tensor,
-    max_segs: int,
+    phr_idx: Tensor,
+    max_phr: int,
     num_mem: int,
     nhead: int,
     device: torch.device,
@@ -188,27 +188,27 @@ def _build_xattn_mask(
     """Build cross-attention mask for position-dependent memory.
 
     Each position can only attend to the memory tokens belonging to
-    its segment.  All other memory positions are masked with ``-inf``.
+    its phrase.  All other memory positions are masked with ``-inf``.
 
     Args:
-        seg_idx: ``(batch, seq_len)`` segment index per position.
-        max_segs: Maximum number of segments.
-        num_mem: Memory tokens per segment.
+        phr_idx: ``(batch, seq_len)`` phrase index per position.
+        max_phr: Maximum number of phrases.
+        num_mem: Memory tokens per phrase.
         nhead: Number of attention heads.
         device: Torch device.
 
     Returns:
-        ``(batch * nhead, seq_len, max_segs * num_mem)`` float mask.
+        ``(batch * nhead, seq_len, max_phr * num_mem)`` float mask.
     """
-    batch, seq_len = seg_idx.shape
-    total_mem = max_segs * num_mem
+    batch, seq_len = phr_idx.shape
+    total_mem = max_phr * num_mem
 
-    # Memory token → segment mapping: (total_mem,)
-    mem_seg = torch.arange(max_segs, device=device).repeat_interleave(num_mem)
+    # Memory token → phrase mapping: (total_mem,)
+    mem_phr = torch.arange(max_phr, device=device).repeat_interleave(num_mem)
 
-    # Allowed: seg_idx[b, t] == mem_seg[m]
-    # seg_idx: (B, S, 1), mem_seg: (1, 1, M) → (B, S, M)
-    allowed = seg_idx.unsqueeze(-1) == mem_seg.unsqueeze(0).unsqueeze(0)
+    # Allowed: phr_idx[b, t] == mem_phr[m]
+    # phr_idx: (B, S, 1), mem_phr: (1, 1, M) → (B, S, M)
+    allowed = phr_idx.unsqueeze(-1) == mem_phr.unsqueeze(0).unsqueeze(0)
 
     # Mask: 0 where allowed, -inf where blocked
     mask = torch.where(allowed, 0.0, float("-inf"))

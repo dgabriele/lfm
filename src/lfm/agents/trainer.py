@@ -220,12 +220,12 @@ class AgentTrainer:
             # Logging
             if step % cfg.log_every == 0:
                 extra = ""
-                if "num_segments" in out:
-                    n_segs = out['num_segments'].item()
-                    extra += f"  segs={n_segs:.1f}"
+                if "num_phrases" in out:
+                    n_phr = out['num_phrases'].item()
+                    extra += f"  phrases={n_phr:.1f}"
                     expr_len = out['msg_lengths'].item()
-                    seg_len = expr_len / max(n_segs, 1)
-                    extra += f"  expr_len={expr_len:.0f}  seg_len={seg_len:.0f}"
+                    phr_len = expr_len / max(n_phr, 1)
+                    extra += f"  expr_len={expr_len:.0f}  phr_len={phr_len:.0f}"
                 if "z_intra_sim" in out:
                     extra += f"  z_sim={out['z_intra_sim'].item():.3f}"
                 if "halt_cost" in out:

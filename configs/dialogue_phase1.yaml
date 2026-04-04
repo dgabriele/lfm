@@ -16,8 +16,8 @@ context_heads: 4
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_segments: 4
-variable_segments: true
+max_phrases: 4
+variable_phrases: true
 
 # Training
 batch_size: 20
