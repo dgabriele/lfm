@@ -129,6 +129,29 @@ class CorpusConfig(LFMBaseConfig):
     seed: int = 42
 
 
+class DialogueCorpusConfig(LFMBaseConfig):
+    """Configuration for generating multi-turn dialogue corpus.
+
+    Targets a trained DialogueGame.  Each document is a multi-turn
+    monologue with turn markers ([T0], [T1], ...), separated by blank
+    lines.  The LLM learns discourse structure from turn ordering.
+
+    Attributes:
+        output_mode: Corpus text format (same options as CorpusConfig).
+    """
+
+    dialogue_checkpoint: str = "data/dialogue_game/best.pt"
+    decoder_path: str = "data/vae_decoder.pt"
+    spm_path: str = "data/spm.model"
+    embedding_store_dir: str = "data/embeddings"
+    output_mode: str = "hyphenated_ipa"
+    num_passes: int = 5
+    batch_size: int = 16
+    output_path: str = "data/translator/dialogue_corpus.txt"
+    device: str = "cuda"
+    seed: int = 42
+
+
 class PretrainConfig(LFMBaseConfig):
     """Configuration for self-supervised LLM pretraining on IPA corpus."""
 

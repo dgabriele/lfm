@@ -66,60 +66,47 @@ def rerun_decoder_with_grad(
     )
 
 
-def rerun_decoder_multiphrase_with_grad(
+def _prepare_multiphrase_rerun(
     gen,
     z_sequence: Tensor,
     z_weights: Tensor,
     tokens: Tensor,
     mask: Tensor,
     phrase_boundaries: Tensor,
-) -> Tensor:
-    """Re-run decoder with gradients for multi-phrase z-switching.
+) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
+    """Shared preparation for multi-phrase decoder reruns.
 
-    Each position cross-attends only to the memory from the z that
-    generated it.  All phrase memories are concatenated and a
-    cross-attention mask restricts each position to its phrase's
-    memory tokens.
-
-    Args:
-        gen: The ``MultilingualVAEGenerator`` (frozen decoder).
-        z_sequence: ``(batch, max_phrases, latent_dim)`` with gradients.
-        z_weights: ``(batch, max_phrases)`` ACT weights per phrase.
-        tokens: ``(batch, seq_len)`` from phase 1.
-        mask: ``(batch, seq_len)`` boolean mask.
-        phrase_boundaries: ``(batch, max_phrases)`` start position of
-            each phrase (0 for unused phrases).
+    Trims sequences, projects z to memory, computes phrase assignment
+    and cross-attention masks.  Used by both the with-grad and no-grad
+    rerun functions.
 
     Returns:
-        Decoder hidden states ``(batch, seq_len, hidden_dim)`` with gradients.
+        tok_emb: ``(B, S, H)`` token embeddings.
+        all_memory: ``(B, K*num_mem, H)`` concatenated phrase memories.
+        causal_mask: ``(nhead, S, S)`` multi-scale causal mask.
+        rope: ``(S, head_dim)`` RoPE frequencies or None.
+        xattn_mask: ``(B*nhead, S, K*num_mem)`` cross-attention mask.
     """
     batch, max_phr, latent_dim = z_sequence.shape
-    # Trim to actual max length (avoids exceeding precomputed RoPE)
     actual_max = int(mask.float().sum(dim=1).max().item())
     tokens = tokens[:, :actual_max]
-    mask = mask[:, :actual_max]
     phrase_boundaries = phrase_boundaries.clamp(max=actual_max)
     seq_len = actual_max
     num_mem = gen._num_memory_tokens
     nhead = gen.config.decoder_num_heads
     device = tokens.device
 
-    # Weight each z by its ACT weight, then calibrate/quantize
-    weighted_z = z_weights.unsqueeze(-1) * z_sequence  # (B, K, latent)
+    weighted_z = z_weights.unsqueeze(-1) * z_sequence
     z_flat = weighted_z.reshape(batch * max_phr, latent_dim)
     z_dec = _calibrate_or_quantize(gen, z_flat)
 
-    # All memories concatenated: (B, K * num_mem, hidden)
     all_memory = gen.latent_to_decoder(z_dec).reshape(
         batch, max_phr * num_mem, -1,
     )
 
-    # Phrase assignment: which phrase generated each position
     phr_idx = _compute_phrase_assignment(
         phrase_boundaries, seq_len, max_phr, device,
     )
-
-    # Cross-attention mask: each position only attends to its phrase's memory
     xattn_mask = _build_xattn_mask(phr_idx, max_phr, num_mem, nhead, device)
 
     tok_emb = gen.token_embedding(tokens)
@@ -143,10 +130,40 @@ def rerun_decoder_multiphrase_with_grad(
         else:
             rope = gen._rope_freqs[:seq_len]
 
-    # Use gradient checkpointing to reduce activation memory ~3x.
-    # Phase 2 stores activations for backward through all decoder layers;
-    # checkpointing recomputes them during backward instead, trading
-    # ~30% more compute for much lower peak VRAM.
+    return tok_emb, all_memory, causal_mask, rope, xattn_mask
+
+
+def rerun_decoder_multiphrase_with_grad(
+    gen,
+    z_sequence: Tensor,
+    z_weights: Tensor,
+    tokens: Tensor,
+    mask: Tensor,
+    phrase_boundaries: Tensor,
+) -> Tensor:
+    """Re-run decoder with gradients for multi-phrase z-switching.
+
+    Each position cross-attends only to the memory from the z that
+    generated it.  Uses gradient checkpointing to reduce activation
+    memory ~3x.
+
+    Args:
+        gen: The ``MultilingualVAEGenerator`` (frozen decoder).
+        z_sequence: ``(batch, max_phrases, latent_dim)`` with gradients.
+        z_weights: ``(batch, max_phrases)`` ACT weights per phrase.
+        tokens: ``(batch, seq_len)`` from phase 1.
+        mask: ``(batch, seq_len)`` boolean mask.
+        phrase_boundaries: ``(batch, max_phrases)`` start positions.
+
+    Returns:
+        Decoder hidden states ``(batch, seq_len, hidden_dim)`` with gradients.
+    """
+    tok_emb, all_memory, causal_mask, rope, xattn_mask = (
+        _prepare_multiphrase_rerun(
+            gen, z_sequence, z_weights, tokens, mask, phrase_boundaries,
+        )
+    )
+
     from torch.utils.checkpoint import checkpoint
 
     def _decoder_forward():
@@ -156,6 +173,44 @@ def rerun_decoder_multiphrase_with_grad(
         )
 
     return checkpoint(_decoder_forward, use_reentrant=False)
+
+
+@torch.no_grad()
+def rerun_decoder_multiphrase_no_grad(
+    gen,
+    z_sequence: Tensor,
+    z_weights: Tensor,
+    tokens: Tensor,
+    mask: Tensor,
+    phrase_boundaries: Tensor,
+) -> Tensor:
+    """Re-run decoder WITHOUT gradients for inference-time hidden states.
+
+    Same as :func:`rerun_decoder_multiphrase_with_grad` but without
+    gradient checkpointing or autograd graph.  Used by corpus generators
+    that need decoder hidden states for context summarization.
+
+    Args:
+        gen: The ``MultilingualVAEGenerator`` (frozen decoder).
+        z_sequence: ``(batch, max_phrases, latent_dim)``.
+        z_weights: ``(batch, max_phrases)`` ACT weights per phrase.
+        tokens: ``(batch, seq_len)`` from phase 1.
+        mask: ``(batch, seq_len)`` boolean mask.
+        phrase_boundaries: ``(batch, max_phrases)`` start positions.
+
+    Returns:
+        Decoder hidden states ``(batch, seq_len, hidden_dim)``.
+    """
+    tok_emb, all_memory, causal_mask, rope, xattn_mask = (
+        _prepare_multiphrase_rerun(
+            gen, z_sequence, z_weights, tokens, mask, phrase_boundaries,
+        )
+    )
+
+    return gen.decoder(
+        tok_emb, all_memory,
+        tgt_mask=causal_mask, rope_freqs=rope, xattn_mask=xattn_mask,
+    )
 
 
 def _compute_phrase_assignment(

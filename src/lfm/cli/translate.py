@@ -360,7 +360,7 @@ class PretrainCommand(CLICommand):
 
 
 class GenerateCorpusCommand(CLICommand):
-    """Generate romanized IPA corpus for self-supervised LLM pretraining."""
+    """Generate single-expression IPA corpus for self-supervised LLM pretraining."""
 
     @property
     def name(self) -> str:
@@ -368,7 +368,7 @@ class GenerateCorpusCommand(CLICommand):
 
     @property
     def help(self) -> str:
-        return "Generate romanized IPA corpus for self-supervised pretraining"
+        return "Generate single-expression IPA corpus for self-supervised pretraining"
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--expression-checkpoint", default="data/expression_game/best.pt")
@@ -404,6 +404,54 @@ class GenerateCorpusCommand(CLICommand):
         return 0
 
 
+class GenerateDialogueCorpusCommand(CLICommand):
+    """Generate multi-turn dialogue IPA corpus for self-supervised LLM pretraining."""
+
+    @property
+    def name(self) -> str:
+        return "generate-dialogue-corpus"
+
+    @property
+    def help(self) -> str:
+        return "Generate multi-turn dialogue IPA corpus for self-supervised pretraining"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--dialogue-checkpoint", default="data/dialogue_game/best.pt")
+        parser.add_argument("--decoder-path", default="data/vae_decoder.pt")
+        parser.add_argument("--spm-path", default="data/spm.model")
+        parser.add_argument("--embedding-store", default="data/embeddings")
+        parser.add_argument("--passes", type=int, default=5)
+        parser.add_argument("--batch-size", type=int, default=16)
+        parser.add_argument("--output", default="data/translator/dialogue_corpus.txt")
+        parser.add_argument("--device", default="cuda")
+        parser.add_argument("--seed", type=int, default=42)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        from lfm.translator.config import DialogueCorpusConfig
+        from lfm.translator.dialogue_corpus import DialogueCorpusGenerator
+
+        config = DialogueCorpusConfig(
+            dialogue_checkpoint=args.dialogue_checkpoint,
+            decoder_path=args.decoder_path,
+            spm_path=args.spm_path,
+            embedding_store_dir=args.embedding_store,
+            num_passes=args.passes,
+            batch_size=args.batch_size,
+            output_path=args.output,
+            device=args.device,
+            seed=args.seed,
+        )
+
+        gen = DialogueCorpusGenerator(config)
+        stats = gen.generate()
+        print(
+            f"Generated {stats['num_documents']} documents, "
+            f"{stats['num_turns']} turns, {stats['total_tokens']} tokens, "
+            f"{stats['unique_documents']} unique → {args.output}"
+        )
+        return 0
+
+
 def register_translate_group(
     parent_subparsers: argparse._SubParsersAction,
 ) -> None:
@@ -422,6 +470,7 @@ def register_translate_group(
     commands = [
         GeneratePairsCommand(),
         GenerateCorpusCommand(),
+        GenerateDialogueCorpusCommand(),
         PretrainCommand(),
         TrainCommand(),
         EvalCommand(),

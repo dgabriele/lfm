@@ -216,6 +216,10 @@ class AgentTrainer:
                 acc_sum += out["accuracy"].item()
             nn.utils.clip_grad_norm_(self._all_params, cfg.max_grad_norm)
             self.optimizer.step()
+            # Release cached allocator blocks to prevent reserved VRAM
+            # from growing unboundedly over long training runs.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             # Use accumulated accuracy for logging
             out["accuracy"] = torch.tensor(acc_sum / accum)
             step_acc = acc_sum / accum
