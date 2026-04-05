@@ -59,6 +59,7 @@ class AgentTrainer:
         self._output_dir = Path(config.output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._best_acc = 0.0
+        self._peak_acc = 0.0
 
     def _sample_batch(
         self, step: int,
@@ -112,25 +113,26 @@ class AgentTrainer:
     def _save_checkpoint(
         self, step: int, accuracy: float, hard_ratio: float = 1.0,
     ) -> None:
-        """Save latest checkpoint, and best if accuracy improved.
+        """Save latest checkpoint, and best if peak accuracy improved.
 
-        Best checkpoint is only updated once the curriculum has reached
-        full difficulty (hard_ratio >= 1.0), so that early high-accuracy
-        scores at low difficulty don't lock in a weak checkpoint.
+        Tracks peak accuracy across ALL steps (not just checkpoint steps)
+        via ``_peak_acc``.  Best checkpoint is only updated once the
+        curriculum has reached full difficulty (hard_ratio >= 1.0).
         """
         ckpt = self.game.checkpoint_state()
         ckpt["step"] = step
         ckpt["accuracy"] = accuracy
+        ckpt["peak_accuracy"] = self._peak_acc
         ckpt["hard_ratio"] = hard_ratio
 
         torch.save(ckpt, str(self._output_dir / "latest.pt"))
 
-        if hard_ratio >= 1.0 and accuracy > self._best_acc:
-            self._best_acc = accuracy
+        if hard_ratio >= 1.0 and self._peak_acc > self._best_acc:
+            self._best_acc = self._peak_acc
             torch.save(ckpt, str(self._output_dir / "best.pt"))
             logger.info(
-                "Checkpoint step %d — new best acc=%.1f%%",
-                step, accuracy * 100,
+                "Checkpoint step %d — new best acc=%.1f%% (peak=%.1f%%)",
+                step, accuracy * 100, self._peak_acc * 100,
             )
         else:
             logger.info(
@@ -216,6 +218,9 @@ class AgentTrainer:
             self.optimizer.step()
             # Use accumulated accuracy for logging
             out["accuracy"] = torch.tensor(acc_sum / accum)
+            step_acc = acc_sum / accum
+            if hard_ratio >= 1.0 and step_acc > self._peak_acc:
+                self._peak_acc = step_acc
 
             # Logging
             if step % cfg.log_every == 0:
@@ -243,6 +248,14 @@ class AgentTrainer:
                     extra += f"  zcov={out['z_coverage'].item():.2f}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
+                if torch.cuda.is_available():
+                    vram_mb = torch.cuda.max_memory_allocated() // (1024 * 1024)
+                    extra += f"  vram={vram_mb}MB"
+                    torch.cuda.reset_peak_memory_stats()
+                # Flush VRAM trace to disk if the game has a monitor
+                if hasattr(game, 'vram_monitor'):
+                    from pathlib import Path as _P
+                    game.vram_monitor.save(str(_P(cfg.output_dir) / "vram_trace.npz"))
                 logger.info(
                     "step=%d  loss=%.3f  acc=%.1f%%  "
                     "%s  hard=%.0f%%",
@@ -267,7 +280,6 @@ class AgentTrainer:
 
                         if "_dialogue_tokens" in out:
                             # Dialogue game: print one full monologue
-                            roles = ["OBS", "ANA"]
                             logger.info("  --- monologue (sample 0) ---")
                             for turn_i, (toks, mask) in enumerate(
                                 zip(out["_dialogue_tokens"], out["_dialogue_masks"]),
@@ -275,8 +287,7 @@ class AgentTrainer:
                                 ids = [t.item() for t, m in zip(toks[0], mask[0])
                                        if m and t.item() != eos_id and t.item() < vocab_size]
                                 ipa = syllable_hyphenate(sp.decode(ids))
-                                role = roles[turn_i % 2]
-                                logger.info("  [%s] %s  (%d tok)", role, ipa[:120], len(ids))
+                                logger.info("  [T%d] %s  (%d tok)", turn_i, ipa[:120], len(ids))
                         else:
                             toks = out["_tokens"]
                             mask = out["_gen_mask"]

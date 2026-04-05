@@ -1,14 +1,22 @@
-"""Dialogue expression game — multi-turn self-play through the linguistic bottleneck.
+"""Dialogue expression game V2 — multi-turn self-play with bounded VRAM.
 
-A single agent with two roles (Observer and Analyst) generates multi-turn
-conversations about input data.  Each turn is conditioned on the original
-data embedding AND all previous turns via a context transformer.  The
-receiver scores the full conversation for discrimination.
+A single agent with two roles generates multi-turn conversations about
+input data.  Each turn is conditioned on the original data embedding AND
+fixed-size summaries of all previous turns via a context transformer.
 
-The resulting corpus has temporal coherence, referential consistency,
-and progressive elaboration — discourse structure that enables an LLM
-to learn the emergent language much more effectively than isolated
-single-expression corpora.
+Scoring uses progressive topology matching: at each turn, the accumulated
+dialogue message must match the embedding cosine similarity structure
+(KL divergence).  Later turns that don't improve the topology over earlier
+turns get strong gradient signal — natural progressive elaboration.
+
+VRAM management:
+- Phase 2 (decoder rerun with gradients) is the only operation whose
+  memory scales with sequence length.  It is micro-batched with an
+  adaptive chunk size derived from a configurable VRAM budget.
+- All other operations (z-gen, Phase 1 decode, scoring, aux losses)
+  are fixed-size and run at full batch.
+- The frozen decoder is offloaded to CPU during scoring.
+- Context uses fixed-size turn summaries, not variable-length concatenation.
 
 Usage::
 
@@ -17,18 +25,26 @@ Usage::
 
 from __future__ import annotations
 
+import logging
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 from lfm.agents.components import MessageEncoder, Receiver, ZDiversityLoss
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
 from lfm.agents.decode import ExpressionDecoder, rerun_decoder_multiphrase_with_grad
 from lfm.agents.diffusion import DiffusionZGenerator, length_distribution_loss
+from lfm.agents.vram_monitor import VRAMMonitor
 from lfm.config.base import LFMBaseConfig
 from lfm.faculty.config import FacultyConfig
 from lfm.faculty.model import LanguageFaculty
 from lfm.generator.config import GeneratorConfig
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -63,11 +79,17 @@ class DialogueGameConfig(LFMBaseConfig):
     length_weight: float = 0.5
     z_diversity_weight: float = 0.0
 
-    # Message encoder (reads full dialogue)
+    # Phase 2 VRAM management
+    phase2_vram_budget_mb: float = 1500.0
+    phase2_min_chunk: int = 4
+
+    # Message encoder
     encoder: MessageEncoderConfig = MessageEncoderConfig()
 
     # Game
     num_distractors: int = 15
+    min_targets: int = 1
+    max_targets: int = 1
     embedding_store_dir: str = "data/embeddings"
 
     # Training
@@ -110,11 +132,14 @@ class DialogueGameConfig(LFMBaseConfig):
 
 
 class ContextTransformer(nn.Module):
-    """Merge data embedding, role, and dialogue history into conditioning.
+    """Merge target embeddings, turn position, and dialogue history.
 
-    At each turn, produces a conditioning vector for the diffusion z-gen
-    by cross-attending from (data + role) to the accumulated context
-    of previous turns' hidden states.
+    Produces a conditioning vector for the diffusion z-gen by
+    cross-attending from (turn embedding) to both the target
+    embeddings and fixed-size turn summaries from previous turns.
+
+    With multiple targets, the model can attend to each target
+    individually — learning both what they share and how they differ.
 
     Args:
         embedding_dim: Input/output embedding dimension.
@@ -139,43 +164,89 @@ class ContextTransformer(nn.Module):
 
     def forward(
         self,
-        data_embedding: Tensor,
-        role_embedding: Tensor,
+        targets: Tensor,
+        turn_embedding: Tensor,
         context: Tensor | None,
+        target_mask: Tensor | None = None,
     ) -> Tensor:
         """Produce conditioning for this turn's z-gen.
 
         Args:
-            data_embedding: ``(B, embedding_dim)`` original input.
-            role_embedding: ``(hidden_dim,)`` learned role vector.
-            context: ``(B, T_prev, hidden_dim)`` accumulated hidden
-                states from previous turns, or None for the first turn.
+            targets: ``(B, num_targets, embedding_dim)`` target embeddings
+                (padded if variable count per sample).
+            turn_embedding: ``(hidden_dim,)`` learned turn-position vector.
+            context: ``(B, num_prev_turns, hidden_dim)`` fixed-size
+                turn summaries, or None for the first turn.
+            target_mask: ``(B, num_targets)`` boolean, True = valid target.
+                None means all targets are valid.
 
         Returns:
             ``(B, embedding_dim)`` conditioning vector.
         """
-        query = self.data_proj(data_embedding).unsqueeze(1) + role_embedding
+        # Project targets to hidden dim: (B, num_targets, hidden_dim)
+        projected_targets = self.data_proj(targets)
 
+        # Query = turn embedding broadcast over batch
+        query = turn_embedding.unsqueeze(0).unsqueeze(0).expand(
+            targets.size(0), 1, -1,
+        )
+
+        # Build KV: targets + context summaries (if any)
         if context is not None:
-            context_normed = self.context_norm(context)
-            attended, _ = self.context_attn(query, context_normed, context_normed)
-            query = query + attended
+            kv = torch.cat([projected_targets, context], dim=1)
+        else:
+            kv = projected_targets
+
+        # Build attention mask if targets are padded
+        key_padding_mask = None
+        if target_mask is not None:
+            n_targets = targets.size(1)
+            if context is not None:
+                # Targets may be masked; context is always valid
+                ctx_valid = torch.ones(
+                    targets.size(0), context.size(1),
+                    dtype=torch.bool, device=targets.device,
+                )
+                key_padding_mask = ~torch.cat([target_mask, ctx_valid], dim=1)
+            else:
+                key_padding_mask = ~target_mask
+
+        kv_normed = self.context_norm(kv)
+        attended, _ = self.context_attn(
+            query, kv_normed, kv_normed,
+            key_padding_mask=key_padding_mask,
+        )
+        query = query + attended
 
         return self.out_proj(self.out_norm(query.squeeze(1)))
 
 
 # ---------------------------------------------------------------------------
-# Dialogue game
+# Turn output dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TurnOutput:
+    """Intermediate output from a single dialogue turn."""
+
+    hidden: Tensor       # (B, S, H) on GPU, with gradients
+    mask: Tensor         # (B, S) on GPU
+    z_seq: Tensor        # (B, K, latent_dim) on GPU
+    z_weights: Tensor    # (B, K) on GPU
+    num_phrases: Tensor  # (B,) on GPU
+    summary: Tensor      # (B, context_hidden_dim) on GPU, detached
+    tokens_cpu: Tensor   # (B, S_raw) on CPU, diagnostics only
+    gen_mask_cpu: Tensor # (B, S_raw) on CPU, diagnostics only
+
+
+# ---------------------------------------------------------------------------
+# Dialogue game V2
 # ---------------------------------------------------------------------------
 
 
 class DialogueGame(nn.Module):
-    """Multi-turn dialogue game through the linguistic bottleneck.
-
-    A single agent alternates between Observer and Analyst roles,
-    generating a conversation about each input embedding.  Each turn
-    is conditioned on all previous turns via a context transformer.
-    The receiver scores the full multi-turn dialogue for discrimination.
+    """Multi-turn dialogue game with bounded VRAM.
 
     Args:
         config: Dialogue game configuration.
@@ -195,7 +266,7 @@ class DialogueGame(nn.Module):
         with torch.no_grad():
             faculty(torch.randn(1, config.embedding_dim, device=device))
 
-        hidden_dim = gen.config.decoder_hidden_dim
+        self._hidden_dim = gen.config.decoder_hidden_dim
 
         # Diffusion z-generator (shared across all turns)
         self.z_gen = DiffusionZGenerator(
@@ -219,25 +290,32 @@ class DialogueGame(nn.Module):
             config.context_heads,
         )
 
-        # Learned role embeddings (Observer and Analyst)
-        self.role_embeddings = nn.Parameter(
-            torch.randn(2, config.context_hidden_dim) * 0.02,
+        # Learned turn-position embeddings (one per turn).
+        # Initialized as a regular simplex (maximally equidistant) so
+        # each turn starts maximally distinguishable from all others.
+        self.turn_embeddings = nn.Parameter(
+            self._simplex_init(config.num_turns, config.context_hidden_dim),
         )
 
         # Phrase decoder (shared autoregressive decode logic)
         self.phrase_decoder = ExpressionDecoder(gen)
 
-        # Context projection (decoder hidden → context dim)
-        self.hidden_to_context = nn.Linear(hidden_dim, config.context_hidden_dim)
+        # Context projection (decoder hidden → fixed-size turn summary)
+        self.hidden_to_context = nn.Linear(
+            self._hidden_dim, config.context_hidden_dim,
+        )
 
-        # Message encoder (reads full multi-turn dialogue)
+        # Message encoder (encodes one turn at a time)
         self.dialogue_encoder = MessageEncoder(
-            hidden_dim, config.embedding_dim,
+            self._hidden_dim, config.embedding_dim,
             num_heads=config.encoder.num_heads,
             num_layers=config.encoder.num_layers,
         )
 
         self.receiver = Receiver(config.embedding_dim)
+
+        # Learned turn aggregation weights for progressive scoring
+        self.turn_agg_logits = nn.Parameter(torch.zeros(config.num_turns))
 
         # z diversity regularization
         if config.z_diversity_weight > 0 and gen._z_stats_initialized:
@@ -245,33 +323,85 @@ class DialogueGame(nn.Module):
         else:
             self.z_diversity = None
 
+        # VRAM monitor (daemon process, saves every ~1 min)
+        trace_path = str(Path(config.output_dir) / "vram_trace.npz")
+        self.vram_monitor = VRAMMonitor(
+            interval=2.0,
+            save_path=trace_path,
+        )
+        self.vram_monitor.start()
+
+        # Ensure clean GPU release on exit
+        import atexit
+        atexit.register(self.vram_monitor.stop)
+
+    @staticmethod
+    def _simplex_init(n: int, dim: int, scale: float = 0.02) -> Tensor:
+        """Initialize n vectors as a regular simplex in R^dim.
+
+        All pairwise cosine similarities are equal (-1/(n-1) for a
+        centered simplex), giving maximum distinguishability.
+        """
+        # Start with identity-like rows, then center and normalize
+        vecs = torch.randn(n, dim)
+        # Gram-Schmidt to get orthogonal basis (n << dim, so this works)
+        for i in range(n):
+            for j in range(i):
+                vecs[i] -= (vecs[i] @ vecs[j]) / (vecs[j] @ vecs[j]) * vecs[j]
+            vecs[i] = F.normalize(vecs[i], dim=0)
+        # Center so all pairwise distances are equal
+        vecs = vecs - vecs.mean(dim=0, keepdim=True)
+        vecs = F.normalize(vecs, dim=1) * scale
+        return vecs
+
     @property
     def gen(self):
         """Shortcut to the underlying generator."""
         return self.faculty.generator
 
+    # -- Checkpoint interface --
+
     def checkpoint_state(self) -> dict:
         """Return state dict for checkpointing."""
+        # Save VRAM trace alongside checkpoint
+        from pathlib import Path
+        trace_path = Path(self.config.output_dir) / "vram_trace.npz"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        self.vram_monitor.save(str(trace_path))
+
         return {
             "z_gen": self.z_gen.state_dict(),
             "context_transformer": self.context_transformer.state_dict(),
-            "role_embeddings": self.role_embeddings.data,
+            "turn_embeddings": self.turn_embeddings.data,
             "hidden_to_context": self.hidden_to_context.state_dict(),
             "dialogue_encoder": self.dialogue_encoder.state_dict(),
             "receiver": self.receiver.state_dict(),
+            "turn_agg_logits": self.turn_agg_logits.data,
             "num_turns": self.config.num_turns,
             "max_phrases": self.config.max_phrases,
             "z_generator": "diffusion",
+            "version": 2,
         }
 
     def load_checkpoint_state(self, ckpt: dict) -> None:
-        """Restore from a checkpoint dict."""
+        """Restore from a checkpoint dict (V1 and V2 compatible)."""
         self.z_gen.load_state_dict(ckpt["z_gen"])
         self.context_transformer.load_state_dict(ckpt["context_transformer"])
-        self.role_embeddings.data.copy_(ckpt["role_embeddings"])
+        key = "turn_embeddings" if "turn_embeddings" in ckpt else "role_embeddings"
+        saved = ckpt[key]
+        if saved.size(0) != self.turn_embeddings.size(0):
+            # V1 had 2 role embeddings, V2 has num_turns — reinitialize
+            logger.info("Turn embedding size mismatch — reinitializing")
+        else:
+            self.turn_embeddings.data.copy_(saved)
         self.hidden_to_context.load_state_dict(ckpt["hidden_to_context"])
         self.dialogue_encoder.load_state_dict(ckpt["dialogue_encoder"])
         self.receiver.load_state_dict(ckpt["receiver"])
+        if "turn_agg_logits" in ckpt:
+            self.turn_agg_logits.data.copy_(ckpt["turn_agg_logits"])
+        version = ckpt.get("version", 1)
+        if version < 2:
+            logger.info("Loaded V1 checkpoint — using V2 fixed-size context")
 
     def trainable_param_groups(self) -> list[dict]:
         """Return optimizer param groups with per-group learning rates."""
@@ -279,201 +409,397 @@ class DialogueGame(nn.Module):
         return [
             {"params": list(self.z_gen.parameters()), "lr": cfg.gru_lr},
             {"params": list(self.context_transformer.parameters()), "lr": cfg.receiver_lr},
-            {"params": [self.role_embeddings], "lr": cfg.receiver_lr},
+            {"params": [self.turn_embeddings], "lr": cfg.receiver_lr},
             {"params": list(self.hidden_to_context.parameters()), "lr": cfg.receiver_lr},
             {"params": list(self.dialogue_encoder.parameters()), "lr": cfg.receiver_lr},
             {"params": list(self.receiver.parameters()), "lr": cfg.receiver_lr},
+            {"params": [self.turn_agg_logits], "lr": cfg.receiver_lr},
         ]
 
-    # -- Forward pass --
+    # -- Stage methods --
 
-    def forward(
+    def _prepare_candidates(
         self, anchor: Tensor, distractors: Tensor,
-        *, step: int = 0, candidate_indices: Tensor | None = None,
-    ) -> dict[str, Tensor]:
-        """Multi-turn dialogue forward pass.
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None]:
+        """Build permuted candidates and precompute teacher topology.
 
-        For each input, generates ``num_turns`` expressions via alternating
-        Observer/Analyst roles.  Each turn is conditioned on the data
-        embedding and all previous turns.  The full dialogue is scored
-        by the receiver for discrimination.
+        When ``max_targets > 1``, a random number of distractors are
+        promoted to additional targets.  The z-gen receives the full
+        set of target embeddings (padded) so it can attend to each
+        individually — learning both commonality and differences.
+
+        Returns:
+            candidates: ``(B, num_candidates, dim)`` permuted.
+            target_idx: ``(B,)`` position of the primary target (for accuracy).
+            teacher_probs: ``(B, num_candidates)`` soft topology targets.
+            targets: ``(B, max_targets, dim)`` target embeddings (padded).
+            target_mask: ``(B, max_targets)`` boolean or None if single target.
         """
+        cfg = self.config
         batch = anchor.size(0)
         device = anchor.device
-        num_candidates = distractors.size(1) + 1
+        dim = anchor.size(1)
+        num_distractors = distractors.size(1)
+        num_candidates = num_distractors + 1
 
-        cfg = self.config
-        num_turns = cfg.num_turns
+        # Build candidate pool: anchor at position 0, then distractors
+        all_cands = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
 
-        # Prepare candidates and permutation once (shared across turns)
-        candidates = torch.cat([anchor.unsqueeze(1), distractors], dim=1)
+        if cfg.min_targets == cfg.max_targets == 1:
+            # Single-target: anchor is the only target
+            perm = torch.stack([
+                torch.randperm(num_candidates, device=device)
+                for _ in range(batch)
+            ])
+            perm_expanded = perm.unsqueeze(-1).expand_as(all_cands)
+            candidates = torch.gather(all_cands, 1, perm_expanded)
+            target_idx = (perm == 0).long().argmax(dim=1)
+
+            with torch.no_grad():
+                teacher_sims = F.cosine_similarity(
+                    anchor.unsqueeze(1), candidates, dim=-1,
+                )
+                teacher_probs = F.softmax(teacher_sims / 0.1, dim=-1)
+
+            # Single target as (B, 1, dim) — no mask needed
+            return candidates, target_idx, teacher_probs, anchor.unsqueeze(1), None
+
+        # Multi-target: promote random distractors to additional targets
+        num_targets_per_sample = torch.randint(
+            cfg.min_targets, cfg.max_targets + 1, (batch,), device=device,
+        )
+        max_t = cfg.max_targets
+
+        # Collect target embeddings (padded to max_targets)
+        targets = torch.zeros(batch, max_t, dim, device=device)
+        target_valid = torch.zeros(batch, max_t, dtype=torch.bool, device=device)
+        is_target = torch.zeros(batch, num_candidates, dtype=torch.bool, device=device)
+
+        targets[:, 0] = anchor
+        target_valid[:, 0] = True
+        is_target[:, 0] = True
+
+        for b in range(batch):
+            n_extra = num_targets_per_sample[b].item() - 1
+            if n_extra > 0:
+                extra_idx = torch.randperm(num_distractors, device=device)[:n_extra] + 1
+                for k, idx in enumerate(extra_idx):
+                    targets[b, k + 1] = all_cands[b, idx]
+                    target_valid[b, k + 1] = True
+                    is_target[b, idx] = True
+
+        # Permute candidates
         perm = torch.stack([
             torch.randperm(num_candidates, device=device)
             for _ in range(batch)
         ])
-        perm_expanded = perm.unsqueeze(-1).expand_as(candidates)
-        candidates = torch.gather(candidates, 1, perm_expanded)
+        perm_expanded = perm.unsqueeze(-1).expand_as(all_cands)
+        candidates = torch.gather(all_cands, 1, perm_expanded)
         target_idx = (perm == 0).long().argmax(dim=1)
 
-        # Precompute teacher topology (same for all turns)
+        # Teacher topology: mean of targets defines similarity center
         with torch.no_grad():
+            tmask = target_valid.unsqueeze(-1).float()
+            target_center = (targets * tmask).sum(dim=1) / tmask.sum(dim=1).clamp(min=1)
             teacher_sims = F.cosine_similarity(
-                anchor.unsqueeze(1), candidates, dim=-1,
+                target_center.unsqueeze(1), candidates, dim=-1,
             )
             teacher_probs = F.softmax(teacher_sims / 0.1, dim=-1)
 
-        # ── Phase A: Generate turns with aggressive cleanup ──
-        # After each turn's Phase 1+2, we keep only the small output
-        # tensors (hidden, mask, z_seq, z_weights) and explicitly free
-        # the large generation intermediates (KV cache, Phase 1 tokens).
-        # This isolates VRAM spikes from variable-length decoder output.
-        context = None
-        all_hidden: list[Tensor] = []
-        all_masks: list[Tensor] = []
-        all_tokens_list: list[Tensor] = []
-        all_gen_masks: list[Tensor] = []
-        all_z_weights: list[Tensor] = []
-        all_z_seqs: list[Tensor] = []
-        total_num_phrases = torch.zeros(batch, device=device)
+        return candidates, target_idx, teacher_probs, targets, target_valid
 
-        for turn in range(num_turns):
-            role = self.role_embeddings[turn % 2]
-            conditioning = self.context_transformer(anchor, role, context)
+    def _summarize_turn(self, hidden: Tensor, mask: Tensor) -> Tensor:
+        """Produce fixed-size turn summary from variable-length hidden states.
 
-            z_seq, z_weights, num_phrases = self.z_gen(conditioning)
-            all_z_seqs.append(z_seq)
-            all_z_weights.append(z_weights)
-            total_num_phrases += num_phrases
+        Returns:
+            ``(B, context_hidden_dim)`` summary vector (detached).
+        """
+        projected = self.hidden_to_context(hidden.detach())
+        mask_f = mask.unsqueeze(-1).float()
+        return (projected * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
 
-            # Phase 1: no_grad decode through frozen decoder
-            tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(z_seq, z_weights)
+    def _generate_turn(
+        self,
+        targets: Tensor,
+        turn_emb: Tensor,
+        context: Tensor | None,
+        target_mask: Tensor | None = None,
+    ) -> TurnOutput:
+        """Generate one dialogue turn in micro-batches.
 
-            # Phase 2: re-run with gradients (checkpointed).
-            # Micro-batch to bound peak VRAM — this is the only
-            # operation whose memory scales with sequence length.
-            phase2_chunk = max(1, batch // 4)
-            hidden_chunks = []
-            max_seq = 0
-            for c_start in range(0, batch, phase2_chunk):
-                c_end = min(c_start + phase2_chunk, batch)
-                chunk_h = rerun_decoder_multiphrase_with_grad(
-                    self.gen,
-                    z_seq[c_start:c_end],
-                    z_weights[c_start:c_end],
-                    tokens[c_start:c_end],
-                    gen_mask[c_start:c_end],
-                    seg_bounds[c_start:c_end],
-                )
-                hidden_chunks.append(chunk_h)
-                max_seq = max(max_seq, chunk_h.size(1))
-            # Pad chunks to same seq length before cat
-            if any(h.size(1) < max_seq for h in hidden_chunks):
-                padded = []
-                for h in hidden_chunks:
-                    if h.size(1) < max_seq:
-                        pad = torch.zeros(
-                            h.size(0), max_seq - h.size(1), h.size(2),
-                            device=h.device, dtype=h.dtype,
-                        )
-                        padded.append(torch.cat([h, pad], dim=1))
-                    else:
-                        padded.append(h)
-                hidden_chunks = padded
-            hidden = torch.cat(hidden_chunks, dim=0)
-            trimmed_mask = gen_mask[:, :hidden.size(1)]
-
-            all_hidden.append(hidden)
-            all_masks.append(trimmed_mask)
-            # Keep tokens/masks on CPU — only needed for diagnostics
-            all_tokens_list.append(tokens.cpu())
-            all_gen_masks.append(gen_mask.cpu())
-
-            # Context for next turn (detached — no gradient through context)
-            turn_context = self.hidden_to_context(hidden.detach())
-            if context is None:
-                context = turn_context
-            else:
-                context = torch.cat([context, turn_context], dim=1)
-
-            # Free generation intermediates (Phase 1 tokens, bounds)
-            del tokens, gen_mask, seg_bounds
-            torch.cuda.empty_cache()
-
-        # ── Phase B: Offload decoder, score on GPU ──
-        gen = self.gen
-        gen.cpu()
-        del context
-        torch.cuda.empty_cache()
-
-        # Progressive topology matching with bounded VRAM.
-        # Encode each turn independently (fixed-size per turn), then
-        # accumulate message vectors via running mean.  At each turn,
-        # the accumulated message represents the dialogue so far.
-        # This gives progressive information gain without concatenating
-        # all turns into one growing sequence (which causes OOM from
-        # quadratic attention in the encoder).
-        progressive_loss = torch.tensor(0.0, device=device)
-        accumulated_msg = torch.zeros(
-            batch, cfg.embedding_dim, device=device,
+        The entire generation pipeline (z-gen → Phase 1 → Phase 2) is
+        micro-batched to bound peak VRAM.  Only the context transformer
+        runs at full batch (it's cheap — single-token cross-attention).
+        """
+        batch = targets.size(0)
+        conditioning = self.context_transformer(
+            targets, turn_emb, context, target_mask,
         )
-        for turn in range(num_turns):
-            turn_msg = self.dialogue_encoder(
-                all_hidden[turn], all_masks[turn],
-            )
-            # Running mean: accumulated message represents dialogue-so-far
-            accumulated_msg = (accumulated_msg * turn + turn_msg) / (turn + 1)
+        chunk = self._compute_generation_chunk(batch)
 
-            turn_logits = self.receiver(accumulated_msg, candidates)
-            student_log_probs = F.log_softmax(turn_logits, dim=-1)
+        all_hidden, all_mask, all_z_seq, all_z_weights = [], [], [], []
+        all_num_phrases, all_tokens_cpu, all_gen_mask_cpu = [], [], []
+        max_seq = 0
+
+        for start in range(0, batch, chunk):
+            end = min(start + chunk, batch)
+            cond_chunk = conditioning[start:end]
+
+            z_seq, z_weights, num_phrases = self.z_gen(cond_chunk)
+            tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(z_seq, z_weights)
+            hidden = rerun_decoder_multiphrase_with_grad(
+                self.gen, z_seq, z_weights, tokens, gen_mask, seg_bounds,
+            )
+
+            max_seq = max(max_seq, hidden.size(1))
+            all_hidden.append(hidden)
+            all_mask.append(gen_mask[:, :hidden.size(1)])
+            all_z_seq.append(z_seq)
+            all_z_weights.append(z_weights)
+            all_num_phrases.append(num_phrases)
+            all_tokens_cpu.append(tokens.cpu())
+            all_gen_mask_cpu.append(gen_mask.cpu())
+
+            del tokens, gen_mask, seg_bounds
+            # Only flush cache if VRAM is tight (>60% used)
+            if torch.cuda.is_available():
+                used = torch.cuda.memory_allocated()
+                total = torch.cuda.get_device_properties(0).total_memory
+                if used / total > 0.60:
+                    torch.cuda.empty_cache()
+
+        # Pad hidden/mask to common seq length and concatenate
+        for i, h in enumerate(all_hidden):
+            if h.size(1) < max_seq:
+                pad = h.new_zeros(h.size(0), max_seq - h.size(1), h.size(2))
+                all_hidden[i] = torch.cat([h, pad], dim=1)
+                old_m = all_mask[i]
+                mpad = old_m.new_zeros(old_m.size(0), max_seq - old_m.size(1))
+                all_mask[i] = torch.cat([old_m, mpad], dim=1)
+
+        hidden = torch.cat(all_hidden, dim=0)
+        trimmed_mask = torch.cat(all_mask, dim=0)
+        z_seq = torch.cat(all_z_seq, dim=0)
+        z_weights = torch.cat(all_z_weights, dim=0)
+        num_phrases = torch.cat(all_num_phrases, dim=0)
+
+        # Pad tokens/masks on CPU to common size
+        max_tok = max(t.size(1) for t in all_tokens_cpu)
+        for i, t in enumerate(all_tokens_cpu):
+            if t.size(1) < max_tok:
+                all_tokens_cpu[i] = F.pad(t, (0, max_tok - t.size(1)))
+                all_gen_mask_cpu[i] = F.pad(all_gen_mask_cpu[i], (0, max_tok - all_gen_mask_cpu[i].size(1)))
+        tokens_cpu = torch.cat(all_tokens_cpu, dim=0)
+        gen_mask_cpu = torch.cat(all_gen_mask_cpu, dim=0)
+
+        summary = self._summarize_turn(hidden, trimmed_mask)
+
+        return TurnOutput(
+            hidden=hidden,
+            mask=trimmed_mask,
+            z_seq=z_seq,
+            z_weights=z_weights,
+            num_phrases=num_phrases,
+            summary=summary,
+            tokens_cpu=tokens_cpu,
+            gen_mask_cpu=gen_mask_cpu,
+        )
+
+    def _compute_generation_chunk(self, batch: int) -> int:
+        """Chunk size for full turn generation (z-gen + Phase 1 + Phase 2).
+
+        Uses the configured VRAM budget with a conservative per-sample
+        estimate.  The estimate accounts for z-gen, Phase 1 KV cache,
+        Phase 2 activations, causal masks, and gradient graph overhead.
+        """
+        # Empirically measured: batch 48 at 25 tok/turn peaked at 3.4GB
+        # over a ~185MB static baseline → ~67MB per sample.
+        # At 50 tok/turn this grows to ~130MB.  Use 150MB for safety.
+        bytes_per_sample = 150 * 1024 * 1024
+        budget = self.config.phase2_vram_budget_mb * 1024 * 1024
+        chunk = max(self.config.phase2_min_chunk, int(budget / bytes_per_sample))
+        return min(chunk, batch)
+
+    def _score_progressive(
+        self,
+        turns: list[TurnOutput],
+        candidates: Tensor,
+        teacher_probs: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Progressive topology matching with learned turn aggregation.
+
+        Each turn is encoded independently (bounded VRAM).  At each
+        scoring point, all turns so far are combined via learned weights
+        (softmax-normalized).  The model learns which turns to emphasize
+        rather than diluting all equally via running mean.
+
+        Returns:
+            progressive_loss: Scalar KL divergence summed across turns.
+            logits: Final turn's logits for accuracy reporting.
+        """
+        device = candidates.device
+        progressive_loss = torch.tensor(0.0, device=device)
+
+        # Encode all turns (bounded VRAM — one at a time)
+        turn_msgs: list[Tensor] = []
+        for t in turns:
+            turn_msgs.append(self.dialogue_encoder(t.hidden, t.mask))
+
+        # Score at each turn: weighted combination of turns 0..k
+        for k in range(len(turns)):
+            # Learned weights over turns 0..k, softmax-normalized
+            weights = F.softmax(self.turn_agg_logits[:k + 1], dim=0)
+            msg = sum(w * m for w, m in zip(weights, turn_msgs[:k + 1]))
+
+            logits = self.receiver(msg, candidates)
+            student_log_probs = F.log_softmax(logits, dim=-1)
             progressive_loss = progressive_loss + F.kl_div(
                 student_log_probs, teacher_probs, reduction="batchmean",
             )
 
-        # Last turn's logits = full dialogue for accuracy reporting
-        logits = turn_logits
+        return progressive_loss, logits
 
-        # Move decoder back to GPU for next forward pass
-        gen.to(device)
+    def _compute_aux_losses(
+        self, turns: list[TurnOutput],
+    ) -> Tensor:
+        """Length regularization and z diversity across all turns."""
+        cfg = self.config
+        device = turns[0].hidden.device
+        aux = torch.tensor(0.0, device=device)
 
-        loss = progressive_loss / num_turns
-
-        # Length regularization (across all turns)
         if cfg.length_weight > 0:
-            for zw in all_z_weights:
-                loss = loss + cfg.length_weight * length_distribution_loss(
-                    zw, cfg.target_phrases,
+            for t in turns:
+                aux = aux + cfg.length_weight * length_distribution_loss(
+                    t.z_weights, cfg.target_phrases,
                 )
 
-        # z diversity regularization (across all turns)
         if self.z_diversity is not None:
-            for zs, zw in zip(all_z_seqs, all_z_weights):
-                div_loss, _ = self.z_diversity(zs, zw)
-                loss = loss + cfg.z_diversity_weight * div_loss
+            for t in turns:
+                div_loss, _ = self.z_diversity(t.z_seq, t.z_weights)
+                aux = aux + cfg.z_diversity_weight * div_loss
+
+        return aux
+
+    def _build_output(
+        self,
+        loss: Tensor,
+        logits: Tensor,
+        target_idx: Tensor,
+        turns: list[TurnOutput],
+    ) -> dict[str, Tensor]:
+        """Assemble output dict for trainer."""
+        cfg = self.config
+        num_turns = len(turns)
 
         with torch.no_grad():
             accuracy = (logits.argmax(1) == target_idx).float().mean()
 
+            total_num_phrases = sum(t.num_phrases for t in turns)
+            total_masks = torch.cat([t.mask for t in turns], dim=1)
+            total_tokens = total_masks.float().sum(dim=1).mean()
+
             # Surface diversity from first turn
             _eos = self.gen.eos_id
             _seqs = set()
-            t0, m0 = all_tokens_list[0], all_gen_masks[0]
-            for row, m in zip(t0, m0):
+            t0_tok, t0_mask = turns[0].tokens_cpu, turns[0].gen_mask_cpu
+            for row, m in zip(t0_tok, t0_mask):
                 ids = tuple(t.item() for t, v in zip(row, m) if v and t.item() != _eos)
                 _seqs.add(hash(ids))
-            surface_unique = len(_seqs) / max(t0.size(0), 1)
-
-            all_mask_cat = torch.cat(all_masks, dim=1)
-            total_tokens = all_mask_cat.float().sum(dim=1).mean()
+            surface_unique = len(_seqs) / max(t0_tok.size(0), 1)
 
         return {
             "loss": loss,
             "accuracy": accuracy,
             "msg_lengths": total_tokens.detach(),
-            "num_phrases": (total_num_phrases / cfg.num_turns).mean().detach(),
+            "num_phrases": (total_num_phrases / num_turns).mean().detach(),
             "surface_unique": torch.tensor(surface_unique),
             "hs_weight": torch.tensor(1.0),
-            "_tokens": all_tokens_list[0].detach(),
-            "_gen_mask": all_gen_masks[0].detach(),
-            "_dialogue_tokens": [t.detach() for t in all_tokens_list],
-            "_dialogue_masks": [m.detach() for m in all_gen_masks],
+            "_tokens": turns[0].tokens_cpu.detach(),
+            "_gen_mask": turns[0].gen_mask_cpu.detach(),
+            "_dialogue_tokens": [t.tokens_cpu.detach() for t in turns],
+            "_dialogue_masks": [t.gen_mask_cpu.detach() for t in turns],
         }
+
+    @contextmanager
+    def _decoder_offloaded(self):
+        """Optionally move frozen decoder to CPU during scoring.
+
+        Only offloads if VRAM is tight (>70% used).  At small batch
+        sizes the overhead of CPU↔GPU transfer hurts more than the
+        ~90MB saved.
+        """
+        if torch.cuda.is_available():
+            used = torch.cuda.memory_allocated() / (1024 ** 3)
+            total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            tight = used / total > 0.70
+        else:
+            tight = False
+
+        if tight:
+            device = next(self.gen.parameters()).device
+            self.gen.cpu()
+            torch.cuda.empty_cache()
+            try:
+                yield
+            finally:
+                self.gen.to(device)
+        else:
+            yield
+
+    # -- Main forward --
+
+    def forward(
+        self, anchor: Tensor, distractors: Tensor,
+        *, step: int = 0, candidate_indices: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """Multi-turn dialogue forward pass with bounded VRAM.
+
+        Stages:
+          1. Prepare candidates and teacher topology (fixed VRAM)
+          2. Generate all turns: z-gen → Phase 1 → Phase 2 micro-batched → summary
+          3. Offload decoder, score progressively (fixed VRAM)
+          4. Auxiliary losses (fixed VRAM)
+          5. Build output dict
+        """
+        cfg = self.config
+
+        mon = self.vram_monitor
+        mon.set_step(step)
+
+        # Stage 1: candidates and teacher topology
+        mon.stage = "prepare"
+        candidates, target_idx, teacher_probs, targets, target_mask = (
+            self._prepare_candidates(anchor, distractors)
+        )
+
+        # Stage 2: generate all turns
+        context_summaries: list[Tensor] = []
+        turns: list[TurnOutput] = []
+
+        for turn_idx in range(cfg.num_turns):
+            mon.stage = f"generate_turn{turn_idx}"
+            turn_emb = self.turn_embeddings[turn_idx]
+            context = (
+                torch.stack(context_summaries, dim=1)
+                if context_summaries else None
+            )
+            turn_out = self._generate_turn(
+                targets, turn_emb, context, target_mask,
+            )
+            turns.append(turn_out)
+            context_summaries.append(turn_out.summary)
+
+        # Stage 3: score with decoder offloaded
+        mon.stage = "scoring"
+        with self._decoder_offloaded():
+            progressive_loss, logits = self._score_progressive(
+                turns, candidates, teacher_probs,
+            )
+
+        # Stage 4: auxiliary losses
+        mon.stage = "aux_losses"
+        loss = progressive_loss / cfg.num_turns
+        loss = loss + self._compute_aux_losses(turns)
+
+        # Stage 5: output
+        return self._build_output(loss, logits, target_idx, turns)
