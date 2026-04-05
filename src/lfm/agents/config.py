@@ -21,9 +21,19 @@ class CurriculumConfig(LFMBaseConfig):
 
     Linearly interpolates the fraction of hard (within-cluster) distractors
     from ``start_hard_ratio`` to ``end_hard_ratio`` over ``warmup_steps``.
+
+    With stratified sampling (``medium_ratio > 0``), distractors are drawn
+    from three tiers:
+    - **Hard**: same cluster as anchor (fine-grained discrimination)
+    - **Medium**: different cluster (inter-cluster contrasts)
+    - **Easy**: uniform random (coarse-grained discrimination)
+
+    This encourages a language flexible enough for both broad category
+    markers and fine-grained instance-level distinctions.
     """
 
     enabled: bool = True
     warmup_steps: int = 500
     start_hard_ratio: float = 0.0
     end_hard_ratio: float = 1.0
+    medium_ratio: float = 0.0  # fraction of distractors from different clusters

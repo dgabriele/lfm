@@ -310,6 +310,7 @@ class DialogueCommand(CLICommand):
     def execute(self, args: argparse.Namespace) -> int:
         import yaml
 
+        from lfm.agents.config import CurriculumConfig
         from lfm.agents.games.dialogue import DialogueGame, DialogueGameConfig
         from lfm.agents.trainer import AgentTrainer
         from lfm.faculty.model import LanguageFaculty
@@ -319,33 +320,51 @@ class DialogueCommand(CLICommand):
             with open(args.config) as f:
                 cfg_dict = yaml.safe_load(f) or {}
 
-        def _get(key, cli_val, default=None):
-            if cli_val != default:
-                return cli_val
-            return cfg_dict.get(key, cli_val)
+        # Build config from YAML with CLI overrides.
+        # All YAML fields are passed through to DialogueGameConfig;
+        # CLI args override when explicitly set.
+        cli_overrides = {}
+        cli_map = {
+            "decoder_path": ("decoder_path", "data/vae_decoder.pt"),
+            "spm_path": ("spm_path", "data/spm.model"),
+            "embedding_store": ("embedding_store_dir", "data/embeddings"),
+            "output_dir": ("output_dir", "data/dialogue_game"),
+            "num_turns": ("num_turns", 4),
+            "max_phrases": ("max_phrases", 4),
+            "batch_size": ("batch_size", 20),
+            "gradient_accumulation_steps": ("gradient_accumulation_steps", 12),
+            "steps": ("steps", 4000),
+            "device": ("device", "cuda"),
+            "seed": ("seed", 42),
+            "log_every": ("log_every", 50),
+            "checkpoint_every": ("checkpoint_every", 100),
+        }
+        for arg_name, (cfg_name, default) in cli_map.items():
+            val = getattr(args, arg_name, default)
+            if val != default:
+                cli_overrides[cfg_name] = val
+
+        # Handle curriculum from YAML
+        curriculum_kwargs = {}
+        for ck in ("enabled", "warmup_steps", "start_hard_ratio", "end_hard_ratio", "medium_ratio"):
+            if ck in cfg_dict:
+                curriculum_kwargs[ck] = cfg_dict.pop(ck)
+        if getattr(args, "no_curriculum", False):
+            curriculum_kwargs["enabled"] = False
+        elif "no_curriculum" in cfg_dict:
+            curriculum_kwargs["enabled"] = not cfg_dict.pop("no_curriculum")
+        if curriculum_kwargs:
+            cfg_dict["curriculum"] = CurriculumConfig(**curriculum_kwargs)
 
         import torch
-        config = DialogueGameConfig(
-            decoder_path=_get("decoder_path", args.decoder_path, "data/vae_decoder.pt"),
-            spm_path=_get("spm_path", args.spm_path, "data/spm.model"),
-            embedding_store_dir=_get("embedding_store_dir", args.embedding_store, "data/embeddings"),
-            output_dir=_get("output_dir", args.output_dir, "data/dialogue_game"),
-            num_turns=_get("num_turns", args.num_turns, 4),
-            max_phrases=_get("max_phrases", args.max_phrases, 4),
-            batch_size=_get("batch_size", args.batch_size, 20),
-            gradient_accumulation_steps=_get("gradient_accumulation_steps", args.gradient_accumulation_steps, 12),
-            steps=_get("steps", args.steps, 4000),
-            device=_get("device", args.device, "cuda"),
-            seed=_get("seed", args.seed, 42),
-            log_every=_get("log_every", args.log_every, 50),
-            checkpoint_every=_get("checkpoint_every", args.checkpoint_every, 100),
-        )
+        config = DialogueGameConfig(**{**cfg_dict, **cli_overrides})
 
         device = torch.device(config.device)
         faculty = LanguageFaculty(config.build_faculty_config()).to(device)
         game = DialogueGame(config, faculty).to(device)
         trainer = AgentTrainer(game, config)
-        trainer.train(resume=_get("resume", args.resume, None))
+        resume = cfg_dict.get("resume", None) if args.resume is None else args.resume
+        trainer.train(resume=resume)
         return 0
 
 

@@ -101,6 +101,14 @@ class DialogueGameConfig(LFMBaseConfig):
     # the context transformer (progressive refinement).
     independent_turns: bool = False
 
+    # Inter-turn diversity: penalize pairwise cosine similarity between
+    # turn token representations above a target threshold.  Forces turns
+    # to be distinct while allowing shared topic vocabulary.
+    # target_turn_sim ~0.4 means turns share ~40% of their phonetic
+    # content (topic coherence) but differ in the rest (diversity).
+    turn_diversity_weight: float = 0.0
+    target_turn_sim: float = 0.4
+
     # Phase 2 VRAM management
     phase2_vram_budget_mb: float = 1500.0
     phase2_min_chunk: int = 4
@@ -686,6 +694,7 @@ class DialogueGame(nn.Module):
         # Process one turn at a time.  Within each turn, micro-batch
         # the encoder passes to bound peak VRAM.
         turn_msgs: list[Tensor] = []
+        surface_msg_list: list[Tensor] = []
 
         for k, t in enumerate(turns):
             # Encode hidden states in chunks → message vector
@@ -706,11 +715,11 @@ class DialogueGame(nn.Module):
             student_log_probs = F.log_softmax(logits, dim=-1)
             progressive_loss = progressive_loss + F.kl_div(
                 student_log_probs, teacher_probs, reduction="batchmean",
-            )
+            ).clamp(min=0)
             if cfg.ce_weight > 0:
                 ce_loss = ce_loss + F.cross_entropy(logits, target_idx)
 
-            # Independent: surface tokens in chunks
+            # Per-turn surface loss (if enabled)
             if cfg.per_turn_weight > 0:
                 surf_chunks = []
                 for s in range(0, batch, score_chunk):
@@ -725,13 +734,43 @@ class DialogueGame(nn.Module):
                 ind_log_probs = F.log_softmax(ind_logits, dim=-1)
                 independent_loss = independent_loss + F.kl_div(
                     ind_log_probs, teacher_probs, reduction="batchmean",
-                )
+                ).clamp(min=0)
                 del surface_msg
+
+            # Token-level diversity: mean-pool straight-through token
+            # embeddings directly (not through the encoder, which
+            # compresses to a discriminative point and loses diversity).
+            if cfg.turn_diversity_weight > 0:
+                tok_chunks = []
+                for s in range(0, batch, score_chunk):
+                    e = min(s + score_chunk, batch)
+                    sr = embed_tokens_straight_through(
+                        t.hidden[s:e], gen.output_head, gen.token_embedding,
+                    )
+                    # Masked mean pool over sequence
+                    m = t.mask[s:e].unsqueeze(-1).float()
+                    pooled = (sr * m).sum(dim=1) / m.sum(dim=1).clamp(min=1)
+                    tok_chunks.append(pooled)
+                    del sr
+                surface_msg_list.append(torch.cat(tok_chunks, dim=0))
+
+        # Inter-turn diversity: penalize pairwise cosine similarity
+        # above target_turn_sim.  Below the target, no penalty —
+        # turns are free to share topic vocabulary.
+        diversity_loss = torch.tensor(0.0, device=device)
+        if cfg.turn_diversity_weight > 0 and len(surface_msg_list) >= 2:
+            msgs = torch.stack(surface_msg_list)  # (num_turns, B, dim)
+            msgs_norm = F.normalize(msgs, dim=-1)
+            sim = torch.einsum("ibd,jbd->ijb", msgs_norm, msgs_norm)
+            off_diag = ~torch.eye(len(surface_msg_list), dtype=torch.bool, device=device)
+            excess = (sim[off_diag] - cfg.target_turn_sim).clamp(min=0)
+            diversity_loss = excess.mean()
 
         total = (progressive_loss
                 + cfg.per_turn_weight * independent_loss
-                + cfg.ce_weight * ce_loss)
-        return total, logits, independent_loss.detach(), ce_loss.detach()
+                + cfg.ce_weight * ce_loss
+                + cfg.turn_diversity_weight * diversity_loss)
+        return total, logits, independent_loss.detach(), ce_loss.detach(), diversity_loss.detach()
 
     def _compute_aux_losses(
         self, turns: list[TurnOutput],
@@ -762,6 +801,7 @@ class DialogueGame(nn.Module):
         turns: list[TurnOutput],
         surface_loss: Tensor | None = None,
         ce_loss: Tensor | None = None,
+        diversity_loss: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Assemble output dict for trainer."""
         cfg = self.config
@@ -796,6 +836,7 @@ class DialogueGame(nn.Module):
             "_dialogue_masks": [t.gen_mask_cpu.detach() for t in turns],
             "surface_loss": surface_loss if surface_loss is not None else torch.tensor(0.0),
             "ce_loss": ce_loss if ce_loss is not None else torch.tensor(0.0),
+            "turn_sim": diversity_loss.detach() if diversity_loss is not None else torch.tensor(0.0),
         }
 
     @contextmanager
@@ -874,7 +915,7 @@ class DialogueGame(nn.Module):
         # Stage 3: score with decoder offloaded
         mon.stage = "scoring"
         with self._decoder_offloaded():
-            progressive_loss, logits, surface_loss, ce_loss = (
+            progressive_loss, logits, surface_loss, ce_loss, diversity_loss = (
                 self._score_progressive(
                     turns, candidates, teacher_probs, target_idx,
                 )
@@ -889,4 +930,5 @@ class DialogueGame(nn.Module):
         return self._build_output(
             loss, logits, target_idx, turns,
             surface_loss=surface_loss, ce_loss=ce_loss,
+            diversity_loss=diversity_loss,
         )

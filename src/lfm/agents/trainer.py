@@ -60,6 +60,9 @@ class AgentTrainer:
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._best_acc = 0.0
 
+        from lfm.agents.training_history import TrainingHistory
+        self._history = TrainingHistory()
+
     def _sample_batch(
         self, step: int,
     ) -> tuple[torch.Tensor, torch.Tensor, float, torch.Tensor | None]:
@@ -84,18 +87,29 @@ class AgentTrainer:
         dist_indices = np.empty(
             (cfg.batch_size, cfg.num_distractors), dtype=np.intp,
         )
+        medium_ratio = getattr(curriculum, "medium_ratio", 0.0) if curriculum.enabled else 0.0
+
         for i in range(cfg.batch_size):
             n_hard = int(hard_ratio * cfg.num_distractors)
-            n_easy = cfg.num_distractors - n_hard
+            n_medium = int(medium_ratio * cfg.num_distractors)
+            n_easy = cfg.num_distractors - n_hard - n_medium
+
+            cluster = int(self._cluster_labels[idx[i]])
 
             hard_idx = np.empty(0, dtype=np.intp)
             if n_hard > 0:
-                cluster = int(self._cluster_labels[idx[i]])
                 hard_idx = self.store.sample_from_cluster(
                     cluster, n_hard, rng=self._rng,
                 )
-            easy_idx = self._rng.integers(0, self._n, size=n_easy)
-            dist_indices[i] = np.concatenate([hard_idx, easy_idx])
+
+            medium_idx = np.empty(0, dtype=np.intp)
+            if n_medium > 0:
+                medium_idx = self.store.sample_from_different_cluster(
+                    cluster, n_medium, rng=self._rng,
+                )
+
+            easy_idx = self._rng.integers(0, self._n, size=max(n_easy, 0))
+            dist_indices[i] = np.concatenate([hard_idx, medium_idx, easy_idx])
 
         distractors = torch.tensor(
             self._embeddings[dist_indices], dtype=torch.float32,
@@ -124,6 +138,7 @@ class AgentTrainer:
         ckpt["hard_ratio"] = hard_ratio
 
         torch.save(ckpt, str(self._output_dir / "latest.pt"))
+        self._history.save(str(self._output_dir / "history.parquet"))
         logger.info(
             "Checkpoint step %d — acc=%.1f%% (best=%.1f%%)",
             step, accuracy * 100, self._best_acc * 100,
@@ -212,6 +227,17 @@ class AgentTrainer:
             # Use accumulated accuracy for logging
             out["accuracy"] = torch.tensor(acc_sum / accum)
             step_acc = acc_sum / accum
+
+            # Record all scalar metrics for post-hoc analysis
+            record = {"step": step, "hard_ratio": hard_ratio}
+            for k, v in out.items():
+                if k.startswith("_"):
+                    continue  # skip internal tensors (tokens, masks)
+                if isinstance(v, torch.Tensor) and v.numel() == 1:
+                    record[k] = v.item()
+            if torch.cuda.is_available():
+                record["vram_mb"] = torch.cuda.max_memory_allocated() // (1024 * 1024)
+            self._history.record(**record)
             if hard_ratio >= 1.0 and step_acc > self._best_acc:
                 self._best_acc = step_acc
                 # Save best checkpoint immediately at the peak
@@ -249,6 +275,8 @@ class AgentTrainer:
                     extra += f"  div={out['z_div_loss'].item():.3f}"
                 if "z_coverage" in out and out["z_coverage"].item() > 0:
                     extra += f"  zcov={out['z_coverage'].item():.2f}"
+                if "turn_sim" in out and out["turn_sim"].item() != 0:
+                    extra += f"  tsim={out['turn_sim'].item():.3f}"
                 if "surface_loss" in out and out["surface_loss"].item() != 0:
                     extra += f"  surf={out['surface_loss'].item():.3f}"
                 if "ce_loss" in out and out["ce_loss"].item() != 0:
@@ -322,5 +350,6 @@ class AgentTrainer:
                 "chance": chance,
             }
             logger.info("Final: %s", results)
+            self._history.save(str(self._output_dir / "history.parquet"))
 
         return results

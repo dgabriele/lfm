@@ -21,16 +21,18 @@ variable_phrases: true
 target_phrases: 2.0
 length_weight: 0.5
 z_diversity_weight: 0.3
-per_turn_weight: 0.5
+per_turn_weight: 0.0
 ce_weight: 0.1
-independent_turns: true
+independent_turns: false
+turn_diversity_weight: 1.0
+target_turn_sim: 0.4
 
 # Phase 2 VRAM management
 phase2_vram_budget_mb: 1500
 phase2_min_chunk: 4
 
 # Training
-batch_size: 40
+batch_size: 48
 gradient_accumulation_steps: 4
 steps: 2000
 gru_lr: 0.0003
@@ -39,8 +41,10 @@ num_distractors: 15
 min_targets: 1
 max_targets: 1
 
-# No curriculum — 100% hard negatives
-no_curriculum: true
+# Stratified curriculum: ramp hard to 50%, keep 30% medium + 20% easy
+# Hard = same cluster, Medium = different cluster, Easy = random
+end_hard_ratio: 0.5
+medium_ratio: 0.3
 
 # Runtime
 device: cuda
