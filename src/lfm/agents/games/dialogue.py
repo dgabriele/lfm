@@ -34,7 +34,12 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
-from lfm.agents.components import MessageEncoder, Receiver, ZDiversityLoss
+from lfm.agents.components import (
+    MessageEncoder,
+    Receiver,
+    ZDiversityLoss,
+    embed_tokens_straight_through,
+)
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
 from lfm.agents.decode import ExpressionDecoder, rerun_decoder_multiphrase_with_grad
 from lfm.agents.diffusion import DiffusionZGenerator, length_distribution_loss
@@ -78,6 +83,11 @@ class DialogueGameConfig(LFMBaseConfig):
     target_phrases: float = 2.5
     length_weight: float = 0.5
     z_diversity_weight: float = 0.0
+
+    # Per-turn independent scoring weight.  Each turn's message alone
+    # must match the topology, preventing adjacent turns from collapsing
+    # to identical output.  0.0 = progressive only, 1.0 = equal weight.
+    per_turn_weight: float = 0.5
 
     # Phase 2 VRAM management
     phase2_vram_budget_mb: float = 1500.0
@@ -305,8 +315,15 @@ class DialogueGame(nn.Module):
             self._hidden_dim, config.context_hidden_dim,
         )
 
-        # Message encoder (encodes one turn at a time)
+        # Hidden-state encoder (encodes one turn at a time)
         self.dialogue_encoder = MessageEncoder(
+            self._hidden_dim, config.embedding_dim,
+            num_heads=config.encoder.num_heads,
+            num_layers=config.encoder.num_layers,
+        )
+
+        # Surface-token encoder (straight-through differentiable tokens)
+        self.surface_encoder = MessageEncoder(
             self._hidden_dim, config.embedding_dim,
             num_heads=config.encoder.num_heads,
             num_layers=config.encoder.num_layers,
@@ -375,6 +392,7 @@ class DialogueGame(nn.Module):
             "turn_embeddings": self.turn_embeddings.data,
             "hidden_to_context": self.hidden_to_context.state_dict(),
             "dialogue_encoder": self.dialogue_encoder.state_dict(),
+            "surface_encoder": self.surface_encoder.state_dict(),
             "receiver": self.receiver.state_dict(),
             "turn_agg_logits": self.turn_agg_logits.data,
             "num_turns": self.config.num_turns,
@@ -396,6 +414,8 @@ class DialogueGame(nn.Module):
             self.turn_embeddings.data.copy_(saved)
         self.hidden_to_context.load_state_dict(ckpt["hidden_to_context"])
         self.dialogue_encoder.load_state_dict(ckpt["dialogue_encoder"])
+        if "surface_encoder" in ckpt:
+            self.surface_encoder.load_state_dict(ckpt["surface_encoder"])
         self.receiver.load_state_dict(ckpt["receiver"])
         if "turn_agg_logits" in ckpt:
             self.turn_agg_logits.data.copy_(ckpt["turn_agg_logits"])
@@ -412,6 +432,7 @@ class DialogueGame(nn.Module):
             {"params": [self.turn_embeddings], "lr": cfg.receiver_lr},
             {"params": list(self.hidden_to_context.parameters()), "lr": cfg.receiver_lr},
             {"params": list(self.dialogue_encoder.parameters()), "lr": cfg.receiver_lr},
+            {"params": list(self.surface_encoder.parameters()), "lr": cfg.receiver_lr},
             {"params": list(self.receiver.parameters()), "lr": cfg.receiver_lr},
             {"params": [self.turn_agg_logits], "lr": cfg.receiver_lr},
         ]
@@ -626,28 +647,46 @@ class DialogueGame(nn.Module):
         candidates: Tensor,
         teacher_probs: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        """Progressive topology matching with learned turn aggregation.
+        """Progressive + independent topology matching.
 
-        Each turn is encoded independently (bounded VRAM).  At each
-        scoring point, all turns so far are combined via learned weights
-        (softmax-normalized).  The model learns which turns to emphasize
-        rather than diluting all equally via running mean.
+        Two loss components:
+        1. **Progressive**: at each turn, the weighted accumulation of
+           turns 0..k must match the topology.  Rewards progressive
+           information gain.
+        2. **Independent**: each turn's message alone must match the
+           topology.  Prevents adjacent turns from collapsing to
+           identical output (the T0==T1 problem).
 
         Returns:
-            progressive_loss: Scalar KL divergence summed across turns.
+            total_loss: Scalar loss (progressive + per_turn_weight * independent).
             logits: Final turn's logits for accuracy reporting.
         """
         device = candidates.device
+        cfg = self.config
         progressive_loss = torch.tensor(0.0, device=device)
+        independent_loss = torch.tensor(0.0, device=device)
 
         # Encode all turns (bounded VRAM — one at a time)
         turn_msgs: list[Tensor] = []
         for t in turns:
             turn_msgs.append(self.dialogue_encoder(t.hidden, t.mask))
 
-        # Score at each turn: weighted combination of turns 0..k
+        # Surface-token representations per turn (straight-through estimator).
+        # Forces each turn's actual decoded tokens to be discriminative,
+        # not just the hidden states.
+        surface_msgs: list[Tensor] = []
+        if cfg.per_turn_weight > 0:
+            gen = self.gen
+            for t in turns:
+                surface_repr = embed_tokens_straight_through(
+                    t.hidden, gen.output_head, gen.token_embedding,
+                )
+                surface_msgs.append(
+                    self.surface_encoder(surface_repr, t.mask),
+                )
+
         for k in range(len(turns)):
-            # Learned weights over turns 0..k, softmax-normalized
+            # Progressive: weighted combination of turns 0..k (hidden states)
             weights = F.softmax(self.turn_agg_logits[:k + 1], dim=0)
             msg = sum(w * m for w, m in zip(weights, turn_msgs[:k + 1]))
 
@@ -657,7 +696,16 @@ class DialogueGame(nn.Module):
                 student_log_probs, teacher_probs, reduction="batchmean",
             )
 
-        return progressive_loss, logits
+            # Independent: this turn's SURFACE tokens must match topology
+            if cfg.per_turn_weight > 0:
+                ind_logits = self.receiver(surface_msgs[k], candidates)
+                ind_log_probs = F.log_softmax(ind_logits, dim=-1)
+                independent_loss = independent_loss + F.kl_div(
+                    ind_log_probs, teacher_probs, reduction="batchmean",
+                )
+
+        total = progressive_loss + cfg.per_turn_weight * independent_loss
+        return total, logits
 
     def _compute_aux_losses(
         self, turns: list[TurnOutput],

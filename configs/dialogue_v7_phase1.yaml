@@ -21,15 +21,16 @@ variable_phrases: true
 target_phrases: 2.0
 length_weight: 0.5
 z_diversity_weight: 0.3
+per_turn_weight: 0.5
 
 # Phase 2 VRAM management
 phase2_vram_budget_mb: 1500
 phase2_min_chunk: 4
 
 # Training
-batch_size: 112
+batch_size: 144
 gradient_accumulation_steps: 2
-steps: 4000
+steps: 2000
 gru_lr: 0.0003
 receiver_lr: 0.001
 num_distractors: 15

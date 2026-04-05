@@ -3,7 +3,38 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
+
+
+def embed_tokens_straight_through(
+    hidden: Tensor,
+    output_head: nn.Module,
+    token_embedding: nn.Module,
+) -> Tensor:
+    """Compute differentiable surface-token representations.
+
+    Uses the straight-through estimator: forward pass uses hard argmax
+    token IDs (what the decoder would actually emit), backward pass
+    uses soft probabilities (smooth gradients to hidden states).
+
+    This forces the model to be discriminative at the token level —
+    what the downstream LLM will actually see — not just at the
+    hidden-state level.
+
+    Args:
+        hidden: ``(B, S, H)`` decoder hidden states (with gradients).
+        output_head: Linear mapping hidden → vocab logits.
+        token_embedding: Token embedding table.
+
+    Returns:
+        ``(B, S, H)`` re-embedded surface tokens with gradient flow.
+    """
+    logits = output_head(hidden)
+    soft_probs = F.softmax(logits, dim=-1)
+    hard_onehot = F.one_hot(logits.argmax(dim=-1), logits.size(-1)).float()
+    straight_through = (hard_onehot - soft_probs).detach() + soft_probs
+    return straight_through @ token_embedding.weight
 
 
 class MessageEncoder(nn.Module):

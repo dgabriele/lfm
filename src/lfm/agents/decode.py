@@ -313,6 +313,7 @@ class ExpressionDecoder:
         z_seq: Tensor,
         z_weights: Tensor,
         max_tokens_per_phrase: int = 48,
+        temperature: float = 0.0,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Decode z-sequence into tokens via KV-cached autoregressive generation.
 
@@ -320,6 +321,8 @@ class ExpressionDecoder:
             z_seq: ``(batch, num_phrases, latent_dim)`` latent codes.
             z_weights: ``(batch, num_phrases)`` per-phrase activity weights.
             max_tokens_per_phrase: Hard limit on tokens per phrase.
+            temperature: Sampling temperature. 0 = argmax (deterministic),
+                >0 = sample from softmax(logits/temperature).
 
         Returns:
             tokens: ``(batch, max_total)`` token IDs.
@@ -413,7 +416,11 @@ class ExpressionDecoder:
         # Autoregressive decode loop
         for t in range(max_total):
             logits = gen.output_head(out[:, -1])
-            next_token = logits.argmax(dim=-1)
+            if temperature > 0:
+                probs = torch.softmax(logits / temperature, dim=-1)
+                next_token = torch.multinomial(probs, 1).squeeze(-1)
+            else:
+                next_token = logits.argmax(dim=-1)
 
             # Store tokens
             active = ~finished

@@ -59,7 +59,6 @@ class AgentTrainer:
         self._output_dir = Path(config.output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._best_acc = 0.0
-        self._peak_acc = 0.0
 
     def _sample_batch(
         self, step: int,
@@ -122,23 +121,13 @@ class AgentTrainer:
         ckpt = self.game.checkpoint_state()
         ckpt["step"] = step
         ckpt["accuracy"] = accuracy
-        ckpt["peak_accuracy"] = self._peak_acc
         ckpt["hard_ratio"] = hard_ratio
 
         torch.save(ckpt, str(self._output_dir / "latest.pt"))
-
-        if hard_ratio >= 1.0 and self._peak_acc > self._best_acc:
-            self._best_acc = self._peak_acc
-            torch.save(ckpt, str(self._output_dir / "best.pt"))
-            logger.info(
-                "Checkpoint step %d — new best acc=%.1f%% (peak=%.1f%%)",
-                step, accuracy * 100, self._peak_acc * 100,
-            )
-        else:
-            logger.info(
-                "Checkpoint step %d — acc=%.1f%% (best=%.1f%%)",
-                step, accuracy * 100, self._best_acc * 100,
-            )
+        logger.info(
+            "Checkpoint step %d — acc=%.1f%% (best=%.1f%%)",
+            step, accuracy * 100, self._best_acc * 100,
+        )
 
     def train(self, resume: str | None = None) -> dict[str, float]:
         """Run the training loop.
@@ -223,8 +212,18 @@ class AgentTrainer:
             # Use accumulated accuracy for logging
             out["accuracy"] = torch.tensor(acc_sum / accum)
             step_acc = acc_sum / accum
-            if hard_ratio >= 1.0 and step_acc > self._peak_acc:
-                self._peak_acc = step_acc
+            if hard_ratio >= 1.0 and step_acc > self._best_acc:
+                self._best_acc = step_acc
+                # Save best checkpoint immediately at the peak
+                ckpt = game.checkpoint_state()
+                ckpt["step"] = step
+                ckpt["accuracy"] = step_acc
+                ckpt["hard_ratio"] = hard_ratio
+                torch.save(ckpt, str(self._output_dir / "best.pt"))
+                logger.info(
+                    "  New best acc=%.1f%% at step %d — saved best.pt",
+                    step_acc * 100, step,
+                )
 
             # Logging
             if step % cfg.log_every == 0:
