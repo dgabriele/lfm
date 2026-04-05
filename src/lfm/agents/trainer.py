@@ -249,6 +249,10 @@ class AgentTrainer:
                     extra += f"  div={out['z_div_loss'].item():.3f}"
                 if "z_coverage" in out and out["z_coverage"].item() > 0:
                     extra += f"  zcov={out['z_coverage'].item():.2f}"
+                if "surface_loss" in out and out["surface_loss"].item() != 0:
+                    extra += f"  surf={out['surface_loss'].item():.3f}"
+                if "ce_loss" in out and out["ce_loss"].item() != 0:
+                    extra += f"  ce={out['ce_loss'].item():.3f}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
                 if torch.cuda.is_available():

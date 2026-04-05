@@ -89,6 +89,18 @@ class DialogueGameConfig(LFMBaseConfig):
     # to identical output.  0.0 = progressive only, 1.0 = equal weight.
     per_turn_weight: float = 0.5
 
+    # Cross-entropy weight alongside topology KL.  CE provides a sharp
+    # gradient for "get the argmax right" while KL provides smooth
+    # topology matching.  Small values (0.1) nudge without dominating.
+    ce_weight: float = 0.1
+
+    # Independent turns: each turn sees only the embedding + turn position,
+    # not previous turns.  Produces 4 independent views of the same input,
+    # maximizing vocabulary/phrase diversity for LLM pretraining.
+    # When False (default), turns are conditioned on previous turns via
+    # the context transformer (progressive refinement).
+    independent_turns: bool = False
+
     # Phase 2 VRAM management
     phase2_vram_budget_mb: float = 1500.0
     phase2_min_chunk: int = 4
@@ -646,6 +658,7 @@ class DialogueGame(nn.Module):
         turns: list[TurnOutput],
         candidates: Tensor,
         teacher_probs: Tensor,
+        target_idx: Tensor,
     ) -> tuple[Tensor, Tensor]:
         """Progressive + independent topology matching.
 
@@ -661,51 +674,64 @@ class DialogueGame(nn.Module):
             total_loss: Scalar loss (progressive + per_turn_weight * independent).
             logits: Final turn's logits for accuracy reporting.
         """
+        batch = candidates.size(0)
         device = candidates.device
         cfg = self.config
         progressive_loss = torch.tensor(0.0, device=device)
         independent_loss = torch.tensor(0.0, device=device)
+        ce_loss = torch.tensor(0.0, device=device)
+        gen = self.gen
+        score_chunk = 16  # micro-batch for encoder/receiver scoring
 
-        # Encode all turns (bounded VRAM — one at a time)
+        # Process one turn at a time.  Within each turn, micro-batch
+        # the encoder passes to bound peak VRAM.
         turn_msgs: list[Tensor] = []
-        for t in turns:
-            turn_msgs.append(self.dialogue_encoder(t.hidden, t.mask))
 
-        # Surface-token representations per turn (straight-through estimator).
-        # Forces each turn's actual decoded tokens to be discriminative,
-        # not just the hidden states.
-        surface_msgs: list[Tensor] = []
-        if cfg.per_turn_weight > 0:
-            gen = self.gen
-            for t in turns:
-                surface_repr = embed_tokens_straight_through(
-                    t.hidden, gen.output_head, gen.token_embedding,
-                )
-                surface_msgs.append(
-                    self.surface_encoder(surface_repr, t.mask),
-                )
+        for k, t in enumerate(turns):
+            # Encode hidden states in chunks → message vector
+            msg_chunks = []
+            for s in range(0, batch, score_chunk):
+                e = min(s + score_chunk, batch)
+                msg_chunks.append(self.dialogue_encoder(
+                    t.hidden[s:e], t.mask[s:e],
+                ))
+            turn_msg = torch.cat(msg_chunks, dim=0)
+            turn_msgs.append(turn_msg)
 
-        for k in range(len(turns)):
-            # Progressive: weighted combination of turns 0..k (hidden states)
+            # Progressive: weighted combination of turns 0..k
             weights = F.softmax(self.turn_agg_logits[:k + 1], dim=0)
-            msg = sum(w * m for w, m in zip(weights, turn_msgs[:k + 1]))
+            msg = sum(w * m for w, m in zip(weights, turn_msgs))
 
             logits = self.receiver(msg, candidates)
             student_log_probs = F.log_softmax(logits, dim=-1)
             progressive_loss = progressive_loss + F.kl_div(
                 student_log_probs, teacher_probs, reduction="batchmean",
             )
+            if cfg.ce_weight > 0:
+                ce_loss = ce_loss + F.cross_entropy(logits, target_idx)
 
-            # Independent: this turn's SURFACE tokens must match topology
+            # Independent: surface tokens in chunks
             if cfg.per_turn_weight > 0:
-                ind_logits = self.receiver(surface_msgs[k], candidates)
+                surf_chunks = []
+                for s in range(0, batch, score_chunk):
+                    e = min(s + score_chunk, batch)
+                    sr = embed_tokens_straight_through(
+                        t.hidden[s:e], gen.output_head, gen.token_embedding,
+                    )
+                    surf_chunks.append(self.surface_encoder(sr, t.mask[s:e]))
+                    del sr
+                surface_msg = torch.cat(surf_chunks, dim=0)
+                ind_logits = self.receiver(surface_msg, candidates)
                 ind_log_probs = F.log_softmax(ind_logits, dim=-1)
                 independent_loss = independent_loss + F.kl_div(
                     ind_log_probs, teacher_probs, reduction="batchmean",
                 )
+                del surface_msg
 
-        total = progressive_loss + cfg.per_turn_weight * independent_loss
-        return total, logits
+        total = (progressive_loss
+                + cfg.per_turn_weight * independent_loss
+                + cfg.ce_weight * ce_loss)
+        return total, logits, independent_loss.detach(), ce_loss.detach()
 
     def _compute_aux_losses(
         self, turns: list[TurnOutput],
@@ -734,6 +760,8 @@ class DialogueGame(nn.Module):
         logits: Tensor,
         target_idx: Tensor,
         turns: list[TurnOutput],
+        surface_loss: Tensor | None = None,
+        ce_loss: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Assemble output dict for trainer."""
         cfg = self.config
@@ -766,6 +794,8 @@ class DialogueGame(nn.Module):
             "_gen_mask": turns[0].gen_mask_cpu.detach(),
             "_dialogue_tokens": [t.tokens_cpu.detach() for t in turns],
             "_dialogue_masks": [t.gen_mask_cpu.detach() for t in turns],
+            "surface_loss": surface_loss if surface_loss is not None else torch.tensor(0.0),
+            "ce_loss": ce_loss if ce_loss is not None else torch.tensor(0.0),
         }
 
     @contextmanager
@@ -827,21 +857,27 @@ class DialogueGame(nn.Module):
         for turn_idx in range(cfg.num_turns):
             mon.stage = f"generate_turn{turn_idx}"
             turn_emb = self.turn_embeddings[turn_idx]
-            context = (
-                torch.stack(context_summaries, dim=1)
-                if context_summaries else None
-            )
+            if cfg.independent_turns:
+                context = None
+            else:
+                context = (
+                    torch.stack(context_summaries, dim=1)
+                    if context_summaries else None
+                )
             turn_out = self._generate_turn(
                 targets, turn_emb, context, target_mask,
             )
             turns.append(turn_out)
-            context_summaries.append(turn_out.summary)
+            if not cfg.independent_turns:
+                context_summaries.append(turn_out.summary)
 
         # Stage 3: score with decoder offloaded
         mon.stage = "scoring"
         with self._decoder_offloaded():
-            progressive_loss, logits = self._score_progressive(
-                turns, candidates, teacher_probs,
+            progressive_loss, logits, surface_loss, ce_loss = (
+                self._score_progressive(
+                    turns, candidates, teacher_probs, target_idx,
+                )
             )
 
         # Stage 4: auxiliary losses
@@ -850,4 +886,7 @@ class DialogueGame(nn.Module):
         loss = loss + self._compute_aux_losses(turns)
 
         # Stage 5: output
-        return self._build_output(loss, logits, target_idx, turns)
+        return self._build_output(
+            loss, logits, target_idx, turns,
+            surface_loss=surface_loss, ce_loss=ce_loss,
+        )
