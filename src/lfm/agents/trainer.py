@@ -238,7 +238,8 @@ class AgentTrainer:
             if torch.cuda.is_available():
                 record["vram_mb"] = torch.cuda.max_memory_allocated() // (1024 * 1024)
             self._history.record(**record)
-            if hard_ratio >= 1.0 and step_acc > self._best_acc:
+            target_hard = cfg.curriculum.end_hard_ratio if cfg.curriculum.enabled else 1.0
+            if hard_ratio >= target_hard and step_acc > self._best_acc:
                 self._best_acc = step_acc
                 # Save best checkpoint immediately at the peak
                 ckpt = game.checkpoint_state()
@@ -275,8 +276,8 @@ class AgentTrainer:
                     extra += f"  div={out['z_div_loss'].item():.3f}"
                 if "z_coverage" in out and out["z_coverage"].item() > 0:
                     extra += f"  zcov={out['z_coverage'].item():.2f}"
-                if "turn_sim" in out and out["turn_sim"].item() != 0:
-                    extra += f"  tsim={out['turn_sim'].item():.3f}"
+                if "hard_overlap" in out:
+                    extra += f"  hovl={out['hard_overlap'].item():.3f}"
                 if "surface_loss" in out and out["surface_loss"].item() != 0:
                     extra += f"  surf={out['surface_loss'].item():.3f}"
                 if "ce_loss" in out and out["ce_loss"].item() != 0:

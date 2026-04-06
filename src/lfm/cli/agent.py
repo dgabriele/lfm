@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import logging
+
+logger = logging.getLogger(__name__)
 
 from lfm.cli.base import CLICommand
 
@@ -357,13 +360,43 @@ class DialogueCommand(CLICommand):
             cfg_dict["curriculum"] = CurriculumConfig(**curriculum_kwargs)
 
         import torch
-        config = DialogueGameConfig(**{**cfg_dict, **cli_overrides})
+        resume = cfg_dict.get("resume", None) if args.resume is None else args.resume
+
+        # On resume, restore training config from checkpoint to prevent
+        # regime shifts.  Only operational fields (batch_size, device,
+        # log_every, checkpoint_every) are taken from the YAML/CLI.
+        if resume is not None:
+            ckpt = torch.load(resume, map_location="cpu", weights_only=False)
+            if "training_config" in ckpt:
+                saved_cfg = ckpt["training_config"]
+                # Operational overrides that are safe to change on resume
+                operational = {
+                    "batch_size", "gradient_accumulation_steps", "device",
+                    "log_every", "checkpoint_every", "output_dir",
+                    "phase2_vram_budget_mb", "phase2_min_chunk",
+                    "embedding_store_dir",
+                }
+                merged = dict(saved_cfg)
+                for key in operational:
+                    if key in cfg_dict:
+                        merged[key] = cfg_dict[key]
+                    if key in cli_overrides:
+                        merged[key] = cli_overrides[key]
+                # Restore curriculum from saved config
+                if "curriculum" in merged and isinstance(merged["curriculum"], dict):
+                    merged["curriculum"] = CurriculumConfig(**merged["curriculum"])
+                config = DialogueGameConfig(**merged)
+                logger.info("Restored training config from checkpoint (step %d)", ckpt.get("step", 0))
+            else:
+                config = DialogueGameConfig(**{**cfg_dict, **cli_overrides})
+            del ckpt
+        else:
+            config = DialogueGameConfig(**{**cfg_dict, **cli_overrides})
 
         device = torch.device(config.device)
         faculty = LanguageFaculty(config.build_faculty_config()).to(device)
         game = DialogueGame(config, faculty).to(device)
         trainer = AgentTrainer(game, config)
-        resume = cfg_dict.get("resume", None) if args.resume is None else args.resume
         trainer.train(resume=resume)
         return 0
 

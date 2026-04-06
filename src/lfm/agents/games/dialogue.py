@@ -101,6 +101,11 @@ class DialogueGameConfig(LFMBaseConfig):
     # the context transformer (progressive refinement).
     independent_turns: bool = False
 
+    # Disable turn embeddings: each turn gets identical conditioning
+    # (data + context only).  Diversity emerges from context accumulation
+    # and stochastic z-gen noise rather than turn identity.
+    disable_turn_embeddings: bool = False
+
     # Inter-turn diversity: penalize pairwise cosine similarity between
     # turn token representations above a target threshold.  Forces turns
     # to be distinct while allowing shared topic vocabulary.
@@ -419,6 +424,9 @@ class DialogueGame(nn.Module):
             "max_phrases": self.config.max_phrases,
             "z_generator": "diffusion",
             "version": 2,
+            # Full training config for consistent resume (prevents
+            # regime shifts when YAML is edited between restarts).
+            "training_config": self.config.model_dump(),
         }
 
     def load_checkpoint_state(self, ckpt: dict) -> None:
@@ -655,8 +663,9 @@ class DialogueGame(nn.Module):
         """
         # Empirically measured: batch 48 at 25 tok/turn peaked at 3.4GB
         # over a ~185MB static baseline → ~67MB per sample.
-        # At 50 tok/turn this grows to ~130MB.  Use 150MB for safety.
-        bytes_per_sample = 150 * 1024 * 1024
+        # At 50 tok/turn this grows to ~130MB.  Use 80MB — the per-step
+        # empty_cache prevents accumulator growth.
+        bytes_per_sample = 80 * 1024 * 1024
         budget = self.config.phase2_vram_budget_mb * 1024 * 1024
         chunk = max(self.config.phase2_min_chunk, int(budget / bytes_per_sample))
         return min(chunk, batch)
@@ -689,7 +698,7 @@ class DialogueGame(nn.Module):
         independent_loss = torch.tensor(0.0, device=device)
         ce_loss = torch.tensor(0.0, device=device)
         gen = self.gen
-        score_chunk = 16  # micro-batch for encoder/receiver scoring
+        score_chunk = 48  # micro-batch for encoder/receiver scoring
 
         # Process one turn at a time.  Within each turn, micro-batch
         # the encoder passes to bound peak VRAM.
@@ -754,23 +763,61 @@ class DialogueGame(nn.Module):
                     del sr
                 surface_msg_list.append(torch.cat(tok_chunks, dim=0))
 
-        # Inter-turn diversity: penalize pairwise cosine similarity
-        # above target_turn_sim.  Below the target, no penalty —
-        # turns are free to share topic vocabulary.
+        # Hard token overlap: measure actual argmax token n-gram overlap
+        # between turns.  This is what corpus generation produces —
+        # the ground truth for whether turns are actually different.
+        # Non-differentiable; used to dynamically gate the differentiable
+        # diversity loss.
+        # Max pairwise bigram Jaccard across turn pairs, averaged over
+        # batch samples.  Tracks the worst-case overlap — catches even
+        # one pair of identical turns that mean-averaging would dilute.
+        max_overlaps = []
+        eos_id = self.gen.eos_id
+        for b in range(min(turns[0].tokens_cpu.size(0), 8)):
+            pair_max = 0.0
+            for i in range(len(turns)):
+                for j in range(i + 1, len(turns)):
+                    ids_i = [
+                        t.item() for t, m in zip(
+                            turns[i].tokens_cpu[b], turns[i].gen_mask_cpu[b],
+                        ) if m and t.item() != eos_id
+                    ]
+                    ids_j = [
+                        t.item() for t, m in zip(
+                            turns[j].tokens_cpu[b], turns[j].gen_mask_cpu[b],
+                        ) if m and t.item() != eos_id
+                    ]
+                    if len(ids_i) >= 2 and len(ids_j) >= 2:
+                        bg_i = set(zip(ids_i[:-1], ids_i[1:]))
+                        bg_j = set(zip(ids_j[:-1], ids_j[1:]))
+                        jaccard = len(bg_i & bg_j) / max(len(bg_i | bg_j), 1)
+                        pair_max = max(pair_max, jaccard)
+            max_overlaps.append(pair_max)
+        hard_overlap = sum(max_overlaps) / max(len(max_overlaps), 1)
+
+        # Differentiable diversity loss on token embeddings, dynamically
+        # gated by hard token overlap.  If argmax tokens are already
+        # different (low overlap), the loss relaxes.  If they're
+        # identical (high overlap), the loss activates strongly.
         diversity_loss = torch.tensor(0.0, device=device)
         if cfg.turn_diversity_weight > 0 and len(surface_msg_list) >= 2:
-            msgs = torch.stack(surface_msg_list)  # (num_turns, B, dim)
-            msgs_norm = F.normalize(msgs, dim=-1)
-            sim = torch.einsum("ibd,jbd->ijb", msgs_norm, msgs_norm)
-            off_diag = ~torch.eye(len(surface_msg_list), dtype=torch.bool, device=device)
-            excess = (sim[off_diag] - cfg.target_turn_sim).clamp(min=0)
-            diversity_loss = excess.mean()
+            # Scale weight by how much hard overlap exceeds target
+            gate = max(0.0, (hard_overlap - cfg.target_turn_sim) / (1.0 - cfg.target_turn_sim))
+            if gate > 0:
+                msgs = torch.stack(surface_msg_list)
+                msgs_norm = F.normalize(msgs, dim=-1)
+                sim = torch.einsum("ibd,jbd->ijb", msgs_norm, msgs_norm)
+                off_diag = ~torch.eye(
+                    len(surface_msg_list), dtype=torch.bool, device=device,
+                )
+                diversity_loss = gate * sim[off_diag].mean()
 
         total = (progressive_loss
                 + cfg.per_turn_weight * independent_loss
                 + cfg.ce_weight * ce_loss
                 + cfg.turn_diversity_weight * diversity_loss)
-        return total, logits, independent_loss.detach(), ce_loss.detach(), diversity_loss.detach()
+        return (total, logits, independent_loss.detach(), ce_loss.detach(),
+                diversity_loss.detach(), hard_overlap)
 
     def _compute_aux_losses(
         self, turns: list[TurnOutput],
@@ -802,6 +849,7 @@ class DialogueGame(nn.Module):
         surface_loss: Tensor | None = None,
         ce_loss: Tensor | None = None,
         diversity_loss: Tensor | None = None,
+        hard_overlap: float = 0.0,
     ) -> dict[str, Tensor]:
         """Assemble output dict for trainer."""
         cfg = self.config
@@ -837,6 +885,7 @@ class DialogueGame(nn.Module):
             "surface_loss": surface_loss if surface_loss is not None else torch.tensor(0.0),
             "ce_loss": ce_loss if ce_loss is not None else torch.tensor(0.0),
             "turn_sim": diversity_loss.detach() if diversity_loss is not None else torch.tensor(0.0),
+            "hard_overlap": torch.tensor(hard_overlap),
         }
 
     @contextmanager
@@ -897,7 +946,10 @@ class DialogueGame(nn.Module):
 
         for turn_idx in range(cfg.num_turns):
             mon.stage = f"generate_turn{turn_idx}"
-            turn_emb = self.turn_embeddings[turn_idx]
+            if cfg.disable_turn_embeddings:
+                turn_emb = torch.zeros_like(self.turn_embeddings[0])
+            else:
+                turn_emb = self.turn_embeddings[turn_idx]
             if cfg.independent_turns:
                 context = None
             else:
@@ -915,7 +967,7 @@ class DialogueGame(nn.Module):
         # Stage 3: score with decoder offloaded
         mon.stage = "scoring"
         with self._decoder_offloaded():
-            progressive_loss, logits, surface_loss, ce_loss, diversity_loss = (
+            progressive_loss, logits, surface_loss, ce_loss, diversity_loss, hard_overlap = (
                 self._score_progressive(
                     turns, candidates, teacher_probs, target_idx,
                 )
@@ -930,5 +982,5 @@ class DialogueGame(nn.Module):
         return self._build_output(
             loss, logits, target_idx, turns,
             surface_loss=surface_loss, ce_loss=ce_loss,
-            diversity_loss=diversity_loss,
+            diversity_loss=diversity_loss, hard_overlap=hard_overlap,
         )

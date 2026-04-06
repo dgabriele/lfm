@@ -129,6 +129,35 @@ The decoder, trained on human + whale IPA, would learn "whale phonotactics" alon
 
 ---
 
+## 10. Contrastive embedding training — learning to describe differences
+
+**Status:** Planned — subsequent curriculum phase after basic dialogue game
+
+Natural languages don't just describe things — they describe *differences between things*. "This is hotter than that." "Unlike mammals, reptiles are cold-blooded." Contrastive language is how humans communicate distinctions, categorize, and reason comparatively.
+
+The current dialogue game trains on individual embeddings: "describe this input." A subsequent curriculum phase would train on **embedding differences** or **learned contrastive features**: "describe what makes input A different from input B."
+
+### Approach
+
+**Phase 1 (current):** Train the dialogue game on single embeddings. The language learns vocabulary for describing things — the referential foundation.
+
+**Phase 2 (contrastive):** Present the model with pairs of embeddings (A, B) and train it to produce expressions that capture the *difference* A - B, or more generally, a learned contrastive representation. The multi-turn format is natural for this: early turns establish shared context ("both are about economics"), later turns articulate distinctions ("but this one is about monetary policy while that one is about trade").
+
+### Implementation ideas
+
+- **Difference embeddings:** Feed `embed_A - embed_B` (or a learned projection of the pair) as the conditioning input. The decoder must express the contrastive direction in latent space.
+- **Paired discrimination:** Given a target pair (A, B) and distractor pairs, the dialogue must identify not just the individual items but their relationship — topology matching on pair-level similarity.
+- **Multi-target extension:** The existing `min_targets`/`max_targets` config scaffolds this. With 2 targets, the model already conditions on both embeddings via the context transformer's cross-attention. The contrastive phase would add an explicit "describe the difference" objective.
+- **Curriculum:** Start with distant pairs (easy contrasts — "cat vs car"), progress to nearby pairs (hard contrasts — "tabby vs siamese"). The stratified sampling infrastructure already supports this.
+
+### Why this matters
+
+A language that can only describe things in isolation is a labeling system. A language that can describe differences is a *reasoning* system — it can express relations, gradients, hierarchies, and exceptions. For downstream LLM translation, contrastive expressions would enable the LLM to produce comparative interpretations: "This neural activation pattern is similar to X but differs in Y" — the kind of nuanced interpretation that makes the alien language scientifically useful.
+
+This directly extends the multi-scale discrimination already implemented via stratified sampling (hard/medium/easy distractors). The contrastive phase makes the scales explicit in the language itself, not just in the training pressure.
+
+---
+
 ## 10. Diffusion-based iterative token refinement
 
 **Status:** Planned — v2 architecture for scale
