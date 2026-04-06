@@ -127,16 +127,19 @@ src/lfm/
 ### Expression Game (single expression)
 
 - **95.4% accuracy** at 100% hard negatives (16-way, 2048 clusters, 300K corpus)
+- **299,990/300,000 unique** surface expressions (99.997%)
 - 4 phrases per expression, ~50 tokens total with v7 decoder
 - Trained via hidden-state discrimination with topology loss
 
-### Dialogue Game V2 (multi-turn, v7 decoder)
+### Dialogue Game (multi-turn self-play, v7 decoder)
 
-- **92-96% accuracy** at 100% hard negatives (training in progress)
-- 4 turns, ~3 phrases/turn, ~40 tokens/turn (~160 total)
-- Progressive topology matching: KL divergence to embedding cosine similarity
-- Learned turn aggregation weights broke 88% running-mean plateau
-- V7 full constituency decoder produces rich syntactic structure per phrase
+- **98.3% best accuracy** at 100% hard negatives (16-way, 2048 clusters)
+- 4 turns per embedding, 3 phrases per turn, ~60 tokens/turn (~240 total)
+- Observer/Analyst role alternation via simplex-initialized turn embeddings
+- ContextTransformer: cross-attention from turn embedding to data + accumulated context
+- Detached progressive scoring: each turn's z-gen gradient comes only from its own step
+- Cross-turn z diversity: pairwise cosine similarity penalty prevents turn collapse
+- 100% unique documents, 0% identical turns within documents
 
 ## Corpus Output Modes
 

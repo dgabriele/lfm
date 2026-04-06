@@ -13,7 +13,7 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 3. ⚙️ [How It Works](#how-it-works) — three-step pipeline overview
 4. 🗣️ [The Linguistic Decoder](#the-linguistic-decoder) — architecture, pretraining, sample outputs
 5. 🌳 [Expression Generation](#expression-generation) — diffusion-based z-sequence generation through the decoder
-6. 🎯 [Agent Game Results](#agent-game-results) — Referential and expression game validation (direct backprop)
+6. 🎯 [Agent Game Results](#agent-game-results) — Expression and dialogue game validation
 7. 📊 [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
 8. 💾 [Dataset Generation](#dataset-generation) — HDF5 pipeline with constituency augmentation
 9. 📈 [Visualization CLI](#visualization-cli) — t-SNE, clustering, attention, Zipf, and more
@@ -34,7 +34,7 @@ The common critique that LLMs are "not grounded" misidentifies the problem. LLMs
 
 The key mechanism is a **frozen linguistic bottleneck**: a VAE decoder pretrained on typologically diverse languages, then frozen. Downstream systems don't learn a communication protocol from scratch — they learn to project their representations into the decoder's latent space, and the decoder's structure constrains the output to be linguistically well-formed. This is analogous to Universal Grammar in the Chomskyan sense: a fixed structural prior that constrains the space of possible languages, where only the mapping from meaning to form is learned. This avoids the known failure modes of end-to-end emergent communication (anti-Zipfian codes, degenerate protocols, non-compositional signals).
 
-The pipeline is concrete: an input embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for a receiver to identify what was encoded (99.2% peak accuracy, 15.9x above chance in a referential game). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
+The pipeline is concrete: an input embedding is projected into a VAE latent space, decoded through a frozen multilingual transformer into IPA tokens, and the resulting utterance carries enough structure for a receiver to identify what was encoded (98.3% accuracy at 100% hard negatives in a 16-way dialogue game). An LLM can then learn to translate the emergent IPA into English. At every step, the information is empirically grounded and the fidelity is measurable.
 
 ## The Problem
 
@@ -60,7 +60,7 @@ The training path is **self-supervised**: continue training a multilingual found
 
 Crucially, this is translation, not latent space alignment. The source ontology stays intact; the LLM does the interpretive work. And because the LLM learns the alien language *as a language* — not as an encoding to decode — the translation is **bidirectional**. The same model that translates alien IPA → English can generate alien IPA from English. This closes a full communication loop: the system speaks, a human reads the translation, responds in English, the LLM translates back into the emergent language, and the system receives it. Bidirectional dialogue mediated by a shared alien language, with the LLM as interpreter — no paired training data required.
 
-Translation is inherently lossy — but language compensates for that. Unlike a fixed-size code, language can expound: use more words, more phrases, more compositional structure to progressively encapsulate meaning that a single utterance would lose. This is exactly what LFM's expression system exploits. The GRU z-sequence generator produces variable numbers of phrases as needed — with PonderNet halting deciding when enough has been said — to elaborate on complex inputs, trading efficiency for fidelity the same way natural language does.
+Translation is inherently lossy — but language compensates for that. Unlike a fixed-size code, language can expound: use more words, more phrases, more compositional structure to progressively encapsulate meaning that a single utterance would lose. This is exactly what LFM's expression system exploits. The DiffusionZGenerator produces multiple phrases per expression, and the dialogue game extends this to multi-turn paragraphs — 4 sentences per embedding, each elaborating from a different angle — trading efficiency for fidelity the same way natural language does.
 
 ## How It Works
 
@@ -99,19 +99,20 @@ Only the z-generator, message encoder, and receiver learn. The decoder's linguis
 
 ### Step 3: Internal dialogue — paragraph generation
 
-Single expressions can be sufficient for LLM pretraining depending on what is being encoded. Multi-sentence documents provide richer training signal: the LLM can learn discourse patterns, progressive elaboration, and inter-sentence dependencies in addition to vocabulary and phrase structure. The dialogue game generates 4-sentence paragraphs per embedding — a self-dialogue where each sentence elaborates on the same input from a different angle:
+Single expressions can be sufficient for LLM pretraining depending on what is being encoded. Multi-sentence documents provide richer training signal: the LLM can learn discourse patterns, progressive elaboration, and inter-sentence dependencies in addition to vocabulary and phrase structure. The dialogue game generates 4-sentence paragraphs per embedding — a self-dialogue where an Observer and Analyst alternate roles, each sentence elaborating on the same input from a different angle:
 
 1. Each sentence is a separate expression (3 phrases decoded in one AR pass)
 2. A **ContextTransformer** conditions each sentence on the hidden states of previous sentences — progressive elaboration, not repetition
-3. **Progressive topology matching** scores the accumulated paragraph at each sentence: the dialogue so far must match the embedding cosine similarity structure (KL divergence)
-4. Cross-entropy as primary loss drives argmax accuracy; KL shapes the full topology
-5. **Cross-turn z diversity** pushes different sentences into different z-space regions
+3. **Detached progressive scoring**: each turn's z-generator gradient comes only from its own scoring step, preventing earlier turns from being retroactively optimized by later losses
+4. **Progressive topology matching** scores the accumulated paragraph at each sentence: the dialogue so far must match the embedding cosine similarity structure (KL divergence)
+5. Cross-entropy as primary loss drives argmax accuracy; KL shapes the full topology
+6. **Cross-turn z diversity**: pairwise cosine similarity penalty on mean z-vectors pushes different sentences into different z-space regions
 
-The result: 4 complementary sentences per embedding, each capturing a different facet of the input's semantic position. The stochastic z-gen ensures surface form diversity; the context conditioning ensures semantic complementarity.
+The result: 4 complementary sentences per embedding, each capturing a different facet of the input's semantic position. The stochastic z-gen ensures surface form diversity; the context conditioning ensures semantic complementarity. Achieved 98.3% best accuracy at 100% hard negatives (16-way, 2048 clusters).
 
 ### Step 4: Corpus generation and LLM pretraining
 
-The trained dialogue game generates a large corpus of syllable-hyphenated IPA paragraphs:
+The trained dialogue game generates a large corpus of syllable-hyphenated IPA paragraphs. Each document is a 4-sentence self-dialogue (turns T0-T3), with documents separated by blank lines:
 
 ```
 [T0] sə-kav-kos sɛj-sjes-tin-kaaɛ ha-koa-ko
@@ -120,9 +121,9 @@ The trained dialogue game generates a large corpus of syllable-hyphenated IPA pa
 [T3] bu sur-tal ha-pha-net a-wa-jun-zo
 ```
 
-Syllable hyphens expose phonotactic structure to the LLM's BPE tokenizer — each syllable becomes a token, preserving the decoder's learned morphological boundaries. The corpus preserves full IPA fidelity (no lossy romanization).
+Syllable hyphens expose phonotactic structure to the LLM's BPE tokenizer — each syllable becomes a token, preserving the decoder's learned morphological boundaries. The corpus preserves full IPA fidelity (no lossy romanization). The self-dialogue corpus achieves 100% unique documents with 0% identical turns within documents.
 
-A multilingual foundation LLM (Qwen 2.5 0.5B) is then trained on this corpus via self-supervised next-token prediction. The LLM learns the emergent language's distributional structure — vocabulary, morphology, phrase patterns, discourse conventions — the same way it learned every human language. Few-shot translation is expected to emerge via cross-lingual transfer.
+A 900K-document corpus is being generated (each document = 4 turns of 3-phrase expressions). A multilingual foundation LLM (Qwen 2.5 0.5B) is trained on this corpus via self-supervised next-token prediction, with loss falling steadily. The LLM learns the emergent language's distributional structure — vocabulary, morphology, phrase patterns, discourse conventions — the same way it learned every human language. Few-shot translation is expected to emerge via cross-lingual transfer.
 
 ## The Linguistic Decoder
 
@@ -149,7 +150,7 @@ The **PhraseDecoder** has architectural biases for natural language:
 
 The decoder is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay (per-epoch), DIP-VAE covariance regularization, and full resume support.
 
-**v5-leaf-27 (current, leaf-level phrases)**: 4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 typologically diverse languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with word-alignment fallback for Vietnamese. Syllable-aligned BPE tokenization, `max_seq_len=27` (auto-scaled from dataset), 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally.
+**v5-leaf-27 (leaf-level phrases)**: 4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 typologically diverse languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with word-alignment fallback for Vietnamese. Syllable-aligned BPE tokenization, `max_seq_len=27` (auto-scaled from dataset), 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally.
 
 ### Pretraining results
 
@@ -276,8 +277,8 @@ dec:  mækswɛl sɛd hi meɪd fɔɹ fɹɛndz laɪf ɑn ðʌ ʃoʊ wɪtʃ ɪnklud
 
 ```
 src/lfm/
-  expression/           # GRU z-sequence expression generation with PonderNet halting (this section)
-    generator.py        # ExpressionGenerator (GRU z-sequence + PonderNet + continuous z-switching decode)
+  expression/           # Expression dataclass and legacy GRU z-sequence generator
+    generator.py        # ExpressionGenerator (legacy GRU z-sequence + PonderNet)
     encoder.py          # ExpressionEncoder (phrase pooling + composition)
     expression.py       # Expression dataclass
   faculty/              # LanguageFaculty compositor
@@ -309,39 +310,59 @@ Key findings:
 
 ## Agent Game Results
 
-### Expression Game
+### Dialogue Game (current approach)
 
-The expression game trains a z-sequence generator to encode input embeddings as multi-phrase IPA expressions through the frozen decoder. The goal is not just discrimination but **semantic topology preservation** — IPA expressions should mirror the similarity structure of the input embeddings, enabling downstream LLM translation.
+The dialogue game trains a multi-turn self-play system where Observer and Analyst roles produce 4-sentence paragraphs per embedding through the frozen decoder. Each turn is a 3-phrase expression (~40 tokens), and the full dialogue (~160 tokens) must discriminate the input embedding from 15 hard-negative distractors drawn from the same semantic cluster.
 
-**Evolution**: An initial GRU-based autoregressive approach achieved high discrimination accuracy (97%+) but produced only ~1,500 unique surface forms across 10K inputs — the hidden-state gradient highway let the system discriminate without diverse tokens. This led to a diffusion-based architecture that solves the surface diversity problem by construction.
+**Results:**
 
-**Current architecture — DiffusionZGenerator + IPA-to-IPA receiver:**
+| Metric | Value |
+|--------|-------|
+| Best accuracy | 98.3% at 100% hard negatives (16-way, 2048 clusters) |
+| Turns per embedding | 4 |
+| Phrases per expression | 3 |
+| Decoder | Frozen v7 full-constituency (11.6M phrases, val CE=0.0082) |
 
-- **Diffusion z-sequence**: A small transformer denoiser (T=4 flow-matching steps) refines all K z positions simultaneously, conditioned on the input embedding via cross-attention. Unlike the GRU, all phrases see each other during generation, enabling co-adaptation. The noise schedule forces full z-space exploration — no projection collapse possible.
-- **IPA-to-IPA receiver**: Both the sender's expression and the 16 candidate expressions go through a shared `IPAEncoder` (token embedding + self-attention + learned query readout). The receiver compares IPA representations against each other, not against raw embeddings. This directly mirrors the downstream LLM task: distinguish inputs by their IPA surface forms.
-- **Soft topology loss**: Instead of hard 1-of-16 classification (cross-entropy), the loss is KL divergence between the IPA similarity distribution and the input embedding cosine similarity distribution. "The dog ran" should produce IPA closer to "the cat ran" than to "quantum mechanics." The training objective minimizes semantic ambiguity, not just classification error.
+**Architecture:**
+
+- **DiffusionZGenerator** (flow-matching, T=4 steps): Produces K z-vectors per turn, conditioned on the input embedding via cross-attention
+- **ContextTransformer**: Cross-attends to target embeddings and accumulated turn history, enabling progressive elaboration
+- **Detached progressive scoring**: Each turn's z-generator gradient comes only from its own scoring step — earlier turns are not retroactively optimized by later losses
+- **Progressive topology matching**: KL divergence between the accumulated dialogue's similarity structure and the embedding cosine similarity structure, scored at each turn
+- **Cross-turn z diversity**: Pairwise cosine similarity penalty on mean z-vectors prevents turn collapse
+- **Two-phase backprop**: Phase 1 generates tokens via fast KV-cached decode (no_grad); phase 2 re-runs the decoder with gradients flowing through cross-attention back to the denoiser
+- **Trained via hidden-state discrimination** (referential game)
+
+### Expression Game (single expression)
+
+The expression game trains a z-sequence generator to encode input embeddings as single multi-phrase IPA expressions through the frozen decoder. This was the predecessor to the dialogue game and validates that the diffusion z-generator + frozen decoder pipeline produces discriminative, diverse surface forms.
+
+**Results:**
+
+| Metric | Value |
+|--------|-------|
+| Best accuracy | 95.4% at 100% hard negatives (16-way, 2048 clusters, 300K corpus) |
+| Surface diversity | 299,990/300,000 unique expressions (99.997%) |
+| Phrases per expression | 4 |
+| Tokens per expression | ~50 (v7 decoder) |
+
+**Architecture — DiffusionZGenerator + hidden-state receiver:**
+
+- **Diffusion z-sequence**: A small transformer denoiser (T=4 flow-matching steps) refines all K z positions simultaneously, conditioned on the input embedding via cross-attention. All phrases see each other during generation, enabling co-adaptation. The noise schedule forces full z-space exploration — no projection collapse possible.
 - **Two-phase backprop**: Phase 1 generates tokens via fast KV-cached decode (no_grad); phase 2 re-runs the decoder on those tokens with gradients flowing through cross-attention back to the denoiser.
-- **Surface diversity**: 9,994/10,000 unique IPA expressions (99.94%) — up from 1,519 with the GRU approach.
-- **IPA cache**: All 10K embeddings decoded at training start and cached. Candidate IPA looked up per batch (zero decode overhead). Cache refreshed periodically as the denoiser improves.
 
 ```bash
-# Train with diffusion z-generator and IPA-to-IPA receiver
-poetry run lfm agent expression --z-generator diffusion --use-ipa-receiver \
-  --steps 4000 --batch-size 64 --gradient-accumulation-steps 4
+# Train dialogue game (multi-turn self-play, v7 decoder)
+poetry run lfm agent dialogue configs/dialogue_v7_phase1.yaml
 
-# Two-phase training: hidden-state warmup, then IPA receiver
-# Phase 1: learn good z projections
-poetry run lfm agent expression --z-generator diffusion \
-  --hidden-state-weight 1.0 --steps 2000
-# Phase 2: switch to IPA-to-IPA scoring
-poetry run lfm agent expression --z-generator diffusion --use-ipa-receiver \
-  --resume data/expression_game/best.pt --hidden-state-weight 0.0 --steps 4000
+# Resume dialogue game from checkpoint
+poetry run lfm agent dialogue configs/dialogue_v7_phase1.yaml --resume data/dialogue_game_v7/latest.pt
+
+# Train expression game (single expression, YAML config)
+poetry run lfm agent expression configs/expression_leaf_phase1.yaml
 
 # Sample decoded expressions
 poetry run lfm explore expression-sample --checkpoint data/expression_game/best.pt
-
-# Generate IPA-English pairs for LLM translation training
-poetry run lfm translate generate-pairs --expression-checkpoint data/expression_game/best.pt
 ```
 
 ## Dataset Generation
@@ -506,12 +527,18 @@ poetry run lfm agent referential               # train with defaults (batch 256,
 poetry run lfm agent referential --help        # see all options
 ```
 
-**Run the expression game** — multi-phrase generation with GRU z-sequence and PonderNet halting:
+**Run the dialogue game** — multi-turn self-play with frozen v7 decoder:
 
 ```bash
-poetry run lfm agent expression                                    # train with defaults
-poetry run lfm agent expression --steps 2000 --batch-size 256      # custom settings
-poetry run lfm agent expression --lambda-p 0.3 --kl-beta 1.0      # more phrases
+poetry run lfm agent dialogue configs/dialogue_v7_phase1.yaml      # train from scratch
+poetry run lfm agent dialogue configs/dialogue_v7_phase1.yaml \
+  --resume data/dialogue_game_v7/latest.pt                          # resume from checkpoint
+```
+
+**Run the expression game** — single multi-phrase expression via diffusion z-generator:
+
+```bash
+poetry run lfm agent expression configs/expression_leaf_phase1.yaml # train with YAML config
 ```
 
 **Use in your own agent system** —
@@ -565,18 +592,19 @@ A pretrained LM has morphological knowledge handed to it as tokenizer artifacts 
 
 ## Status
 
-**PoC pretraining validated.** The v5-leaf-27 VAE decoder learns a well-structured latent space over 12 typologically diverse languages (4M leaf-level phrase constituents, max_seq_len=27), with structural claims backed by visualization evidence:
+**Dialogue game training and corpus generation in progress.** The v7 full-constituency VAE decoder (11.6M phrases, val CE=0.0082) produces well-formed output from any input. The dialogue game reached 98.3% accuracy at 100% hard negatives (16-way, 2048 clusters) with 4-turn multi-turn self-play. A 900K-document self-dialogue corpus in syllable-hyphenated IPA is being generated, and self-supervised LLM pretraining (Qwen 2.5 0.5B) is underway with loss falling steadily.
+
+Structural claims are backed by visualization evidence:
 
 - Latent space organizes languages typologically (t-SNE, clustering)
 - Multi-scale attention heads function as designed (entropy analysis)
 - Output follows near-perfect Zipfian distribution (corpus 1.004, decoded 1.058), refuting degenerate coding
 - Variable-length encoding: mean 2.5 words (16.5 IPA chars), range 1-4 words -- atomic phrases
 - Adaptive length: input<->output length r=1.000, z_norm<->output_unique r=-0.663
-- Val CE by length: short(<20 BPE)=0.006, med(20-50 BPE)=0.065
 - TTR=1.000, EOS rate=1.00
 - Compositional structure present (power-law probe R-squared)
 
-The referential game demonstrates that the linguistic bottleneck carries discriminative information from real LLM embeddings at 99.2% peak accuracy (15.9x above chance), with ~96% sustained at 100% hard negatives. The expression game extends this to multi-phrase generation via GRU z-sequence with PonderNet halting, achieving 93.8% peak accuracy with ~2.6 phrases of ~6 tokens each (15 tokens total), where the v5-leaf decoder produces phrase-level expressions.
+The expression game validates the diffusion z-generator + frozen decoder pipeline at 95.4% accuracy with 99.997% surface diversity (299,990/300,000 unique expressions). The dialogue game extends this to multi-turn paragraphs, reaching 98.3% accuracy with 4 turns of 3 phrases each.
 
 ### Limitations
 

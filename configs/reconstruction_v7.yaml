@@ -1,0 +1,24 @@
+# Reconstruction training — v7 full constituency decoder
+# Direct embedding recovery through the linguistic bottleneck.
+
+decoder_path: data/models/v7/vae_decoder.pt
+spm_path: data/models/v7/spm.model
+embedding_store_dir: data/embeddings
+output_dir: data/reconstruction_v7
+
+max_phrases: 3
+z_diversity_weight: 0.5
+
+inverse_num_layers: 4
+inverse_num_heads: 8
+
+batch_size: 128
+steps: 5000
+z_gen_lr: 0.0001
+inverse_lr: 0.0003
+warmup_steps: 500
+
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 200
