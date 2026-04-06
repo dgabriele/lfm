@@ -30,6 +30,7 @@ class AgentTrainer:
         self.game = game
         self.config = config
         self.device = torch.device(config.device)
+        self._batch_size = config.batch_size  # mutable for OOM recovery
 
         # Load embedding store
         self.store = EmbeddingStore(config.embedding_store_dir)
@@ -79,17 +80,17 @@ class AgentTrainer:
         else:
             hard_ratio = 1.0
 
-        idx = self._rng.integers(0, self._n, size=cfg.batch_size)
+        idx = self._rng.integers(0, self._n, size=self._batch_size)
         anchor = torch.tensor(
             self._embeddings[idx], dtype=torch.float32,
         ).to(self.device)
 
         dist_indices = np.empty(
-            (cfg.batch_size, cfg.num_distractors), dtype=np.intp,
+            (self._batch_size, cfg.num_distractors), dtype=np.intp,
         )
         medium_ratio = getattr(curriculum, "medium_ratio", 0.0) if curriculum.enabled else 0.0
 
-        for i in range(cfg.batch_size):
+        for i in range(self._batch_size):
             n_hard = int(hard_ratio * cfg.num_distractors)
             n_medium = int(medium_ratio * cfg.num_distractors)
             n_easy = cfg.num_distractors - n_hard - n_medium
@@ -226,12 +227,12 @@ class AgentTrainer:
                 if "out of memory" not in str(e):
                     raise
                 torch.cuda.empty_cache()
-                new_bs = max(4, int(cfg.batch_size * 0.9))
+                new_bs = max(4, int(self._batch_size * 0.9))
                 logger.warning(
                     "OOM at step %d — reducing batch_size %d → %d",
-                    step, cfg.batch_size, new_bs,
+                    step, self._batch_size, new_bs,
                 )
-                cfg.batch_size = new_bs
+                self._batch_size = new_bs
                 self.optimizer.zero_grad()
                 continue
             # Release cached allocator blocks to prevent reserved VRAM
