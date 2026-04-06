@@ -13,7 +13,7 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 3. ⚙️ [How It Works](#how-it-works) — three-step pipeline overview
 4. 🗣️ [The Linguistic Decoder](#the-linguistic-decoder) — architecture, pretraining, sample outputs
 5. 🌳 [Expression Generation](#expression-generation) — diffusion-based z-sequence generation through the decoder
-6. 🎯 [Agent Game Results](#agent-game-results) — Expression and dialogue game validation
+6. 🎯 [Emergent Communication Games](#emergent-communication-games) — Expression and dialogue game validation
 7. 📊 [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
 8. 💾 [Dataset Generation](#dataset-generation) — HDF5 pipeline with constituency augmentation
 9. 📈 [Visualization CLI](#visualization-cli) — t-SNE, clustering, attention, Zipf, and more
@@ -308,7 +308,7 @@ Key findings:
 - **Functional compositionality**: specific z dimensions control specific output properties
 - **Multi-scale attention**: architectural hierarchy confirmed in per-head entropy analysis
 
-## Agent Game Results
+## Emergent Communication Games
 
 ### Dialogue Game (current approach)
 
