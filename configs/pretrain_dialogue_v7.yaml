@@ -1,0 +1,19 @@
+# Self-supervised LLM pretraining on dialogue corpus
+# Syllable-hyphenated IPA paragraphs (4 sentences each)
+
+model_name: Qwen/Qwen2.5-0.5B
+corpus_path: data/translator/dialogue_corpus_v7.txt
+output_dir: data/translator_dialogue_v7
+
+epochs: 3
+lr: 5e-5
+batch_size: 2
+max_len: 512
+gradient_accumulation_steps: 64
+use_amp: true
+warmup_fraction: 0.1
+max_grad_norm: 1.0
+checkpoint_fraction: 0.1
+
+device: cuda
+seed: 42
