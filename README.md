@@ -132,13 +132,13 @@ The core of LFM is a **pretrained multilingual VAE decoder** that produces lingu
 ### Decoder architecture
 
 ```
-z (384-dim latent vector)
+z (256-dim latent vector, 8-token memory)
   → latent_to_decoder projection
   → frozen PhraseDecoder
       |-- RoPE (translation-invariant positions)
       |-- Multi-scale attention heads (3/7/15/full token windows)
       +-- Weight-shared layers (2 unique × 4 applications = recursion)
-  → variable-length IPA tokens (max_seq_len=27)
+  → variable-length IPA tokens (max_seq_len=109)
 ```
 
 The **PhraseDecoder** has architectural biases for natural language:
@@ -148,44 +148,41 @@ The **PhraseDecoder** has architectural biases for natural language:
 
 ### Pretraining
 
-The decoder is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay (per-epoch), DIP-VAE covariance regularization, and full resume support.
+The decoder is trained on IPA-transcribed text from typologically diverse languages (Leipzig Corpora Collection). Training uses cosine LR decay (per-epoch), DIP-VAE covariance regularization, z-variance regularization, and full resume support.
 
-**v5-leaf-27 (leaf-level phrases)**: 4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 typologically diverse languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing with word-alignment fallback for Vietnamese. Syllable-aligned BPE tokenization, `max_seq_len=27` (auto-scaled from dataset), 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Standard VAE on standalone leaf constituent IPA sequences (no constituent_context -- each sample IS a short phrase), so the decoder learns phrase-level EOS naturally.
+**v7 (full constituency, current)**: 11.6M full constituency phrase constituents from 12 typologically diverse languages (eng, deu, por, rus, tur, fin, hun, kor, vie, ind, ara, hin), extracted via dep-to-constituency parsing. Syllable-aligned BPE tokenization (8000 vocab), `max_seq_len=109` (auto-scaled from dataset), 8-token z memory (multi-token cross-attention), latent_dim=256, decoder_hidden_dim=512, 8-head multi-scale attention [3,3,7,7,15,15,full,full], weight-shared layers (2 unique x 4). Full constituency trees produce richer, longer phrases with syntactic depth — the decoder learns clause-level structure, not just atomic phrase boundaries.
 
-### Pretraining results
+**v5-leaf-27 (leaf-level phrases)**: 4M leaf-level IPA phrase constituents, `max_seq_len=27`. Faster iteration and shorter expressions, but limited to atomic phrases (NP, VP, PP, etc.) without syntactic embedding.
 
-4M leaf-level IPA phrase constituents (NP, VP, PP, ADJP, ADVP, S, SBAR) from 12 languages, syllable-aligned BPE, max_seq_len=27, 8-token z memory (latent_dim=256, lr=0.0005):
+### Pretraining results (v7)
+
+11.6M full constituency IPA phrases from 12 languages, syllable-aligned BPE, max_seq_len=109, 8-token z memory (latent_dim=256, lr=0.0005, 3 epochs):
 
 | Metric | Value |
 |--------|-------|
-| Val CE (short, <20 BPE) | **0.006** |
-| Val CE (medium, 20-50 BPE) | **0.065** |
-| Val CE (overall) | **0.0071** |
-| Variable-length output | mean 2.5 words (16.5 IPA chars), range 1-4 words |
-| Zipf exponent | corpus 1.004, decoded 1.058 (near-perfect Zipf law) |
-| Adaptiveness (input<->output length) | r=1.000 |
-| Adaptiveness (z_norm<->output_unique) | r=-0.663 |
-| TTR | 1.000 (every word unique within a phrase) |
+| Val CE (short, <20 BPE) | **0.001** |
+| Val CE (medium, 20-50 BPE) | **0.005** |
+| Val CE (long, >50 BPE) | **0.038** |
+| Val CE (overall) | **0.0082** |
+| Train accuracy | 99.0% |
+| Variable-length output | mean 11.4 words, range 6-18 words |
+| Surface diversity | 100% unique (64/64 random z) |
+| TTR | 0.992 |
 | EOS rate | 1.00 (always produces well-formed EOS) |
 
 <p align="center">
-  <img src="docs/static/images/clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
-  <img src="docs/static/images/tsne_by_language.png" width="48%" alt="t-SNE of latent space colored by language" />
+  <img src="docs/static/images/v7_clustering_dendrogram.png" width="48%" alt="Hierarchical clustering of per-language mean latent vectors" />
+  <img src="docs/static/images/v7_tsne_by_language.png" width="48%" alt="t-SNE of latent space colored by language" />
 </p>
 <p align="center"><em>Left: hierarchical clustering recovers linguistically sensible language groupings. Right: t-SNE by language — 12 distinct clusters with typologically sensible overlap zones. Full analysis in <a href="docs/structural-analysis.md">docs/structural-analysis.md</a>.</em></p>
 
-### Reconstruction
-
-The v5-leaf-27 decoder achieves near-perfect reconstruction on leaf phrases (val CE=0.006 for <20 BPE tokens, val CE=0.065 for 20-50 BPE tokens). Leaf-only training means the decoder specializes in atomic phrase production, and the expression game composes them.
-
 ### Cross-typological Interpolation
 
-The latent space supports smooth interpolation between typologically distant languages. Pairs are auto-selected by maximum z-distance across language family boundaries:
+The latent space supports smooth interpolation between typologically distant languages. Decoded IPA transitions smoothly through intermediate typological regions:
 
 <p align="center">
-  <img src="docs/static/images/interpolation_pca_trajectories.png" width="60%" alt="Interpolation trajectories in PCA space" />
+  <img src="docs/static/images/v7_interpolation_pca_trajectories.png" width="60%" alt="Interpolation trajectories in PCA space" />
 </p>
-<p align="center"><em>Korean→Vietnamese (Koreanic agglutinative → Austroasiatic isolating) and Arabic→Portuguese (Afro-Asiatic introflexive → Indo-European fusional). Decoded IPA transitions smoothly through intermediate typological regions.</em></p>
 
 ### Perturbation
 
