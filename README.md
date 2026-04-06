@@ -99,7 +99,7 @@ Only the z-generator, message encoder, and receiver learn. The decoder's linguis
 
 ### Step 3: Internal dialogue — paragraph generation
 
-Single expressions are sufficient for LLM pretraining — self-supervised loss reached 3.7 on a single-expression corpus (~40 PPL, still dropping). But multi-sentence documents provide richer training signal: the LLM can learn discourse patterns, progressive elaboration, and inter-sentence dependencies in addition to vocabulary and phrase structure. The dialogue game generates 4-sentence paragraphs per embedding — a self-dialogue where each sentence elaborates on the same input from a different angle:
+Single expressions can be sufficient for LLM pretraining depending on what is being encoded. Multi-sentence documents provide richer training signal: the LLM can learn discourse patterns, progressive elaboration, and inter-sentence dependencies in addition to vocabulary and phrase structure. The dialogue game generates 4-sentence paragraphs per embedding — a self-dialogue where each sentence elaborates on the same input from a different angle:
 
 1. Each sentence is a separate expression (3 phrases decoded in one AR pass)
 2. A **ContextTransformer** conditions each sentence on the hidden states of previous sentences — progressive elaboration, not repetition
