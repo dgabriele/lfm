@@ -99,7 +99,7 @@ Only the z-generator, message encoder, and receiver learn. The decoder's linguis
 
 ### Step 3: Internal dialogue — paragraph generation
 
-Single expressions can be sufficient for LLM pretraining depending on what is being encoded. Multi-sentence documents provide richer training signal: the LLM can learn discourse patterns, progressive elaboration, and inter-sentence dependencies in addition to vocabulary and phrase structure. The dialogue game generates 4-sentence paragraphs per embedding — a self-dialogue where an Observer and Analyst alternate roles, each sentence elaborating on the same input from a different angle:
+Single expressions can be sufficient for LLM pretraining depending on what is being encoded. Multi-sentence documents provide richer training signal: the LLM can learn discourse patterns, progressive elaboration, and inter-sentence dependencies in addition to vocabulary and phrase structure. The dialogue game generates 4-sentence paragraphs per embedding — a self-dialogue where each turn uses a distinct learned position embedding (simplex-initialized for maximum distinguishability), elaborating on the same input from a different angle:
 
 1. Each sentence is a separate expression (3 phrases decoded in one AR pass)
 2. A **ContextTransformer** conditions each sentence on the hidden states of previous sentences — progressive elaboration, not repetition
@@ -312,7 +312,7 @@ Key findings:
 
 ### Dialogue Game (current approach)
 
-The dialogue game trains a multi-turn self-play system where Observer and Analyst roles produce 4-sentence paragraphs per embedding through the frozen decoder. Each turn is a 3-phrase expression (~40 tokens), and the full dialogue (~160 tokens) must discriminate the input embedding from 15 hard-negative distractors drawn from the same semantic cluster.
+The dialogue game trains a multi-turn self-play system that produces 4-sentence paragraphs per embedding through the frozen decoder. Each turn uses a distinct learned turn-position embedding (simplex-initialized, maximally equidistant) and is a 3-phrase expression (~40 tokens). The full dialogue (~160 tokens) must discriminate the input embedding from 15 hard-negative distractors drawn from the same semantic cluster.
 
 **Results:**
 

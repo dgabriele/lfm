@@ -1,8 +1,10 @@
-"""Dialogue expression game V2 — multi-turn self-play with bounded VRAM.
+"""Dialogue expression game — multi-turn self-play with bounded VRAM.
 
-A single agent with two roles generates multi-turn conversations about
-input data.  Each turn is conditioned on the original data embedding AND
-fixed-size summaries of all previous turns via a context transformer.
+A single agent generates multi-turn self-dialogue about input data.
+Each turn uses a distinct learned turn-position embedding (simplex-
+initialized for maximum distinguishability) and is conditioned on the
+original data embedding AND fixed-size summaries of all previous turns
+via a context transformer.
 
 Scoring uses progressive topology matching: at each turn, the accumulated
 dialogue message must match the embedding cosine similarity structure
