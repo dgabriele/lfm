@@ -11,7 +11,7 @@ LFM encodes arbitrary continuous representations — agent embeddings, protein f
 1. 🌐 [Vision](#vision) — why encode structured data as natural language
 2. 🔬 [The Problem](#the-problem) — limitations of existing encoding approaches
 3. ⚙️ [How It Works](#how-it-works) — three-step pipeline overview
-4. 🗣️ [The Linguistic Decoder](#the-linguistic-decoder) — architecture, pretraining, sample outputs
+4. 🗣️ [The Phrase Decoder](#the-phrase-decoder) — architecture, pretraining, sample outputs
 5. 🌳 [Expression Generation](#expression-generation) — diffusion-based z-sequence generation through the decoder
 6. 🎯 [Emergent Communication Games](#emergent-communication-games) — Expression and dialogue game validation
 7. 📊 [Structural Analysis](#structural-analysis) — latent space typology and compositionality metrics
@@ -56,7 +56,7 @@ The emergent language that LFM produces is not human language — but it is *lan
 
 Because the output is in IPA — a universal phonetic representation — and because the decoder was pretrained on 12 typologically diverse human languages, the emergent language inherits the universal structural patterns that all human languages share: morphological regularity, phonotactic constraints, compositional hierarchy. A multilingual foundation LLM already has deep representations of these patterns from training on 100+ human languages. The alien language is language 101 — the LLM's existing cross-lingual transfer machinery should recognize its structure without supervised translation pairs.
 
-The training path is **self-supervised**: continue training a multilingual foundation model on a corpus of alien IPA text. No paired translations. The LLM learns the distributional structure of the alien language the same way it learned every other language — from corpus statistics. Because the alien language's compositional patterns activate the same internal features that human languages activate (they were forged by the same linguistic decoder), zero-shot or few-shot translation emerges naturally. Prompt with alien IPA, ask for English, and the LLM's cross-lingual transfer produces a translation — the same way multilingual LLMs translate between language pairs they were never explicitly trained on.
+The training path is **self-supervised**: continue training a multilingual foundation model on a corpus of alien IPA text. No paired translations. The LLM learns the distributional structure of the alien language the same way it learned every other language — from corpus statistics. Because the alien language's compositional patterns activate the same internal features that human languages activate (they were forged by the same phrase decoder), zero-shot or few-shot translation emerges naturally. Prompt with alien IPA, ask for English, and the LLM's cross-lingual transfer produces a translation — the same way multilingual LLMs translate between language pairs they were never explicitly trained on.
 
 Crucially, this is translation, not latent space alignment. The source ontology stays intact; the LLM does the interpretive work. And because the LLM learns the alien language *as a language* — not as an encoding to decode — the translation is **bidirectional**. The same model that translates alien IPA → English can generate alien IPA from English. This closes a full communication loop: the system speaks, a human reads the translation, responds in English, the LLM translates back into the emergent language, and the system receives it. Bidirectional dialogue mediated by a shared alien language, with the LLM as interpreter — no paired training data required.
 
@@ -125,7 +125,7 @@ Syllable hyphens expose phonotactic structure to the LLM's BPE tokenizer — eac
 
 A 900K-document corpus is being generated (each document = 4 turns of 3-phrase expressions). A multilingual foundation LLM (Qwen 2.5 0.5B) is trained on this corpus via self-supervised next-token prediction, with loss falling steadily. The LLM learns the emergent language's distributional structure — vocabulary, morphology, phrase patterns, discourse conventions — the same way it learned every human language. Few-shot translation is expected to emerge via cross-lingual transfer.
 
-## The Linguistic Decoder
+## The Phrase Decoder
 
 The core of LFM is a **pretrained multilingual VAE decoder** that produces linguistically structured IPA from a latent vector. After pretraining, it is frozen and becomes a fixed linguistic bottleneck for downstream use.
 
@@ -282,7 +282,7 @@ src/lfm/
     encoder.py          # ExpressionEncoder (phrase pooling + composition)
     expression.py       # Expression dataclass
   faculty/              # LanguageFaculty compositor
-  generator/            # VAE generator, linguistic decoder, pretraining
+  generator/            # VAE generator, phrase decoder, pretraining
     layers.py           # PhraseDecoder (RoPE + multi-scale attention)
     multilingual_vae.py # MultilingualVAEGenerator
     pretrain.py         # Full pretraining pipeline
