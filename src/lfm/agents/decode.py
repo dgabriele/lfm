@@ -98,9 +98,8 @@ def _prepare_multiphrase_rerun(
 
     weighted_z = z_weights.unsqueeze(-1) * z_sequence
     z_flat = weighted_z.reshape(batch * max_phr, latent_dim)
-    z_dec = _calibrate_or_quantize(gen, z_flat)
 
-    all_memory = gen.latent_to_decoder(z_dec).reshape(
+    all_memory = gen.latent_to_decoder(z_flat).reshape(
         batch, max_phr * num_mem, -1,
     )
 
@@ -346,8 +345,9 @@ class ExpressionDecoder:
         num_memory_tokens = gen._num_memory_tokens
         hidden_dim = gen.config.decoder_hidden_dim
 
-        z_flat = _calibrate_or_quantize(gen, weighted_z.reshape(batch * num_phrases, -1))
-        memories = gen.latent_to_decoder(z_flat).reshape(
+        memories = gen.latent_to_decoder(
+            weighted_z.reshape(batch * num_phrases, -1),
+        ).reshape(
             batch, num_phrases, num_memory_tokens, hidden_dim,
         )
 

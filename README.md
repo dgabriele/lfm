@@ -89,22 +89,40 @@ Training uses cosine LR decay, DIP-VAE covariance regularization (off-diagonal p
 
 After pretraining, the decoder is **frozen**. It becomes a fixed linguistic bottleneck.
 
-### Step 2: Expression generation
+### Step 2: Expression game — learning to express
 
-The frozen decoder is wrapped by an `ExpressionGenerator` that learns to produce multi-phrase expressions via a GRU z-sequence with PonderNet halting. During training:
+A **DiffusionZGenerator** (flow-matching denoiser, T=4 reverse steps) learns to produce K z-vectors from an input embedding. All K positions see each other via self-attention during refinement, enabling co-adaptation. Each z-vector is decoded through the frozen decoder as one phrase until EOS, with the KV cache persisting across phrase boundaries for coarticulation. The result is a multi-phrase expression — a "sentence" in the emergent language.
 
-1. An input embedding (e.g., 384-dim from any encoder) enters the expression generator
-2. **z_0** is a direct projection of the input (discriminative from step 0)
-3. A **GRU** autoregressively generates subsequent z vectors (z_1..z_K), conditioned on prior phrases
-4. **PonderNet halting** decides when to stop: a per-step halt probability regularized toward a geometric prior p(k) = lambda(1-lambda)^{k-1}, preventing phrase count explosion without manual tuning
-5. Each z is **decoded through the frozen decoder** until EOS, with the KV cache persisting across phrases for coarticulation
-6. An `ExpressionEncoder` composes the decoded phrases into a fixed-size message vector
+Training uses a referential game: the expression must discriminate the input embedding from 15 distractors drawn from the same semantic cluster (hard negatives). The loss is cross-entropy on the hidden states, scored through a learned message encoder and bilinear receiver. A z-diversity loss (cosine similarity penalty between z-vectors) prevents phrase collapse.
 
-Only the expression generator and encoder learn. The decoder's linguistic structure is preserved. This approach replaces the earlier REINFORCE tree topology with a fully differentiable GRU + PonderNet architecture.
+Only the z-generator, message encoder, and receiver learn. The decoder's linguistic structure is preserved.
 
-### Step 3: Variable-length, variable-structure messages
+### Step 3: Internal dialogue — paragraph generation
 
-Expression complexity scales with input complexity. The GRU can produce more phrases to elaborate on complex inputs, with PonderNet halting deciding when enough has been said. Short, simple inputs produce fewer phrases with brief output. With the v5-leaf decoder, each phrase is an atomic unit (mean 2.5 words), and the expression game composes ~2.6 such phrases into multi-phrase utterances (~15 tokens total). This is the same mechanism natural language uses: say more when there's more to say.
+For downstream LLM training, single expressions are insufficient — the LLM needs multi-sentence documents with discourse structure. The dialogue game generates 4-sentence paragraphs per embedding — an internal dialogue where each sentence elaborates on the same input from a different angle:
+
+1. Each sentence is a separate expression (3 phrases decoded in one AR pass)
+2. A **ContextTransformer** conditions each sentence on the hidden states of previous sentences — progressive elaboration, not repetition
+3. **Progressive topology matching** scores the accumulated paragraph at each sentence: the dialogue so far must match the embedding cosine similarity structure (KL divergence)
+4. Cross-entropy as primary loss drives argmax accuracy; KL shapes the full topology
+5. **Cross-turn z diversity** pushes different sentences into different z-space regions
+
+The result: 4 complementary sentences per embedding, each capturing a different facet of the input's semantic position. The stochastic z-gen ensures surface form diversity; the context conditioning ensures semantic complementarity.
+
+### Step 4: Corpus generation and LLM pretraining
+
+The trained dialogue game generates a large corpus of syllable-hyphenated IPA paragraphs:
+
+```
+[T0] sə-kav-kos sɛj-sjes-tin-kaaɛ ha-koa-ko
+[T1] pa-ria-vse jɪɹ-zŋa-koem-ʕla me-na
+[T2] ma-la-tu-ni-thun-ta-i-thu-lun
+[T3] bu sur-tal ha-pha-net a-wa-jun-zo
+```
+
+Syllable hyphens expose phonotactic structure to the LLM's BPE tokenizer — each syllable becomes a token, preserving the decoder's learned morphological boundaries. The corpus preserves full IPA fidelity (no lossy romanization).
+
+A multilingual foundation LLM (Qwen 2.5 0.5B) is then trained on this corpus via self-supervised next-token prediction. The LLM learns the emergent language's distributional structure — vocabulary, morphology, phrase patterns, discourse conventions — the same way it learned every human language. Few-shot translation is expected to emerge via cross-lingual transfer.
 
 ## The Linguistic Decoder
 

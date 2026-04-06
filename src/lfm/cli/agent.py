@@ -401,6 +401,124 @@ class DialogueCommand(CLICommand):
         return 0
 
 
+class MultiViewCommand(CLICommand):
+    """Train the multi-view game — multiple complementary views per embedding."""
+
+    @property
+    def name(self) -> str:
+        return "multiview"
+
+    @property
+    def help(self) -> str:
+        return "Train multi-view game: N independent expressions per embedding"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("config", nargs="?", default=None)
+        parser.add_argument("--resume", default=None)
+        parser.add_argument("--steps", type=int, default=None)
+        parser.add_argument("--batch-size", type=int, default=None)
+        parser.add_argument("--device", default=None)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
+        from lfm.agents.games.multiview import MultiViewGame, MultiViewGameConfig
+        from lfm.agents.trainer import AgentTrainer
+        from lfm.faculty.model import LanguageFaculty
+
+        cfg_dict: dict = {}
+        if args.config is not None:
+            with open(args.config) as f:
+                cfg_dict = yaml.safe_load(f) or {}
+
+        # Handle curriculum
+        curriculum_kwargs = {}
+        for ck in ("enabled", "warmup_steps", "start_hard_ratio",
+                    "end_hard_ratio", "medium_ratio"):
+            if ck in cfg_dict:
+                from lfm.agents.config import CurriculumConfig
+                curriculum_kwargs[ck] = cfg_dict.pop(ck)
+        if "no_curriculum" in cfg_dict:
+            curriculum_kwargs["enabled"] = not cfg_dict.pop("no_curriculum")
+        if curriculum_kwargs:
+            from lfm.agents.config import CurriculumConfig
+            cfg_dict["curriculum"] = CurriculumConfig(**curriculum_kwargs)
+
+        for key in ("steps", "batch_size", "device"):
+            val = getattr(args, key, None)
+            if val is not None:
+                cfg_dict[key] = val
+
+        import torch
+        config = MultiViewGameConfig(**cfg_dict)
+        device = torch.device(config.device)
+        faculty = LanguageFaculty(config.build_faculty_config()).to(device)
+        game = MultiViewGame(config, faculty).to(device)
+        trainer = AgentTrainer(game, config)
+        trainer.train(resume=args.resume)
+        return 0
+
+
+class DocumentCommand(CLICommand):
+    """Train the document game — multi-phrase expression generation."""
+
+    @property
+    def name(self) -> str:
+        return "document"
+
+    @property
+    def help(self) -> str:
+        return "Train document game: multi-phrase expressions through frozen decoder"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("config", nargs="?", default=None,
+                            help="YAML config file")
+        parser.add_argument("--resume", default=None)
+        parser.add_argument("--steps", type=int, default=None)
+        parser.add_argument("--batch-size", type=int, default=None)
+        parser.add_argument("--device", default=None)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
+        from lfm.agents.games.document import DocumentGame, DocumentGameConfig
+        from lfm.agents.trainer import AgentTrainer
+        from lfm.faculty.model import LanguageFaculty
+
+        cfg_dict: dict = {}
+        if args.config is not None:
+            with open(args.config) as f:
+                cfg_dict = yaml.safe_load(f) or {}
+
+        # Handle curriculum from YAML
+        curriculum_kwargs = {}
+        for ck in ("enabled", "warmup_steps", "start_hard_ratio",
+                    "end_hard_ratio", "medium_ratio"):
+            if ck in cfg_dict:
+                from lfm.agents.config import CurriculumConfig
+                curriculum_kwargs[ck] = cfg_dict.pop(ck)
+        if "no_curriculum" in cfg_dict:
+            curriculum_kwargs["enabled"] = not cfg_dict.pop("no_curriculum")
+        if curriculum_kwargs:
+            from lfm.agents.config import CurriculumConfig
+            cfg_dict["curriculum"] = CurriculumConfig(**curriculum_kwargs)
+
+        # CLI overrides
+        for key in ("steps", "batch_size", "device"):
+            val = getattr(args, key, None)
+            if val is not None:
+                cfg_dict[key] = val
+
+        import torch
+        config = DocumentGameConfig(**cfg_dict)
+        device = torch.device(config.device)
+        faculty = LanguageFaculty(config.build_faculty_config()).to(device)
+        game = DocumentGame(config, faculty).to(device)
+        trainer = AgentTrainer(game, config)
+        trainer.train(resume=args.resume)
+        return 0
+
+
 def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
     """Register the ``lfm agent`` subcommand group."""
     agent_parser = parent_subparsers.add_parser(
@@ -417,7 +535,9 @@ def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
     commands = [
         ReferentialCommand(),
         ExpressionCommand(),
+        MultiViewCommand(),
         DialogueCommand(),
+        DocumentCommand(),
     ]
 
     for cmd in commands:

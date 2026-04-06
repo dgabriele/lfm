@@ -1,0 +1,45 @@
+# Multi-view game — v7 full constituency decoder
+# 4 independent views × 3 phrases each = 12 phrases per document.
+# Stochastic diffusion z-gen guarantees diverse views.
+
+decoder_path: data/models/v7/vae_decoder.pt
+spm_path: data/models/v7/spm.model
+output_dir: data/multiview_game_v7
+embedding_store_dir: data/embeddings
+
+# Views
+num_views: 4
+
+# Diffusion z-generator (per view)
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_phrases: 3
+variable_phrases: false
+target_phrases: 3.0
+length_weight: 0.0
+z_diversity_weight: 0.0
+
+# Loss
+ce_weight: 0.1
+
+# VRAM
+phase2_vram_budget_mb: 1500
+phase2_min_chunk: 4
+
+# Training
+batch_size: 80
+gradient_accumulation_steps: 1
+steps: 2000
+gru_lr: 0.0003
+receiver_lr: 0.001
+num_distractors: 15
+
+# 100% hard negatives
+no_curriculum: true
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100

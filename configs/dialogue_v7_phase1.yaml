@@ -1,6 +1,5 @@
 # Dialogue game — v7 full constituency decoder
-# Longer, richer phrases → fewer needed per turn.
-# Progressive topology matching with bounded VRAM.
+# Fixed LRs + no calibration bug.
 
 decoder_path: data/models/v7/vae_decoder.pt
 spm_path: data/models/v7/spm.model
@@ -16,36 +15,30 @@ context_heads: 4
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_phrases: 4
+max_phrases: 3
 variable_phrases: true
-target_phrases: 3.0
+target_phrases: 2.0
 length_weight: 0.5
 z_diversity_weight: 0.3
+
+# Loss
 per_turn_weight: 0.0
 ce_weight: 0.1
 independent_turns: false
-disable_turn_embeddings: true
-turn_diversity_weight: 0.1
-target_turn_sim: 0.3
 
 # Phase 2 VRAM management
 phase2_vram_budget_mb: 1500
 phase2_min_chunk: 4
 
-# Training
+# Training — correct LRs from expression game
 batch_size: 128
 gradient_accumulation_steps: 1
-steps: 2000
-gru_lr: 0.0003
-receiver_lr: 0.001
+steps: 4000
+gru_lr: 0.00005
+receiver_lr: 0.0003
 num_distractors: 15
 min_targets: 1
 max_targets: 1
-
-# Stratified curriculum: ramp hard to 50%, keep 30% medium + 20% easy
-# Hard = same cluster, Medium = different cluster, Easy = random
-end_hard_ratio: 0.5
-medium_ratio: 0.3
 
 # Runtime
 device: cuda

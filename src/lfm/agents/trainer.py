@@ -206,20 +206,34 @@ class AgentTrainer:
                 all_embs = torch.tensor(self._embeddings, dtype=torch.float32).to(self.device)
                 game.build_ipa_cache(all_embs, batch_size=256)
 
-            # Accumulate gradients over multiple micro-batches
-            self.optimizer.zero_grad()
-            acc_sum = 0.0
-            for micro in range(accum):
-                anchor, distractors, hard_ratio, cand_idx = self._sample_batch(step)
-                out = game(
-                    anchor, distractors, step=step,
-                    candidate_indices=cand_idx.to(self.device) if use_ipa else None,
+            # Full step wrapped in OOM recovery.  On OOM, reduce batch
+            # size by 10%, clear VRAM, and retry the step.
+            try:
+                self.optimizer.zero_grad()
+                acc_sum = 0.0
+                for micro in range(accum):
+                    anchor, distractors, hard_ratio, cand_idx = self._sample_batch(step)
+                    out = game(
+                        anchor, distractors, step=step,
+                        candidate_indices=cand_idx.to(self.device) if use_ipa else None,
+                    )
+                    loss = out["loss"] / accum
+                    loss.backward()
+                    acc_sum += out["accuracy"].item()
+                nn.utils.clip_grad_norm_(self._all_params, cfg.max_grad_norm)
+                self.optimizer.step()
+            except RuntimeError as e:
+                if "out of memory" not in str(e):
+                    raise
+                torch.cuda.empty_cache()
+                new_bs = max(4, int(cfg.batch_size * 0.9))
+                logger.warning(
+                    "OOM at step %d — reducing batch_size %d → %d",
+                    step, cfg.batch_size, new_bs,
                 )
-                loss = out["loss"] / accum
-                loss.backward()
-                acc_sum += out["accuracy"].item()
-            nn.utils.clip_grad_norm_(self._all_params, cfg.max_grad_norm)
-            self.optimizer.step()
+                cfg.batch_size = new_bs
+                self.optimizer.zero_grad()
+                continue
             # Release cached allocator blocks to prevent reserved VRAM
             # from growing unboundedly over long training runs.
             if torch.cuda.is_available():

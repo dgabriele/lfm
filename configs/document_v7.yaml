@@ -1,0 +1,15 @@
+decoder_path: data/models/v7/vae_decoder.pt
+spm_path: data/models/v7/spm.model
+output_dir: data/document_game_v7
+embedding_store_dir: data/embeddings
+max_phrases: 6
+z_diversity_weight: 0.5
+batch_size: 128
+steps: 2000
+gru_lr: 0.0001
+receiver_lr: 0.0003
+num_distractors: 15
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100
