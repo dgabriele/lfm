@@ -139,14 +139,28 @@ class JobManager:
         self._save_state()
         logger.info("Terminated %s", job.instance.id)
 
-    def wait(self, job: Job, poll_interval: float = 60) -> str:
+    def wait(
+        self,
+        job: Job,
+        poll_interval: float = 60,
+        sync_interval: int = 10,
+    ) -> str:
         """Block until the job completes or max_runtime exceeded.
+
+        Downloads checkpoints periodically during training so you
+        have a local backup even if the instance dies.
+
+        Args:
+            job: Job to monitor.
+            poll_interval: Seconds between status checks.
+            sync_interval: Download checkpoints every N polls.
 
         Returns:
             Final status ("completed" or "timeout").
         """
         cfg = self.config
         max_seconds = cfg.max_runtime_hours * 3600
+        polls = 0
 
         while True:
             elapsed = time.time() - job.started_at
@@ -155,6 +169,7 @@ class JobManager:
                     "Job %s exceeded max runtime (%.1f hrs), terminating.",
                     job.id, cfg.max_runtime_hours,
                 )
+                self.download(job)
                 if cfg.auto_terminate:
                     self.terminate(job)
                 return "timeout"
@@ -162,8 +177,8 @@ class JobManager:
             s = self.status(job)
             if s != "running":
                 logger.info("Job %s finished.", job.id)
+                self.download(job)
                 if cfg.auto_terminate:
-                    self.download(job)
                     self.terminate(job)
                 return s
 
@@ -176,6 +191,19 @@ class JobManager:
                     logger.info("[%s] %s", job.id[:8], tail.strip())
             except Exception:
                 pass
+
+            # Periodic checkpoint sync
+            polls += 1
+            if polls % sync_interval == 0:
+                try:
+                    files = self.download(job)
+                    if files:
+                        logger.info(
+                            "Synced %d checkpoint files (%.0f min elapsed)",
+                            len(files), elapsed / 60,
+                        )
+                except Exception as e:
+                    logger.debug("Checkpoint sync failed: %s", e)
 
             time.sleep(poll_interval)
 
