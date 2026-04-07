@@ -45,7 +45,9 @@ class LambdaLabsProvider(CloudProvider):
         r = requests.post(
             f"{API_BASE}{path}", headers=self._headers, json=data,
         )
-        r.raise_for_status()
+        if not r.ok:
+            logger.error("API %s %s → %d: %s", "POST", path, r.status_code, r.text)
+            r.raise_for_status()
         return r.json()
 
     def _delete(self, path: str, data: dict | None = None) -> dict:

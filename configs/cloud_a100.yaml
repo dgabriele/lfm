@@ -5,13 +5,13 @@ cloud:
   provider: lambda_labs
   instance_type: gpu_1x_a100_sxm4
   region: us-west-1
-  ssh_key_name: lfm-key
+  ssh_key_name: Daniel Home Desktop
   command: "lfm translate pretrain"
   auto_terminate: true
   max_runtime_hours: 24
 
   upload_data:
-    - data/translator/dialogue_corpus_v7.txt
+    - data/translator/dialogue_corpus_v7_tagged.txt
 
   remote_workdir: /home/ubuntu/lfm
   remote_output_dir: /home/ubuntu/lfm/data/translator_dialogue_v7
