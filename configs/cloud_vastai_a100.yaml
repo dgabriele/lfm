@@ -1,0 +1,22 @@
+# Cloud deployment — Vast.ai A100-80GB
+# No minimum deposit, pay-as-you-go (~$0.80-1.50/hr)
+#
+# Usage:
+#   export VAST_API_KEY=your_key
+#   lfm cloud launch configs/pretrain_dialogue_v7.yaml \
+#     --cloud-config configs/cloud_vastai_a100.yaml
+
+cloud:
+  provider: vastai
+  instance_type: A100_80GB
+  ssh_user: root
+  command: "lfm translate pretrain"
+  auto_terminate: true
+  max_runtime_hours: 24
+
+  upload_data:
+    - data/translator/dialogue_corpus_v7_tagged.txt
+
+  remote_workdir: /workspace/lfm
+  remote_output_dir: /workspace/lfm/data/translator_dialogue_v7
+  local_download_dir: data/cloud_results

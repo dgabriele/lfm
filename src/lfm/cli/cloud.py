@@ -16,6 +16,10 @@ def _get_provider(args):
         from lfm.cloud.providers.runpod import RunPodProvider
         return RunPodProvider(api_key=api_key)
 
+    if provider_name == "vastai":
+        from lfm.cloud.providers.vastai import VastAIProvider
+        return VastAIProvider(api_key=api_key)
+
     from lfm.cloud.providers.lambda_labs import LambdaLabsProvider
     return LambdaLabsProvider(api_key=api_key)
 
@@ -61,7 +65,7 @@ class LaunchCommand(CLICommand):
         parser.add_argument("--cloud-config", default=None,
                             help="Cloud deployment YAML (or embed under 'cloud:' key)")
         parser.add_argument("--provider", default=None,
-                            choices=["lambda_labs", "runpod"],
+                            choices=["lambda_labs", "runpod", "vastai"],
                             help="Cloud provider (default: lambda_labs)")
         parser.add_argument("--instance-type", default=None)
         parser.add_argument("--region", default=None)
@@ -103,7 +107,7 @@ class StatusCommand(CLICommand):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--provider", default=None,
-                            choices=["lambda_labs", "runpod"])
+                            choices=["lambda_labs", "runpod", "vastai"])
         parser.add_argument("--api-key", default=None)
 
     def execute(self, args: argparse.Namespace) -> int:
@@ -133,7 +137,7 @@ class TypesCommand(CLICommand):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--provider", default=None,
-                            choices=["lambda_labs", "runpod"])
+                            choices=["lambda_labs", "runpod", "vastai"])
         parser.add_argument("--api-key", default=None)
 
     def execute(self, args: argparse.Namespace) -> int:
