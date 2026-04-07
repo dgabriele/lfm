@@ -199,7 +199,8 @@ class DialogueCorpusGenerator(BaseCorpusGenerator):
                             if not doc_turns:
                                 continue
 
-                            doc_text = "\n".join(doc_turns)
+                            tag = f"[{cfg.language_tag}]\n" if cfg.language_tag else ""
+                            doc_text = tag + "\n".join(doc_turns)
                             f.write(doc_text + "\n\n")
 
                             num_documents += 1
@@ -226,11 +227,29 @@ class DialogueCorpusGenerator(BaseCorpusGenerator):
 
         unique = len(seen)
         logger.info(
-            "Dialogue corpus complete: %d docs, %d turns, %d tokens, "
+            "Generated %d documents, %d turns, %d tokens, "
             "%d unique (%.1f%%) → %s",
             num_documents, num_turns, total_tokens, unique,
             unique / max(num_documents, 1) * 100, output_path,
         )
+
+        # Tokenize to H5 if model specified
+        if cfg.tokenize_model:
+            from transformers import AutoTokenizer
+
+            from lfm.translator.tokenized_dataset import TokenizedH5Dataset
+
+            logger.info(
+                "Tokenizing corpus to H5 (model=%s, max_len=%d)...",
+                cfg.tokenize_model, cfg.tokenize_max_len,
+            )
+            tokenizer = AutoTokenizer.from_pretrained(cfg.tokenize_model)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            TokenizedH5Dataset.from_corpus(
+                output_path, tokenizer, cfg.tokenize_max_len,
+            )
+
         return {
             "num_documents": num_documents,
             "num_turns": num_turns,

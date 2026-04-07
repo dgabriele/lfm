@@ -148,17 +148,15 @@ class SelfSupervisedTrainer:
         return model, tokenizer
 
     def _build_dataloaders(self, tokenizer):
-        """Load corpus, split, tokenize, return train/val loaders."""
+        """Load corpus, tokenize to HDF5 if needed, return train/val loaders."""
+        from lfm.translator.tokenized_dataset import TokenizedH5Dataset
+
         cfg = self.config
-        logger.info("Loading corpus from %s", cfg.corpus_path)
-        with open(cfg.corpus_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        corpus_path = Path(cfg.corpus_path)
 
-        n_val = max(1, int(len(lines) * 0.05))
-        logger.info("Tokenizing %d train + %d val lines...", len(lines) - n_val, n_val)
-
-        train_ds = PlainTextDataset(lines[n_val:], tokenizer, cfg.max_len)
-        val_ds = PlainTextDataset(lines[:n_val], tokenizer, cfg.max_len)
+        train_ds, val_ds = TokenizedH5Dataset.from_corpus(
+            corpus_path, tokenizer, cfg.max_len,
+        )
 
         train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True)
         val_loader = DataLoader(val_ds, batch_size=cfg.batch_size)
