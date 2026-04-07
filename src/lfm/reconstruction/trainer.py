@@ -40,7 +40,7 @@ class ReconstructionTrainer:
         self._embeddings = np.array(self.store._embeddings)
         self._cluster_labels = self.store._cluster_labels
         self._n = len(self._embeddings)
-        self._num_clusters = self.store.num_clusters
+        self._num_clusters = int(self._cluster_labels.max()) + 1
         self._rng = np.random.default_rng(config.seed)
 
         logger.info(
