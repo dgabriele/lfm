@@ -29,11 +29,16 @@ class ReconstructionConfig(LFMBaseConfig):
     diffusion_layers: int = 4
     diffusion_heads: int = 8
 
-    # Inverse decoder
+    # Hidden state predictor (tokens → predicted hidden states)
+    predictor_num_layers: int = 4
+    predictor_num_heads: int = 8
+
+    # Inverse decoder (hidden states → embedding)
     inverse_num_layers: int = 4
     inverse_num_heads: int = 8
 
-    # Regularization
+    # Loss weights
+    hidden_state_loss_weight: float = 1.0
     z_diversity_weight: float = 0.5
 
     # Data

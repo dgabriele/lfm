@@ -1,9 +1,18 @@
-"""Reconstruction model: z-gen → frozen decoder → inverse decoder.
+"""Reconstruction model with dual-path z-gen training.
 
-Jointly trains the z-generator and inverse decoder to preserve
-input embedding information through the frozen linguistic bottleneck.
-The language IS the encoding — the inverse decoder recovers what
-was encoded from the surface-level IPA tokens.
+Two reconstruction paths, one z-generator:
+
+1. **Direct path** (strong z-gen gradient): pool z-vectors → MLP →
+   predicted embedding.  Gives the z-gen immediate gradient to encode
+   maximal information about the input.
+
+2. **Surface path** (linguistic constraint): z-vectors → frozen decoder
+   → surface tokens → HiddenStatePredictor → InverseDecoder →
+   reconstructed embedding.  Forces the z-gen to produce z-vectors
+   that decode into linguistically structured, recoverable IPA.
+
+Both paths use contrastive loss: the reconstructed embedding must be
+closer to its source than to other embeddings in the batch.
 """
 
 from __future__ import annotations
@@ -15,31 +24,66 @@ from torch import Tensor, nn
 from lfm.agents.components import ZDiversityLoss, embed_tokens_straight_through
 from lfm.agents.decode import (
     ExpressionDecoder,
-    _compute_phrase_assignment,
     rerun_decoder_multiphrase_with_grad,
 )
 from lfm.agents.diffusion import DiffusionZGenerator
 from lfm.faculty.model import LanguageFaculty
 from lfm.reconstruction.config import ReconstructionConfig
-from lfm.reconstruction.inverse_decoder import InverseDecoder
+from lfm.reconstruction.inverse_decoder import HiddenStatePredictor, InverseDecoder
+
+
+class DirectZHead(nn.Module):
+    """Pool z-vectors and project directly to embedding space.
+
+    Bypasses the decoder entirely — gives the z-gen a direct gradient
+    signal to be maximally informative about the input embedding.
+
+    Args:
+        latent_dim: Dimension of each z-vector.
+        output_dim: Dimension of the target embedding.
+        hidden_dim: MLP hidden dimension.
+    """
+
+    def __init__(
+        self, latent_dim: int, output_dim: int, hidden_dim: int = 512,
+    ) -> None:
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, z_seq: Tensor, z_weights: Tensor) -> Tensor:
+        """Reconstruct embedding from weighted z-vectors.
+
+        Args:
+            z_seq: ``(B, K, latent_dim)`` z-vector sequence.
+            z_weights: ``(B, K)`` activity weights.
+
+        Returns:
+            ``(B, output_dim)`` predicted embedding.
+        """
+        # Weighted mean of z-vectors
+        w = z_weights.unsqueeze(-1)
+        pooled = (z_seq * w).sum(dim=1) / w.sum(dim=1).clamp(min=1)
+        return self.proj(pooled)
 
 
 class ReconstructionModel(nn.Module):
-    """Reconstruction through the linguistic bottleneck.
+    """Dual-path reconstruction through the linguistic bottleneck.
 
     Pipeline::
 
-        embedding
-          → DiffusionZGenerator → K z-vectors
-          → ExpressionDecoder (Phase 1: AR decode, no grad)
-          → Phase 2: decoder rerun with grad → hidden states
-          → embed_tokens_straight_through → differentiable token repr
-          → InverseDecoder → reconstructed embedding
-          → cosine similarity loss to original
+        embedding → z_gen → z-vectors
+            ├─ Direct path:  pool(z) → MLP → z_recon (strong z-gen gradient)
+            └─ Surface path: frozen decoder → tokens → predictor → inverse → surface_recon
+                             (hidden states supervise predictor via MSE)
 
-    The z-generator learns what to encode.  The inverse decoder learns
-    how to decode.  The frozen PhraseDecoder constrains everything to
-    be linguistically structured.
+    All reconstruction losses are contrastive: reconstructed embedding
+    must be closer to its source than to batch negatives.
 
     Args:
         config: Reconstruction configuration.
@@ -75,10 +119,24 @@ class ReconstructionModel(nn.Module):
             z_std=gen._z_std if gen._z_stats_initialized else None,
         )
 
+        # Direct path: z-vectors → embedding (bypasses decoder)
+        self.direct_head = DirectZHead(
+            latent_dim=gen._latent_dim,
+            output_dim=config.embedding_dim,
+            hidden_dim=config.z_hidden_dim,
+        )
+
         # Phase 1 decoder (shared, frozen)
         self.decoder = ExpressionDecoder(gen)
 
-        # Inverse decoder: IPA tokens → embedding
+        # Surface path stage 1: surface tokens → predicted hidden states
+        self.predictor = HiddenStatePredictor(
+            token_dim=hidden_dim,
+            num_heads=config.predictor_num_heads,
+            num_layers=config.predictor_num_layers,
+        )
+
+        # Surface path stage 2: predicted hidden states → embedding
         self.inverse = InverseDecoder(
             token_dim=hidden_dim,
             output_dim=config.embedding_dim,
@@ -101,47 +159,92 @@ class ReconstructionModel(nn.Module):
         cfg = self.config
         return [
             {"params": list(self.z_gen.parameters()), "lr": cfg.z_gen_lr},
+            {"params": list(self.direct_head.parameters()), "lr": cfg.inverse_lr},
+            {"params": list(self.predictor.parameters()), "lr": cfg.inverse_lr},
             {"params": list(self.inverse.parameters()), "lr": cfg.inverse_lr},
         ]
 
+    @staticmethod
+    def _contrastive_loss(
+        reconstructed: Tensor, targets: Tensor, temperature: float = 0.1,
+    ) -> tuple[Tensor, Tensor]:
+        """Batch-contrastive loss: reconstructed must match its own target.
+
+        Args:
+            reconstructed: ``(B, D)`` predicted embeddings.
+            targets: ``(B, D)`` ground truth embeddings.
+            temperature: Softmax temperature.
+
+        Returns:
+            loss: Scalar contrastive loss.
+            accuracy: Fraction of correct top-1 matches.
+        """
+        recon_norm = F.normalize(reconstructed, dim=-1)
+        target_norm = F.normalize(targets, dim=-1)
+        # (B, B) similarity matrix — diagonal is the correct match
+        logits = recon_norm @ target_norm.T / temperature
+        labels = torch.arange(logits.size(0), device=logits.device)
+        loss = F.cross_entropy(logits, labels)
+        acc = (logits.argmax(dim=-1) == labels).float().mean()
+        return loss, acc
+
     def forward(self, embeddings: Tensor) -> dict[str, Tensor]:
-        """Forward pass: encode → decode → reconstruct.
+        """Dual-path forward pass.
 
         Args:
             embeddings: ``(B, embedding_dim)`` input embeddings.
 
         Returns:
-            Dict with ``loss``, ``cosine_sim``, ``num_phrases``,
-            ``total_tokens``.
+            Dict with ``loss``, ``cosine_sim``, ``direct_acc``,
+            ``surface_acc``, ``hs_loss``, ``num_phrases``, ``total_tokens``.
         """
         cfg = self.config
-        device = embeddings.device
 
         # Z-generation
         z_seq, z_weights, num_phrases = self.z_gen(embeddings)
 
+        # === Direct path (strong z-gen gradient) ===
+        z_recon = self.direct_head(z_seq, z_weights)
+        direct_loss, direct_acc = self._contrastive_loss(z_recon, embeddings)
+
+        # === Surface path (linguistic constraint) ===
         # Phase 1: AR decode (no grad)
         tokens, gen_mask, bounds = self.decoder.decode(z_seq, z_weights)
 
-        # Phase 2: decoder rerun with gradients
+        # Phase 2: decoder rerun with gradients → actual hidden states
         hidden = rerun_decoder_multiphrase_with_grad(
             self.gen, z_seq, z_weights, tokens, gen_mask, bounds,
         )
         trimmed_mask = gen_mask[:, :hidden.size(1)]
 
-        # Straight-through token representations (what the LLM sees)
+        # Straight-through token representations
         token_repr = embed_tokens_straight_through(
             hidden, self.gen.output_head, self.gen.token_embedding,
         )
 
-        # Reconstruct embedding from tokens
-        reconstructed = self.inverse(token_repr, trimmed_mask)
+        # Predict hidden states from surface tokens
+        predicted_hidden = self.predictor(token_repr, trimmed_mask)
 
-        # Reconstruction loss: cosine similarity
-        cos_sim = F.cosine_similarity(embeddings, reconstructed, dim=-1)
-        recon_loss = (1 - cos_sim).mean()
+        # Hidden state prediction loss (MSE against actual)
+        mask_f = trimmed_mask.unsqueeze(-1).float()
+        hs_loss = (
+            ((predicted_hidden - hidden.detach()) ** 2 * mask_f).sum()
+            / mask_f.sum().clamp(min=1)
+            / hidden.size(-1)
+        )
 
-        loss = recon_loss
+        # Reconstruct embedding from predicted hidden states
+        surface_recon = self.inverse(predicted_hidden, trimmed_mask)
+        surface_loss, surface_acc = self._contrastive_loss(
+            surface_recon, embeddings,
+        )
+
+        # Combined loss
+        loss = (
+            direct_loss
+            + surface_loss
+            + cfg.hidden_state_loss_weight * hs_loss
+        )
 
         # Z diversity regularization
         if self.z_diversity is not None:
@@ -150,11 +253,20 @@ class ReconstructionModel(nn.Module):
 
         with torch.no_grad():
             total_tokens = trimmed_mask.float().sum(dim=1).mean()
+            cos_sim = F.cosine_similarity(
+                embeddings, surface_recon.detach(), dim=-1,
+            ).mean()
+            z_cos_sim = F.cosine_similarity(
+                embeddings, z_recon.detach(), dim=-1,
+            ).mean()
 
         return {
             "loss": loss,
-            "cosine_sim": cos_sim.mean().detach(),
-            "recon_loss": recon_loss.detach(),
+            "cosine_sim": cos_sim,
+            "z_cos_sim": z_cos_sim,
+            "direct_acc": direct_acc.detach(),
+            "surface_acc": surface_acc.detach(),
+            "hs_loss": hs_loss.detach(),
             "num_phrases": num_phrases.mean().detach(),
             "total_tokens": total_tokens,
         }
@@ -162,10 +274,14 @@ class ReconstructionModel(nn.Module):
     def checkpoint_state(self) -> dict:
         return {
             "z_gen": self.z_gen.state_dict(),
+            "direct_head": self.direct_head.state_dict(),
+            "predictor": self.predictor.state_dict(),
             "inverse": self.inverse.state_dict(),
             "config": self.config.model_dump(),
         }
 
     def load_checkpoint_state(self, ckpt: dict) -> None:
         self.z_gen.load_state_dict(ckpt["z_gen"])
+        self.direct_head.load_state_dict(ckpt["direct_head"])
+        self.predictor.load_state_dict(ckpt["predictor"])
         self.inverse.load_state_dict(ckpt["inverse"])

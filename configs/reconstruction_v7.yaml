@@ -6,7 +6,7 @@ spm_path: data/models/v7/spm.model
 embedding_store_dir: data/embeddings
 output_dir: data/reconstruction_v7
 
-max_phrases: 3
+max_phrases: 4
 z_diversity_weight: 0.5
 
 inverse_num_layers: 4

@@ -1,8 +1,9 @@
-"""Reconstruction trainer — direct embedding recovery through the bottleneck.
+"""Reconstruction trainer — embedding recovery through the linguistic bottleneck.
 
-No game, no distractors, no receiver.  Just: embed → encode → decode →
-inverse → reconstruct → loss.  The simplest possible training loop for
-learning to express embeddings as recoverable IPA.
+Uses cluster-based hard negative sampling: each batch is drawn from
+a small number of semantic clusters, so the contrastive loss requires
+fine-grained discrimination — the same pressure that drives the
+dialogue game to 98%+ accuracy.
 """
 
 from __future__ import annotations
@@ -33,16 +34,18 @@ class ReconstructionTrainer:
         self.config = config
         self.device = torch.device(config.device)
 
-        # Load embeddings
-        store = EmbeddingStore(config.embedding_store_dir)
-        store.load()
-        self._embeddings = np.array(store._embeddings)
+        # Load embeddings with cluster info
+        self.store = EmbeddingStore(config.embedding_store_dir)
+        self.store.load()
+        self._embeddings = np.array(self.store._embeddings)
+        self._cluster_labels = self.store._cluster_labels
         self._n = len(self._embeddings)
+        self._num_clusters = self.store.num_clusters
         self._rng = np.random.default_rng(config.seed)
 
         logger.info(
-            "Loaded %d embeddings, dim=%d",
-            self._n, self._embeddings.shape[1],
+            "Loaded %d embeddings, dim=%d, %d clusters",
+            self._n, self._embeddings.shape[1], self._num_clusters,
         )
 
         # Build model
@@ -65,11 +68,46 @@ class ReconstructionTrainer:
         self._best_sim = 0.0
         self._batch_size = config.batch_size
 
-    def _sample_batch(self) -> torch.Tensor:
-        """Sample a random batch of embeddings."""
-        idx = self._rng.integers(0, self._n, size=self._batch_size)
+    def _sample_batch(self, hard_ratio: float = 1.0) -> torch.Tensor:
+        """Sample a batch with cluster-based hard negatives.
+
+        Args:
+            hard_ratio: Fraction of batch drawn from same-cluster
+                hard negatives. 0.0 = fully random, 1.0 = all hard.
+
+        Returns:
+            ``(batch_size, dim)`` tensor of embeddings where nearby
+            items are semantically similar (hard to distinguish).
+        """
+        bs = self._batch_size
+        n_hard = int(hard_ratio * bs)
+        n_easy = bs - n_hard
+
+        indices = np.empty(bs, dtype=np.intp)
+
+        if n_hard > 0:
+            # Pick a few clusters and fill the hard portion from them
+            n_clusters = max(1, n_hard // 16)  # ~16 samples per cluster
+            clusters = self._rng.integers(0, self._num_clusters, size=n_clusters)
+            per_cluster = n_hard // n_clusters
+            remainder = n_hard - per_cluster * n_clusters
+
+            pos = 0
+            for i, c in enumerate(clusters):
+                n = per_cluster + (1 if i < remainder else 0)
+                indices[pos:pos + n] = self.store.sample_from_cluster(
+                    int(c), n, rng=self._rng,
+                )
+                pos += n
+
+        if n_easy > 0:
+            indices[n_hard:] = self._rng.integers(0, self._n, size=n_easy)
+
+        # Shuffle so cluster boundaries aren't at fixed positions
+        self._rng.shuffle(indices)
+
         return torch.tensor(
-            self._embeddings[idx], dtype=torch.float32,
+            self._embeddings[indices], dtype=torch.float32,
         ).to(self.device)
 
     def _save_checkpoint(self, step: int, cos_sim: float) -> None:
@@ -127,9 +165,13 @@ class ReconstructionTrainer:
         )
 
         for step in range(start_step, cfg.steps):
+            # Ramp hard ratio over warmup
+            frac = min(step / max(cfg.warmup_steps, 1), 1.0)
+            hard_ratio = frac  # 0→1 over warmup
+
             try:
                 self.optimizer.zero_grad()
-                embeddings = self._sample_batch()
+                embeddings = self._sample_batch(hard_ratio)
                 out = model(embeddings)
                 out["loss"].backward()
                 nn.utils.clip_grad_norm_(self._all_params, cfg.max_grad_norm)
@@ -154,7 +196,11 @@ class ReconstructionTrainer:
             # Logging
             if step % cfg.log_every == 0:
                 sim = out["cosine_sim"].item()
+                z_sim = out.get("z_cos_sim", torch.tensor(0.0)).item()
                 loss = out["loss"].item()
+                hs = out.get("hs_loss", torch.tensor(0.0)).item()
+                d_acc = out.get("direct_acc", torch.tensor(0.0)).item()
+                s_acc = out.get("surface_acc", torch.tensor(0.0)).item()
                 n_phr = out["num_phrases"].item()
                 n_tok = out["total_tokens"].item()
                 vram = ""
@@ -163,9 +209,12 @@ class ReconstructionTrainer:
                     vram = f"  vram={vram_mb}MB"
                     torch.cuda.reset_peak_memory_stats()
                 logger.info(
-                    "step=%d  loss=%.4f  cos_sim=%.4f  phrases=%.1f  "
-                    "tok=%.0f%s",
-                    step, loss, sim, n_phr, n_tok, vram,
+                    "step=%d  loss=%.3f  z_sim=%.3f  surf_sim=%.3f  "
+                    "d_acc=%.1f%%  s_acc=%.1f%%  hs=%.4f  "
+                    "phr=%.1f  tok=%.0f  hard=%.0f%%%s",
+                    step, loss, z_sim, sim,
+                    d_acc * 100, s_acc * 100, hs,
+                    n_phr, n_tok, hard_ratio * 100, vram,
                 )
 
             # Save best immediately
