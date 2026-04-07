@@ -1,0 +1,18 @@
+# Cloud deployment — RunPod A100-80GB
+# Usage: lfm cloud launch configs/pretrain_dialogue_v7.yaml --cloud-config configs/cloud_runpod_a100.yaml
+
+cloud:
+  provider: runpod
+  instance_type: NVIDIA A100 80GB PCIe
+  ssh_key_name: ""
+  ssh_user: root
+  command: "lfm translate pretrain"
+  auto_terminate: true
+  max_runtime_hours: 24
+
+  upload_data:
+    - data/translator/dialogue_corpus_v7_tagged.txt
+
+  remote_workdir: /workspace/lfm
+  remote_output_dir: /workspace/lfm/data/translator_dialogue_v7
+  local_download_dir: data/cloud_results

@@ -36,6 +36,8 @@ if [ ! -f pyproject.toml ]; then
 fi
 # Install system deps if needed
 which poetry > /dev/null 2>&1 || pip install poetry
+# RunPod uses root — poetry needs this to work without virtualenvs
+export POETRY_VIRTUALENVS_CREATE=false 2>/dev/null || true
 poetry install --no-interaction 2>&1 | tail -5
 echo "SETUP_COMPLETE"
 """
@@ -64,14 +66,27 @@ class Deployer:
         self.remote_workdir = remote_workdir
 
     def _connect(self, instance: Instance) -> paramiko.SSHClient:
-        """Open SSH connection to instance with retry."""
+        """Open SSH connection to instance with retry.
+
+        Handles RunPod-style ``ip:port`` addresses and standard
+        ``ip``-only addresses (port 22).
+        """
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        # Parse ip:port (RunPod) vs plain ip (Lambda)
+        if ":" in instance.ip:
+            hostname, port_str = instance.ip.rsplit(":", 1)
+            port = int(port_str)
+        else:
+            hostname = instance.ip
+            port = 22
 
         for attempt in range(10):
             try:
                 ssh.connect(
-                    hostname=instance.ip,
+                    hostname=hostname,
+                    port=port,
                     username=self.ssh_user,
                     key_filename=self.ssh_key_path,
                     timeout=30,
@@ -80,7 +95,7 @@ class Deployer:
             except Exception as e:
                 if attempt == 9:
                     raise ConnectionError(
-                        f"Cannot SSH to {instance.ip} after 10 attempts: {e}"
+                        f"Cannot SSH to {hostname}:{port} after 10 attempts: {e}"
                     )
                 logger.info(
                     "SSH attempt %d/10 failed, retrying in 15s...",

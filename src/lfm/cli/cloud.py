@@ -8,9 +8,16 @@ from lfm.cli.base import CLICommand
 
 
 def _get_provider(args):
-    """Build a cloud provider from CLI args."""
+    """Build a cloud provider from CLI args or config."""
+    provider_name = getattr(args, "provider", None) or "lambda_labs"
+    api_key = getattr(args, "api_key", None)
+
+    if provider_name == "runpod":
+        from lfm.cloud.providers.runpod import RunPodProvider
+        return RunPodProvider(api_key=api_key)
+
     from lfm.cloud.providers.lambda_labs import LambdaLabsProvider
-    return LambdaLabsProvider(api_key=getattr(args, "api_key", None))
+    return LambdaLabsProvider(api_key=api_key)
 
 
 def _get_manager(args):
@@ -28,7 +35,7 @@ def _get_manager(args):
         cfg_dict = raw.get("cloud", raw)
 
     # CLI overrides
-    for key in ("instance_type", "region", "ssh_key_name", "command"):
+    for key in ("instance_type", "region", "ssh_key_name", "command", "provider"):
         val = getattr(args, key, None)
         if val is not None:
             cfg_dict[key] = val
@@ -53,6 +60,9 @@ class LaunchCommand(CLICommand):
         parser.add_argument("config", help="YAML config file for training")
         parser.add_argument("--cloud-config", default=None,
                             help="Cloud deployment YAML (or embed under 'cloud:' key)")
+        parser.add_argument("--provider", default=None,
+                            choices=["lambda_labs", "runpod"],
+                            help="Cloud provider (default: lambda_labs)")
         parser.add_argument("--instance-type", default=None)
         parser.add_argument("--region", default=None)
         parser.add_argument("--ssh-key-name", default=None)
@@ -92,6 +102,8 @@ class StatusCommand(CLICommand):
         return "List active cloud instances"
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--provider", default=None,
+                            choices=["lambda_labs", "runpod"])
         parser.add_argument("--api-key", default=None)
 
     def execute(self, args: argparse.Namespace) -> int:
@@ -120,6 +132,8 @@ class TypesCommand(CLICommand):
         return "List available GPU instance types and pricing"
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--provider", default=None,
+                            choices=["lambda_labs", "runpod"])
         parser.add_argument("--api-key", default=None)
 
     def execute(self, args: argparse.Namespace) -> int:
