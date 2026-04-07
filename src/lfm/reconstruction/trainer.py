@@ -40,12 +40,14 @@ class ReconstructionTrainer:
         self._embeddings = np.array(self.store._embeddings)
         self._cluster_labels = self.store._cluster_labels
         self._n = len(self._embeddings)
-        self._num_clusters = int(self._cluster_labels.max()) + 1
+        self._cluster_ids = np.array(
+            sorted(self.store._cluster_index.keys()), dtype=np.intp,
+        )
         self._rng = np.random.default_rng(config.seed)
 
         logger.info(
             "Loaded %d embeddings, dim=%d, %d clusters",
-            self._n, self._embeddings.shape[1], self._num_clusters,
+            self._n, self._embeddings.shape[1], len(self._cluster_ids),
         )
 
         # Build model
@@ -88,7 +90,7 @@ class ReconstructionTrainer:
         if n_hard > 0:
             # Pick a few clusters and fill the hard portion from them
             n_clusters = max(1, n_hard // 16)  # ~16 samples per cluster
-            clusters = self._rng.integers(0, self._num_clusters, size=n_clusters)
+            clusters = self._rng.choice(self._cluster_ids, size=n_clusters)
             per_cluster = n_hard // n_clusters
             remainder = n_hard - per_cluster * n_clusters
 
