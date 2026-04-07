@@ -325,33 +325,48 @@ class PretrainCommand(CLICommand):
         return "Self-supervised pretraining on IPA corpus (next-token prediction)"
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        parser.add_argument("--model-name", default="Qwen/Qwen2.5-0.5B")
-        parser.add_argument("--corpus", default="data/translator/corpus.txt")
-        parser.add_argument("--epochs", type=int, default=5)
-        parser.add_argument("--lr", type=float, default=5e-5)
-        parser.add_argument("--batch-size", type=int, default=8)
-        parser.add_argument("--max-len", type=int, default=128)
-        parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
-        parser.add_argument("--output-dir", default="data/translator")
-        parser.add_argument("--device", default="cuda")
-        parser.add_argument("--seed", type=int, default=42)
+        parser.add_argument("config", nargs="?", default=None,
+                            help="YAML config file")
+        parser.add_argument("--model-name", default=None)
+        parser.add_argument("--corpus", default=None)
+        parser.add_argument("--epochs", type=int, default=None)
+        parser.add_argument("--lr", type=float, default=None)
+        parser.add_argument("--batch-size", type=int, default=None)
+        parser.add_argument("--max-len", type=int, default=None)
+        parser.add_argument("--gradient-accumulation-steps", type=int, default=None)
+        parser.add_argument("--output-dir", default=None)
+        parser.add_argument("--device", default=None)
+        parser.add_argument("--seed", type=int, default=None)
 
     def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
         from lfm.translator.config import PretrainConfig
         from lfm.translator.pretrain import SelfSupervisedTrainer
 
-        config = PretrainConfig(
-            model_name=args.model_name,
-            corpus_path=args.corpus,
-            epochs=args.epochs,
-            lr=args.lr,
-            batch_size=args.batch_size,
-            max_len=args.max_len,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            output_dir=args.output_dir,
-            device=args.device,
-            seed=args.seed,
-        )
+        cfg_dict: dict = {}
+        if args.config is not None:
+            with open(args.config) as f:
+                cfg_dict = yaml.safe_load(f) or {}
+
+        # CLI flags override YAML values
+        cli_map = {
+            "model_name": args.model_name,
+            "corpus_path": args.corpus,
+            "epochs": args.epochs,
+            "lr": args.lr,
+            "batch_size": args.batch_size,
+            "max_len": args.max_len,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "output_dir": args.output_dir,
+            "device": args.device,
+            "seed": args.seed,
+        }
+        for key, val in cli_map.items():
+            if val is not None:
+                cfg_dict[key] = val
+
+        config = PretrainConfig(**cfg_dict)
 
         trainer = SelfSupervisedTrainer(config)
         results = trainer.train()
