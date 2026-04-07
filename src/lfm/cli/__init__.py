@@ -57,6 +57,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     register_train_group(subparsers)
 
+    # --- cloud subcommand group ---
+    from lfm.cli.cloud import register_cloud_group
+
+    register_cloud_group(subparsers)
+
     # --- pretrain command ---
     from lfm.cli.pretrain import PretrainCommand
 

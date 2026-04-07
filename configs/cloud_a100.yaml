@@ -1,0 +1,18 @@
+# Cloud deployment — Lambda Labs A100-80GB
+# Usage: lfm cloud launch configs/pretrain_dialogue_v7.yaml --cloud-config configs/cloud_a100.yaml
+
+cloud:
+  provider: lambda_labs
+  instance_type: gpu_1x_a100_sxm4
+  region: us-west-1
+  ssh_key_name: lfm-key
+  command: "lfm translate pretrain"
+  auto_terminate: true
+  max_runtime_hours: 24
+
+  upload_data:
+    - data/translator/dialogue_corpus_v7.txt
+
+  remote_workdir: /home/ubuntu/lfm
+  remote_output_dir: /home/ubuntu/lfm/data/translator_dialogue_v7
+  local_download_dir: data/cloud_results
