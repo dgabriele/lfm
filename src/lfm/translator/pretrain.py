@@ -121,6 +121,7 @@ class SelfSupervisedTrainer:
 
     def __init__(self, config: PretrainConfig) -> None:
         self.config = config
+        self._batch_size = config.batch_size
         self.output_dir = Path(config.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -154,15 +155,26 @@ class SelfSupervisedTrainer:
         cfg = self.config
         corpus_path = Path(cfg.corpus_path)
 
-        train_ds, val_ds = TokenizedH5Dataset.from_corpus(
+        self._train_ds, self._val_ds = TokenizedH5Dataset.from_corpus(
             corpus_path, tokenizer, cfg.max_len,
         )
 
-        train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True)
-        val_loader = DataLoader(val_ds, batch_size=cfg.batch_size)
+        train_loader = DataLoader(
+            self._train_ds, batch_size=self._batch_size, shuffle=True,
+        )
+        val_loader = DataLoader(self._val_ds, batch_size=self._batch_size)
 
-        logger.info("Train: %d examples, Val: %d examples", len(train_ds), len(val_ds))
+        logger.info(
+            "Train: %d examples, Val: %d examples",
+            len(self._train_ds), len(self._val_ds),
+        )
         return train_loader, val_loader
+
+    def _rebuild_train_loader(self) -> DataLoader:
+        """Rebuild train DataLoader with current _batch_size."""
+        return DataLoader(
+            self._train_ds, batch_size=self._batch_size, shuffle=True,
+        )
 
     def _build_optimizer(self, model, total_steps):
         """Create optimizer, scheduler, and grad scaler."""
@@ -183,6 +195,53 @@ class SelfSupervisedTrainer:
         scaler = torch.amp.GradScaler(enabled=use_scaler)
 
         return optimizer, scheduler, scaler, model_dtype
+
+    # -- Batch size calibration --
+
+    def _calibrate_batch_size(self, model, model_dtype) -> None:
+        """Find the largest batch size that fits in VRAM.
+
+        Runs dummy forward+backward passes, halving batch size on OOM
+        until stable. Called once before training starts.
+        """
+        cfg = self.config
+        device = torch.device(cfg.device)
+        seq_len = cfg.max_len
+
+        while self._batch_size >= 1:
+            try:
+                dummy_ids = torch.randint(
+                    0, 1000, (self._batch_size, seq_len), device=device,
+                )
+                dummy_mask = torch.ones_like(dummy_ids)
+                with torch.amp.autocast(
+                    device_type=device.type, enabled=cfg.use_amp, dtype=model_dtype,
+                ):
+                    out = model(
+                        input_ids=dummy_ids, attention_mask=dummy_mask, labels=dummy_ids,
+                    )
+                    (out.loss / cfg.gradient_accumulation_steps).backward()
+                model.zero_grad()
+                del dummy_ids, dummy_mask, out
+                torch.cuda.empty_cache()
+                logger.info("Calibrated batch_size=%d", self._batch_size)
+                return
+            except RuntimeError as e:
+                if "out of memory" not in str(e):
+                    raise
+                torch.cuda.empty_cache()
+                model.zero_grad()
+                old = self._batch_size
+                self._batch_size = max(1, self._batch_size - 1)
+                if self._batch_size == old:
+                    # batch_size=1 still OOMs — fatal
+                    raise RuntimeError(
+                        "OOM even at batch_size=1. Reduce max_len or use a smaller model."
+                    ) from e
+                logger.info(
+                    "Calibration OOM at batch_size=%d, trying %d",
+                    old, self._batch_size,
+                )
 
     # -- Training loop --
 
@@ -227,7 +286,7 @@ class SelfSupervisedTrainer:
                 import math
                 lr = optimizer.param_groups[0]["lr"]
                 avg_loss = epoch_loss / (i + 1)
-                ppl = math.exp(min(step_loss, 20))  # cap to avoid overflow
+                ppl = math.exp(min(step_loss, 20))
                 logger.info(
                     "  epoch=%d step=%d avg=%.4f loss=%.4f ppl=%.1f lr=%.2e",
                     state.epoch, state.global_step, avg_loss, step_loss, ppl, lr,
@@ -295,10 +354,18 @@ class SelfSupervisedTrainer:
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logger.info("Model: %d params (%.1fM)", total_params, total_params / 1e6)
 
+        optimizer, scheduler, scaler, model_dtype = self._build_optimizer(
+            model, 1,  # placeholder total_steps, recalculated after calibration
+        )
+
+        # Calibrate batch size before building loaders
+        self._calibrate_batch_size(model, model_dtype)
+
         train_loader, val_loader = self._build_dataloaders(tokenizer)
         steps_per_epoch = len(train_loader) // cfg.gradient_accumulation_steps
         total_steps = steps_per_epoch * cfg.epochs
 
+        # Rebuild optimizer/scheduler with correct total_steps
         optimizer, scheduler, scaler, model_dtype = self._build_optimizer(model, total_steps)
 
         # Resume state if checkpoint exists
@@ -311,7 +378,7 @@ class SelfSupervisedTrainer:
         logger.info(
             "Training: epochs %d→%d, %d steps/epoch, lr=%.1e, batch=%d×%d",
             state.epoch, cfg.epochs, steps_per_epoch, cfg.lr,
-            cfg.batch_size, cfg.gradient_accumulation_steps,
+            self._batch_size, cfg.gradient_accumulation_steps,
         )
 
         train_loss = 0.0
