@@ -10,7 +10,7 @@ cloud:
   provider: vastai
   instance_type: A100_80GB
   ssh_user: root
-  command: "lfm translate pretrain"
+  command: "poetry run lfm translate pretrain"
   auto_terminate: true
   max_runtime_hours: 24
 

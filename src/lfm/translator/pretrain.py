@@ -286,10 +286,11 @@ class SelfSupervisedTrainer:
                 import math
                 lr = optimizer.param_groups[0]["lr"]
                 avg_loss = epoch_loss / (i + 1)
+                avg_ppl = math.exp(min(avg_loss, 20))
                 ppl = math.exp(min(step_loss, 20))
                 logger.info(
-                    "  epoch=%d step=%d avg=%.4f loss=%.4f ppl=%.1f lr=%.2e",
-                    state.epoch, state.global_step, avg_loss, step_loss, ppl, lr,
+                    "  epoch=%d step=%d avg_loss=%.4f avg_ppl=%.1f loss=%.4f ppl=%.1f lr=%.2e",
+                    state.epoch, state.global_step, avg_loss, avg_ppl, step_loss, ppl, lr,
                 )
 
             # Mid-epoch checkpoint

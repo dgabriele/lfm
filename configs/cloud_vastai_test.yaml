@@ -1,0 +1,17 @@
+# Minimal end-to-end test — cheapest GPU, tiny corpus
+# Should cost < $0.01
+
+cloud:
+  provider: vastai
+  instance_type: RTX_3060
+  ssh_user: root
+  command: "poetry run lfm translate pretrain"
+  auto_terminate: true
+  max_runtime_hours: 1
+
+  upload_data:
+    - data/translator/dialogue_corpus_test_tagged.txt
+
+  remote_workdir: /workspace/lfm
+  remote_output_dir: /workspace/lfm/data/translator_dialogue_v7
+  local_download_dir: data/cloud_test_results

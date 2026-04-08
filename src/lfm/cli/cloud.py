@@ -45,6 +45,9 @@ def _get_manager(args):
             cfg_dict[key] = val
 
     config = CloudConfig(**cfg_dict)
+    # Provider from CLI flag or config
+    if not getattr(args, "provider", None):
+        args.provider = config.provider
     provider = _get_provider(args)
     return JobManager(provider, config)
 

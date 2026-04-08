@@ -34,11 +34,8 @@ if [ ! -f pyproject.toml ]; then
     echo "ERROR: pyproject.toml not found in {workdir}"
     exit 1
 fi
-# Install system deps if needed
-which poetry > /dev/null 2>&1 || pip install poetry
-# RunPod uses root — poetry needs this to work without virtualenvs
-export POETRY_VIRTUALENVS_CREATE=false 2>/dev/null || true
-poetry install --no-interaction 2>&1 | tail -5
+pip install poetry
+poetry install --no-interaction
 echo "SETUP_COMPLETE"
 """
 
