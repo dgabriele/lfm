@@ -1,0 +1,34 @@
+# LoRA pretraining — interleaved Xenoglot + English
+# Adapters learn Xenoglot, base model retains English.
+# Cross-lingual transfer emerges from shared training distribution.
+
+model_name: Qwen/Qwen2.5-0.5B
+corpus_path: data/translator/dialogue_corpus_v7_tagged.txt
+english_corpus_path: data/translator/english_corpus.txt
+english_ratio: 0.3
+output_dir: data/translator_lora_v7
+
+# LoRA
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+
+# Training
+epochs: 3
+lr: 1e-4
+batch_size: 4
+max_len: 512
+gradient_accumulation_steps: 32
+use_amp: true
+warmup_fraction: 0.1
+max_grad_norm: 1.0
+checkpoint_fraction: 0.1
+
+device: cuda
+seed: 42

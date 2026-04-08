@@ -128,8 +128,10 @@ class SelfSupervisedTrainer:
     # -- Setup --
 
     def _load_model(self):
-        """Load model and tokenizer, preferring latest checkpoint."""
+        """Load model and tokenizer, optionally with LoRA adapters."""
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        cfg = self.config
 
         # Prefer saved model for resume, fall back to config
         latest_path = self.output_dir / "model_latest"
@@ -138,7 +140,7 @@ class SelfSupervisedTrainer:
             model_path = str(latest_path)
             logger.info("Resuming from %s", model_path)
         else:
-            model_path = self.config.model_name
+            model_path = cfg.model_name
             logger.info("Loading base model: %s", model_path)
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -146,35 +148,74 @@ class SelfSupervisedTrainer:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
+        if cfg.use_lora:
+            from peft import LoraConfig, TaskType, get_peft_model
+
+            lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=cfg.lora_r,
+                lora_alpha=cfg.lora_alpha,
+                lora_dropout=cfg.lora_dropout,
+                target_modules=cfg.lora_target_modules,
+            )
+            model = get_peft_model(model, lora_config)
+            trainable = sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
+            total = sum(p.numel() for p in model.parameters())
+            logger.info(
+                "LoRA: r=%d, alpha=%d, trainable=%d (%.2f%% of %d)",
+                cfg.lora_r, cfg.lora_alpha, trainable,
+                trainable / total * 100, total,
+            )
+
         return model, tokenizer
 
     def _build_dataloaders(self, tokenizer):
-        """Load corpus, tokenize to HDF5 if needed, return train/val loaders."""
+        """Load corpus, tokenize to HDF5 if needed, return train/val loaders.
+
+        When ``english_corpus_path`` is set, interleaves English data
+        to maintain cross-lingual transfer capability.
+        """
         from lfm.translator.tokenized_dataset import TokenizedH5Dataset
 
         cfg = self.config
         corpus_path = Path(cfg.corpus_path)
 
-        self._train_ds, self._val_ds = TokenizedH5Dataset.from_corpus(
+        primary_train, self._val_ds = TokenizedH5Dataset.from_corpus(
             corpus_path, tokenizer, cfg.max_len,
         )
 
+        # Interleave English if configured
+        if cfg.english_corpus_path:
+            from lfm.translator.interleaved_dataset import InterleavedDataset
+
+            english_train, _ = TokenizedH5Dataset.from_corpus(
+                Path(cfg.english_corpus_path), tokenizer, cfg.max_len,
+            )
+            self._train_ds = InterleavedDataset(
+                primary_train, english_train,
+                secondary_ratio=cfg.english_ratio,
+                seed=cfg.seed,
+            )
+        else:
+            self._train_ds = primary_train
+
         train_loader = DataLoader(
             self._train_ds, batch_size=self._batch_size, shuffle=True,
+            num_workers=4, pin_memory=True, prefetch_factor=2,
+            persistent_workers=True,
         )
-        val_loader = DataLoader(self._val_ds, batch_size=self._batch_size)
+        val_loader = DataLoader(
+            self._val_ds, batch_size=self._batch_size,
+            num_workers=2, pin_memory=True,
+        )
 
         logger.info(
             "Train: %d examples, Val: %d examples",
             len(self._train_ds), len(self._val_ds),
         )
         return train_loader, val_loader
-
-    def _rebuild_train_loader(self) -> DataLoader:
-        """Rebuild train DataLoader with current _batch_size."""
-        return DataLoader(
-            self._train_ds, batch_size=self._batch_size, shuffle=True,
-        )
 
     def _build_optimizer(self, model, total_steps):
         """Create optimizer, scheduler, and grad scaler."""

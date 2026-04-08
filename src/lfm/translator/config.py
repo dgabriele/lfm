@@ -156,7 +156,11 @@ class DialogueCorpusConfig(LFMBaseConfig):
 
 
 class PretrainConfig(LFMBaseConfig):
-    """Configuration for self-supervised LLM pretraining on IPA corpus."""
+    """Configuration for self-supervised LLM pretraining on IPA corpus.
+
+    Supports full fine-tuning or LoRA, with optional English corpus
+    interleaving for cross-lingual transfer.
+    """
 
     model_name: str = "Qwen/Qwen2.5-0.5B"
     corpus_path: str = "data/translator/corpus.txt"
@@ -168,7 +172,20 @@ class PretrainConfig(LFMBaseConfig):
     use_amp: bool = True
     warmup_fraction: float = 0.1
     max_grad_norm: float = 1.0
-    checkpoint_fraction: float = 0.1  # save checkpoint every N% of epoch (0.1 = 10%)
+    checkpoint_fraction: float = 0.1
     output_dir: str = "data/translator"
     device: str = "cuda"
     seed: int = 42
+
+    # LoRA — freeze base model, train low-rank adapters only
+    use_lora: bool = False
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    lora_target_modules: list[str] = [
+        "q_proj", "k_proj", "v_proj", "o_proj",
+    ]
+
+    # Interleaved English corpus — maintains cross-lingual transfer
+    english_corpus_path: str | None = None
+    english_ratio: float = 0.3  # fraction of training data that is English
