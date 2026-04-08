@@ -110,17 +110,19 @@ class VastAIProvider(CloudProvider):
         """
         name = name or f"lfm-{int(time.time())}"
 
-        # Normalize GPU name
-        gpu_name = instance_type.replace(" ", "_").replace("-", "_")
+        # Normalize GPU name — Vast.ai uses space-separated names
         gpu_name_map = {
-            "A100_80GB": "A100_SXM4",
-            "A100_40GB": "A100_PCIE",
-            "A100_80GB_PCIe": "A100_PCIE_80GB",
-            "H100": "H100_SXM",
-            "RTX_4090": "RTX_4090",
-            "RTX_3090": "RTX_3090",
+            "A100_80GB": "A100 SXM4",
+            "A100-80GB": "A100 SXM4",
+            "A100_40GB": "A100 PCIE",
+            "A100_SXM4": "A100 SXM4",
+            "A100_PCIE": "A100 PCIE",
+            "H100": "H100 SXM",
+            "H100_SXM": "H100 SXM",
         }
-        gpu_name = gpu_name_map.get(gpu_name, gpu_name)
+        gpu_name = gpu_name_map.get(instance_type, instance_type)
+        # Underscores to spaces for any unmapped names
+        gpu_name = gpu_name.replace("_", " ")
 
         logger.info("Searching for %s offers...", gpu_name)
         offer = self._find_offer(gpu_name)
@@ -140,7 +142,7 @@ class VastAIProvider(CloudProvider):
 
         # Create instance
         data = self._put(f"/asks/{offer_id}/", {
-            "image": "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel",
+            "image": "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
             "label": name,
             "disk": 50,
             "runtype": "ssh_direct",
@@ -160,12 +162,19 @@ class VastAIProvider(CloudProvider):
         """Poll until instance is running with SSH."""
         start = time.time()
         while time.time() - start < timeout:
-            inst = self.get(instance_id)
-            if inst.status == "running" and inst.ip:
-                logger.info(
-                    "Instance %s running at %s", inst.id, inst.ip,
-                )
-                return inst
+            # Use list_instances — more reliable than single-instance endpoint
+            for inst in self.list_instances():
+                if inst.id == instance_id:
+                    if inst.status == "running" and inst.ip:
+                        logger.info(
+                            "Instance %s running at %s", inst.id, inst.ip,
+                        )
+                        return inst
+                    logger.debug(
+                        "Instance %s: status=%s ip=%s",
+                        instance_id, inst.status, inst.ip,
+                    )
+                    break
             time.sleep(10)
         raise TimeoutError(
             f"Instance {instance_id} not ready after {timeout}s"

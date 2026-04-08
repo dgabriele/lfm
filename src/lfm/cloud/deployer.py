@@ -23,8 +23,11 @@ logger = logging.getLogger(__name__)
 # Directories and patterns to exclude from the source tarball
 EXCLUDE_PATTERNS = {
     ".git", "__pycache__", ".venv", "*.pyc", ".mypy_cache",
-    ".ruff_cache", "data", "output", "*.egg-info", ".eggs",
+    ".ruff_cache", "output", "*.egg-info", ".eggs",
 }
+
+# Top-level dirs to exclude (not subdirs like src/lfm/data/)
+EXCLUDE_TOP_DIRS = {"data", ".git"}
 
 # Remote setup script — installs deps and prepares environment
 SETUP_SCRIPT = """\
@@ -115,13 +118,15 @@ class Deployer:
 
         def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
             name = info.name
+            # Check top-level directory exclusions (e.g., lfm/data/ but not lfm/src/lfm/data/)
+            parts = name.split("/")
+            if len(parts) >= 2 and parts[1] in EXCLUDE_TOP_DIRS:
+                return None
             for pat in EXCLUDE_PATTERNS:
                 if pat.startswith("*"):
                     if name.endswith(pat[1:]):
                         return None
-                elif f"/{pat}/" in f"/{name}/" or name.startswith(f"{pat}/"):
-                    return None
-                elif name == pat:
+                elif f"/{pat}/" in f"/{name}/":
                     return None
             return info
 
@@ -132,6 +137,31 @@ class Deployer:
         logger.info("Created tarball: %.1f MB", size_mb)
         return tmp
 
+    def _scp(self, instance: Instance, local: str, remote: str) -> None:
+        """Upload a file via scp subprocess (reliable for large files)."""
+        if ":" in instance.ip:
+            hostname, port = instance.ip.rsplit(":", 1)
+        else:
+            hostname, port = instance.ip, "22"
+
+        cmd = [
+            "scp", "-o", "StrictHostKeyChecking=no",
+            "-P", port,
+            "-i", self.ssh_key_path,
+            local,
+            f"{self.ssh_user}@{hostname}:{remote}",
+        ]
+        logger.info("scp %s → %s:%s", local, hostname, remote)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        if result.returncode != 0:
+            # Filter out SSH banners from stderr
+            err = "\n".join(
+                l for l in result.stderr.splitlines()
+                if not any(x in l for x in ("Welcome to", "Have fun", "Permanently added"))
+            ).strip()
+            if err:
+                raise RuntimeError(f"scp failed (exit {result.returncode}): {err}")
+
     def upload_project(
         self,
         instance: Instance,
@@ -139,6 +169,8 @@ class Deployer:
         extra_files: list[str] | None = None,
     ) -> None:
         """Upload project source code and optional data files.
+
+        Uses scp for file transfer (reliable for large files).
 
         Args:
             instance: Target instance.
@@ -150,34 +182,40 @@ class Deployer:
 
         ssh = self._connect(instance)
         try:
-            sftp = ssh.open_sftp()
-
-            # Create workdir and upload tarball
+            # Create workdir
             self._exec(ssh, f"mkdir -p {self.remote_workdir}")
-            remote_tar = f"/tmp/lfm_upload.tar.gz"
-            logger.info("Uploading project to %s...", instance.ip)
-            sftp.put(tarball, remote_tar)
+        finally:
+            ssh.close()
+
+        try:
+            # Upload tarball via scp
+            remote_tar = "/tmp/lfm_upload.tar.gz"
+            self._scp(instance, tarball, remote_tar)
 
             # Extract
-            self._exec(ssh, (
-                f"cd {self.remote_workdir} && "
-                f"tar -xzf {remote_tar} --strip-components=1 && "
-                f"rm {remote_tar}"
-            ))
+            ssh = self._connect(instance)
+            try:
+                self._exec(ssh, (
+                    f"cd {self.remote_workdir} && "
+                    f"tar -xzf {remote_tar} --strip-components=1 && "
+                    f"rm {remote_tar}"
+                ))
+            finally:
+                ssh.close()
 
-            # Upload extra files
+            # Upload extra files via scp
             for local_path in extra_files or []:
                 local = Path(local_path)
                 remote = f"{self.remote_workdir}/{local}"
                 # Create parent dirs
-                self._exec(ssh, f"mkdir -p $(dirname {remote})")
-                logger.info("Uploading %s...", local_path)
-                sftp.put(str(local), remote)
-
-            sftp.close()
+                ssh = self._connect(instance)
+                try:
+                    self._exec(ssh, f"mkdir -p $(dirname {remote})")
+                finally:
+                    ssh.close()
+                self._scp(instance, str(local), remote)
         finally:
             os.unlink(tarball)
-            ssh.close()
 
     def setup_environment(self, instance: Instance) -> None:
         """Install dependencies on the remote instance."""
@@ -231,11 +269,9 @@ class Deployer:
             parts.append(f"{run_cmd} > {log_path} 2>&1")
 
             full_cmd = " && ".join(parts)
-            screen_cmd = (
-                f"screen -dmS {job_name} bash -c '{full_cmd}'"
-            )
+            nohup_cmd = f"nohup bash -c '{full_cmd}' &"
 
-            exit_code, _, stderr = self._exec(ssh, screen_cmd)
+            exit_code, _, stderr = self._exec(ssh, nohup_cmd)
             if exit_code != 0:
                 raise RuntimeError(f"Failed to launch: {stderr}")
 
@@ -248,13 +284,13 @@ class Deployer:
             ssh.close()
 
     def job_running(self, instance: Instance, job_name: str) -> bool:
-        """Check if a screen session is still running."""
+        """Check if the training job is still running."""
         ssh = self._connect(instance)
         try:
             _, stdout, _ = self._exec(
-                ssh, f"screen -list | grep {job_name} || true",
+                ssh, f"pgrep -f '{job_name}' || true",
             )
-            return job_name in stdout
+            return stdout.strip() != ""
         finally:
             ssh.close()
 
