@@ -46,7 +46,20 @@ poetry run lfm visualize grammar \
 
 Each paragraph consists of 4 sentences elaborating on the same source embedding from different angles. The ContextTransformer conditions each sentence on the hidden states of previous sentences, producing progressive elaboration rather than repetition.
 
-Three representative paragraphs:
+Three representative paragraphs are shown below, first in the original syllable-hyphenated IPA as produced by the decoder, then in the isomorphic romanization used for LLM training. The romanization is a lossless 1:1 mapping from IPA characters to ASCII — every phonemic contrast is preserved, but no IPA Unicode appears in the training data.
+
+**Document 1 — IPA (as generated):**
+
+```
+kəː-rɪŋ vjis-ka tak na za-pon-te prjiː-ka eɪdrtj vɝɕːons ɛ-vjɑo-je-liɨ.
+aː-rɪŋ t͈ʌ-kxʌ-sɪz kɹieɪ-tʌd t͡ʃok ɑp-tɑ-ʃɯŋ a la-nuːrd pro-vol-maːaːiɕː
+b kðoʊz tuzd di-sʌnt ðʌ kɔɹ-tɪŋ ʌ-vʌn. d͡ʑʌl-laj-nɨe podn-zo-na-rit iz
+ma-nji-la t͡ɕjes-tji-rəj bi-sa bə-ri vor-datj skjuː-jas e-ɡo t͡ɕːʌ-lɨx
+do-mə-ji-ha-da trʃ. ʊ-nɪŋːr a-lax horːt t͡ʃoʊ-nɪŋs naː uːkr ɪt
+vo-ku-ɡɛ-daːm ba-hʌ-pɨ s infs tuːa saŋf-ɝtji t͡ɕjuːj̃s s pɹjʌn-sə.
+```
+
+**Document 1 — Romanized (as trained on):**
 
 ```
 Kexxrihng vjiska tak na zaponte prjixka eyudrtj verscxons ehvjaaojeliix.
@@ -58,6 +71,20 @@ nax uxkr iht vokugehdaxm bahuxpix s infs tuxa sangfertji tcjuxjns s
 prxjuxnsex.
 ```
 
+**Document 2 — IPA:**
+
+```
+dɛ sɛ-ɾa pleɪ-sɪ-zla um mɒks xaʌn-tə sɛr-tuʊl-ziat͡-ɕlu di-pʌl
+ko-mo-jʌns ju-sot. jaŋ sə-paʊ̯om na-ɡɑ-ton zaɪ̯n sɪ-ta t͡ɕhiu-ru bɒk
+vonz-hɑt ba-ru d͡ʑaut so-la-taŋ to-bur sin. sɝom dɛ-doŋt͡-ɕaŋ-si-sɛnt-kɯm
+t͡ɕɛ ta-ɰʌn skhoɛs zʊxt mɛ-mwin t͡ɕɛ-ksən ɛ-tɪn-ta laev kwɔɹt-ɝlin ma
+ɔ-fɐn də-tʌnz. sɝmi-nen ɡə-rɪŋŋs fɑɹk-tʌd fɹʌm maoʊ-nɯn i d͡ʑuv-di
+kloʊn ʔar-dʕhil æt ðʌ sɔŋ ʌp tu paʊ-ɹi mæ-nʌdʒ-ɝi sin dʒʌst bɪzn
+pɹʌ-poʊ-zʌl ðʌ ɹoʊ.
+```
+
+**Document 2 — Romanized:**
+
 ```
 Deh sehrra pleyusihzla um maoks xauxntex sehrtuuhlziatsclu dipuxl
 komojuxns jusot. Jang sexpawom nagaaton zayun sihta tchiuru baok
@@ -67,6 +94,22 @@ ma awfaxn dextuxnz. Serminen gexrihngngs faarxktuxd frxuxm maownuun i
 djuvdi klown qardqhhil aet dhux sawng uxp tu pauhrxi maenuxdzheri sin
 dzhuxst bihzn prxuxpowzuxl dhux rxow.
 ```
+
+**Document 3 — IPA:**
+
+```
+æz pi-ɹɔs mʌst ɪ-fɹʌ-kʌnt fɹʌm i-θɛ-tɛn-dʌnt ɪn kɪl-zɛs jɔɹ
+æ-dmeɪlz tu ðʌ ɹɪ-mɑn æd-ɕɔɹ-twiʌt ɪn ɛ-ksʌ-lʌnt kɛɹ. æz po-kɐ-mos
+kwɛ ʋɑi-no ɐ-kon-nostj daʔs ɛ suɐ pɐɾ-tɛɐ dɛ ɐɾ-mos ɐ wɛl-zɛɾ ɛm
+o-wi-sɐ sɛ-ksɐ-ɾa pɐ-ɾɐ sew po-dɛ-do ɛ-nːo-lɛ. ʌnd fɔɹst nu-mʌ-neɪ
+kʊd mits ʌv leɪk ɛ-ʃʌ-lʌnt æ-tʌmz ðʌ ɡʌv-ɝmʌnt tu meɪk kʌ-mɪŋ oʊvɝ
+ɹi-sɔɹs ɡɹæ-sʌl ʌ pɹɑ-sɪ-kjʌlɝ tu ðʌ dɪt-ɝmʌ-nən fɔɹ dɹu hi
+dɪf-ɝɛn-sɪk ʌnd wɪl leɪt hɪm. qrrːint͡s aːs ɰi-muː-loɡ ko
+d͡ʒjaːu-nlɛ-maː-tiɒ bo-traːn hoɟ ɒ ko-lːouʃ-ti-nɒk ʃɒn-hø-ɡeːn ki
+ki-ʃːiː saː-maː-jaːk asrt͡s-ta.
+```
+
+**Document 3 — Romanized:**
 
 ```
 Aez pirxaws muxst ihfrxuxkuxnt frxuxm ithehtehnduxnt ihn kihlzehs jawrx
@@ -80,11 +123,19 @@ Qrrxints axs mwimuxlog ko dxjaxunlehmaxtiao botraxn hojj ao
 kolxoushtinaok shaonhougexn ki kishxix saxmaxjaxk asrtsta.
 ```
 
-Observable within-paragraph patterns:
+### Linguistic phenomena at multiple scales
 
-- **Typological consistency**: each paragraph maintains a phonotactic register. The first example stays in a mixed Germanic-agglutinative register. The second shifts toward Turkic-like agglutination. The third blends Romance and Germanic morphology.
-- **Progressive sentence length**: later sentences in a paragraph tend to be longer than earlier ones, reflecting the context transformer's progressive elaboration.
-- **Vocabulary recycling**: morphological roots recur within paragraphs (`sehrr-`, `serm-` in the second example; `prxux-`, `frxux-` in the third), producing referential consistency.
+**Phonotactic level** — syllable structure follows natural constraints. In the IPA for Document 1, onsets rise in sonority (`kɹie-`, `pɹjʌ-`, `skjuː-`) and codas fall (`-lɨx`, `-datj`, `-ɡɛ-daːm`), consistent with the Sonority Sequencing Principle. The romanization preserves this structure: `krxiey-`, `prxjux-`, `skjux-` maintain the consonant cluster patterns.
+
+**Morphological level** — productive affixation is visible across documents. In Document 2's IPA, the root `sɝ-` appears in both `sɝom` (sentence 3) and `sɝmi-nen` (sentence 4) with different suffixes, suggesting a productive stem. In Document 3, the prefix `ɪ-`/`ɛ-` attaches to different roots: `ɪ-fɹʌ-kʌnt`, `ɛ-ksʌ-lʌnt`, `ɛ-ʃʌ-lʌnt` — a derivational pattern producing modifier-like forms. The suffix `-uxnt`/`-uxnz` recurs across documents (`disuxnt`, `ehksuxluxnt`, `dextuxnz`) as what appears to be an inflectional ending.
+
+**Word-level** — function words emerge naturally. Short, high-frequency words like `tu`, `dhux`, `ihn`, `uxnd`, `deh`, `ko` appear repeatedly across documents, serving connective roles analogous to prepositions, articles, and conjunctions. These are distinct from the longer, lower-frequency content words that carry document-specific meaning.
+
+**Phrase level** — recurring category sequences suggest phrase templates. Patterns like `deh + content + content` (Document 2, sentence 1: `deh sehrra pleyusihzla`) and `uxnd + content + content` (Document 3, sentence 3: `uxnd fawrxst numuxneyu`) mirror determiner-noun or conjunction-phrase structures.
+
+**Discourse level** — paragraphs maintain typological consistency. Document 1 stays in a mixed Slavic-agglutinative register throughout. Document 2 opens Romance (`deh sehrra`), shifts to Austronesian-like patterns (`jang sexpawom`), and closes with Germanic morphology (`dzhuxst bihzn prxuxpowzuxl`). Document 3 blends English-like syntax (`dhux guxvermuxnt tu meyuk`) with Romance (`pokaxmos kweh vvaaino`) and Uralic-like agglutination (`kolxoushtinaok`). The context transformer ensures each sentence builds on the previous one's typological character while introducing variation.
+
+**Cross-sentence cohesion** — vocabulary recycling creates referential consistency. In Document 2, the roots `sehrr-`/`serm-` recur across sentences 1, 3, and 4. In Document 3, `frxux-` appears in both sentences 1 and 3 (`frxuxm`, `frxuxkuxnt`). This is not random — the context transformer conditions each turn on the previous turns' hidden states, producing lexical continuity.
 
 ## Word categories: what they are and how they are induced
 
