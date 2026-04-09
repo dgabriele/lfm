@@ -8,16 +8,17 @@ Distributional and grammatical analysis of the Xenoglot dialogue corpus, generat
 
 1. [Overview](#overview)
 2. [Document structure](#document-structure)
-3. [Word category distribution](#word-category-distribution)
-4. [Syntactic transition structure](#syntactic-transition-structure)
-5. [Sentence position preferences](#sentence-position-preferences)
-6. [Category hierarchy](#category-hierarchy)
-7. [Productivity](#productivity)
-8. [Sentence length](#sentence-length)
-9. [Zipf's law](#zipfs-law)
-10. [Category network](#category-network)
-11. [Compositionality](#compositionality)
-12. [Implications](#implications)
+3. [Word categories: what they are and how they are induced](#word-categories-what-they-are-and-how-they-are-induced)
+4. [Word category distribution](#word-category-distribution)
+5. [Syntactic transition structure](#syntactic-transition-structure)
+6. [Sentence position preferences](#sentence-position-preferences)
+7. [Category hierarchy](#category-hierarchy)
+8. [Productivity](#productivity)
+9. [Sentence length](#sentence-length)
+10. [Zipf's law](#zipfs-law)
+11. [Category network](#category-network)
+12. [Compositionality](#compositionality)
+13. [Implications](#implications)
 
 ---
 
@@ -85,9 +86,25 @@ Observable within-paragraph patterns:
 - **Progressive sentence length**: later sentences in a paragraph tend to be longer than earlier ones, reflecting the context transformer's progressive elaboration.
 - **Vocabulary recycling**: morphological roots recur within paragraphs (`sehrr-`, `serm-` in the second example; `prxux-`, `frxux-` in the third), producing referential consistency.
 
+## Word categories: what they are and how they are induced
+
+The visualizations in this document refer to "categories" labeled C0 through C23. These are the Xenoglot analog of parts of speech — groups of words that behave similarly in context.
+
+In natural languages, parts of speech (noun, verb, adjective, etc.) are defined by distributional behavior: nouns appear after determiners, verbs take objects, adjectives precede nouns. A word's syntactic role is determined not by what it means but by where it appears and what it appears next to. This is the distributional hypothesis: words that occur in similar contexts belong to the same category.
+
+We apply this principle to the Xenoglot corpus to discover its grammatical categories without any human annotation:
+
+1. **Co-occurrence vectors**: for each word that appears at least 5 times in the corpus, we build a vector counting which other words appear within a 2-word window. This captures the word's distributional context — the company it keeps.
+2. **PPMI + SVD**: the raw co-occurrence counts are transformed to Positive Pointwise Mutual Information (emphasizing informative co-occurrences over frequency effects), then reduced to 50 dimensions via Singular Value Decomposition. Each word is now a point in a 50-dimensional distributional space.
+3. **KMeans clustering**: words are grouped into 24 clusters based on proximity in this distributional space. Words that appear in similar contexts end up in the same cluster.
+
+The result is 24 word categories — groups of words that play similar syntactic roles in Xenoglot. These are not predefined or supervised; they are discovered purely from the statistical patterns in the corpus. When we observe that category C15 has low transition entropy (it almost always precedes specific other categories), we interpret this the same way a linguist would interpret a determiner class — it's syntactically constrained, appearing in a fixed structural position relative to other elements.
+
+The categories are labeled C0-C23 arbitrarily — the numbers have no inherent meaning. What matters is the relationships between categories: which ones follow which, which ones are positionally constrained, which ones are productive, and how they cluster hierarchically.
+
 ## Word category distribution
 
-Distributional clustering (PPMI + SVD + KMeans, 24 categories) reveals a Zipfian distribution of word categories:
+Distributional clustering reveals a Zipfian distribution across the 24 induced categories:
 
 ![Word category distribution](static/images/grammar_category_distribution.png)
 
