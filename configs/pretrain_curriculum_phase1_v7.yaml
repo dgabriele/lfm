@@ -1,0 +1,23 @@
+# Curriculum Phase 1: Pure Xenoglot
+# Learn phonotactic patterns, discourse structure, and turn elaboration
+# from monolingual xenoglot dialogue corpus.
+#
+# Start from base Qwen model — no English mixing yet.
+# Output: data/translator_curriculum_v7/phase1/model/
+
+model_name: Qwen/Qwen2.5-0.5B
+corpus_path: data/translator/dialogue_corpus_v7_tagged.txt
+output_dir: data/translator_curriculum_v7/phase1
+
+epochs: 2
+lr: 5e-5
+batch_size: 1
+max_len: 512
+gradient_accumulation_steps: 128
+use_amp: true
+warmup_fraction: 0.1
+max_grad_norm: 1.0
+checkpoint_fraction: 0.1
+
+device: cuda
+seed: 42

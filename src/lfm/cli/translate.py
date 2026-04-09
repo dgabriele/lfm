@@ -467,6 +467,67 @@ class GenerateDialogueCorpusCommand(CLICommand):
         return 0
 
 
+class GenerateBilingualCorpusCommand(CLICommand):
+    """Generate bilingual (Xenoglot + English) corpus with cluster anchors."""
+
+    @property
+    def name(self) -> str:
+        return "generate-bilingual-corpus"
+
+    @property
+    def help(self) -> str:
+        return "Generate cluster-anchored bilingual corpus for cross-lingual bridging"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Generate single-line bilingual documents containing a cluster "
+            "anchor [C{id}], xenoglot dialogue turns, and the source English "
+            "passage. Forces the LLM to build cross-lingual bridging "
+            "representations within a single context window."
+        )
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--dialogue-checkpoint", default="data/dialogue_game/best.pt")
+        parser.add_argument("--decoder-path", default="data/vae_decoder.pt")
+        parser.add_argument("--spm-path", default="data/spm.model")
+        parser.add_argument("--embedding-store", default="data/embeddings")
+        parser.add_argument("--passes", type=int, default=3)
+        parser.add_argument("--batch-size", type=int, default=16)
+        parser.add_argument("--max-english-chars", type=int, default=300,
+                            help="Truncate English passages to this many chars (default: 300)")
+        parser.add_argument("--output", default="data/translator/bilingual_corpus.txt")
+        parser.add_argument("--device", default="cuda")
+        parser.add_argument("--seed", type=int, default=42)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        from lfm.translator.bilingual_corpus import BilingualCorpusGenerator
+        from lfm.translator.config import BilingualCorpusConfig
+
+        config = BilingualCorpusConfig(
+            dialogue_checkpoint=args.dialogue_checkpoint,
+            decoder_path=args.decoder_path,
+            spm_path=args.spm_path,
+            embedding_store_dir=args.embedding_store,
+            num_passes=args.passes,
+            batch_size=args.batch_size,
+            max_english_chars=args.max_english_chars,
+            output_path=args.output,
+            device=args.device,
+            seed=args.seed,
+        )
+
+        gen = BilingualCorpusGenerator(config)
+        stats = gen.generate()
+        print(
+            f"Generated {stats['num_documents']} documents, "
+            f"{stats['num_turns']} turns, {stats['total_tokens']} tokens, "
+            f"{stats['unique_documents']} unique, "
+            f"{stats['num_with_english']} with English → {args.output}"
+        )
+        return 0
+
+
 def register_translate_group(
     parent_subparsers: argparse._SubParsersAction,
 ) -> None:
@@ -486,6 +547,7 @@ def register_translate_group(
         GeneratePairsCommand(),
         GenerateCorpusCommand(),
         GenerateDialogueCorpusCommand(),
+        GenerateBilingualCorpusCommand(),
         PretrainCommand(),
         TrainCommand(),
         EvalCommand(),

@@ -39,10 +39,14 @@ The system expresses what neural networks perceive. An LLM trained on the emerge
 
 1. **Finish dialogue corpus generation** (900K documents, 3 passes × 300K embeddings)
 2. **LLM self-supervised pretraining** on dialogue corpus (Qwen 2.5 0.5B)
-3. **Few-shot translation evaluation**
-4. **Reconstruction training** — test inverse decoder approach as alternative/complement to games
-5. **Multi-target discrimination** — set max_targets > 1 for category-level expression
-6. **LIGO gravitational wave analysis** — planned domain application (see `docs/ligo-plan.md`)
+3. **Cross-lingual bridging** via progressive curriculum:
+   - Phase 1: Pure xenoglot (phonotactic/discourse structure)
+   - Phase 2: Batch-interleaved xenoglot + English (prevent forgetting)
+   - Phase 3: Bilingual documents with cluster anchors (force bridging)
+4. **Few-shot translation evaluation**
+5. **Reconstruction training** — test inverse decoder approach as alternative/complement to games
+6. **Multi-target discrimination** — set max_targets > 1 for category-level expression
+7. **LIGO gravitational wave analysis** — planned domain application (see `docs/ligo-plan.md`)
 
 ## Architecture
 
@@ -76,6 +80,7 @@ Input Embedding (any dim)
 - **InverseDecoder** (`reconstruction/inverse_decoder.py`): Transformer encoder + learned query readout that recovers embeddings from surface token representations
 - **SelfSupervisedTrainer** (`translator/pretrain.py`): Causal LM training on IPA corpus with full resume support
 - **DialogueCorpusGenerator** (`translator/dialogue_corpus.py`): Generate multi-turn IPA documents from dialogue game checkpoints
+- **BilingualCorpusGenerator** (`translator/bilingual_corpus.py`): Generate cluster-anchored bilingual documents (xenoglot + English) for cross-lingual bridging — each line has `[C{id}] [T0] xenoglot... [EN] English passage`
 - **CorpusGenerator** (`translator/corpus.py`): Generate single-expression IPA corpus with configurable output mode (hyphenated_ipa, romanized, hyphenated_romanized)
 - **syllable_hyphenate** (`translator/romanize.py`): Sonority-based syllabification with Maximum Onset Principle and vowelless syllable merging
 
@@ -113,15 +118,16 @@ src/lfm/
     romanize.py         # IPA → ASCII romanization + syllable_hyphenate
     corpus.py           # BaseCorpusGenerator, ExpressionCorpusGenerator
     dialogue_corpus.py  # DialogueCorpusGenerator (multi-turn documents with turn markers)
+    bilingual_corpus.py # BilingualCorpusGenerator (cluster-anchored xenoglot + English documents)
     pretrain.py         # SelfSupervisedTrainer (causal LM on IPA corpus)
     pairs.py            # PairGenerator (IPA + English pairs, legacy supervised)
     trainer.py          # TranslatorTrainer (supervised, legacy)
     evaluator.py        # BLEU + semantic similarity evaluation
-    config.py           # CorpusConfig, PretrainConfig, TranslatorConfig
+    config.py           # CorpusConfig, BilingualCorpusConfig, PretrainConfig, TranslatorConfig
   cli/                  # CLI framework (lfm command)
     agent.py            # lfm agent {referential,expression,dialogue}
     train.py            # lfm train {reconstruction}
-    translate.py        # lfm translate {generate-corpus,pretrain,generate-pairs,train,eval}
+    translate.py        # lfm translate {generate-corpus,generate-dialogue-corpus,generate-bilingual-corpus,pretrain,generate-pairs,train,eval}
     pretrain.py         # lfm pretrain (VAE decoder)
     visualize/          # lfm visualize {tsne,clustering,attention,...,surface-diversity,all}
     explore.py          # lfm explore {dim-sweep,expression-sample}
@@ -193,8 +199,20 @@ poetry run lfm translate generate-dialogue-corpus \
   --spm-path data/models/v7/spm.model \
   --passes 3 --batch-size 256 --output data/translator/dialogue_corpus_v7.txt
 
+# Generate bilingual corpus (cluster-anchored xenoglot + English documents)
+poetry run lfm translate generate-bilingual-corpus \
+  --dialogue-checkpoint data/dialogue_game_v7/best.pt \
+  --decoder-path data/models/v7/vae_decoder.pt \
+  --spm-path data/models/v7/spm.model \
+  --passes 3 --batch-size 256 --output data/translator/bilingual_corpus_v7.txt
+
 # Self-supervised LLM pretraining on IPA corpus
 poetry run lfm translate pretrain configs/pretrain_dialogue_v7.yaml
+
+# Progressive curriculum (Phase 1 → 2 → 3, each resumes from previous)
+poetry run lfm translate pretrain configs/pretrain_curriculum_phase1_v7.yaml
+poetry run lfm translate pretrain configs/pretrain_curriculum_phase2_v7.yaml
+poetry run lfm translate pretrain configs/pretrain_curriculum_phase3_v7.yaml
 
 # Visualizations
 poetry run lfm visualize all --checkpoint data/models/v7/vae_resume.pt

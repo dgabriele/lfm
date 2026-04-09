@@ -155,6 +155,38 @@ class DialogueCorpusConfig(LFMBaseConfig):
     seed: int = 42
 
 
+class BilingualCorpusConfig(LFMBaseConfig):
+    """Configuration for generating bilingual (Xenoglot + English) corpus.
+
+    Each document is a single line containing a cluster anchor token,
+    xenoglot dialogue turns, and the source English passage — all within
+    one context window.  Forces the LLM to build cross-lingual bridging
+    representations via shared attention over both languages.
+
+    Document format::
+
+        [C1847] [T0] sə-kav-kos ... [T1] pa-ria-vse ... [EN] The village market...
+
+    Attributes:
+        max_english_chars: Truncate English passages beyond this length
+            to keep xenoglot/English balance within ``max_len``.
+    """
+
+    dialogue_checkpoint: str = "data/dialogue_game/best.pt"
+    decoder_path: str = "data/vae_decoder.pt"
+    spm_path: str = "data/spm.model"
+    embedding_store_dir: str = "data/embeddings"
+    output_mode: str = "hyphenated_ipa"
+    num_passes: int = 3
+    batch_size: int = 16
+    max_english_chars: int = 300
+    output_path: str = "data/translator/bilingual_corpus.txt"
+    tokenize_model: str | None = None
+    tokenize_max_len: int = 512
+    device: str = "cuda"
+    seed: int = 42
+
+
 class PretrainConfig(LFMBaseConfig):
     """Configuration for self-supervised LLM pretraining on IPA corpus.
 
