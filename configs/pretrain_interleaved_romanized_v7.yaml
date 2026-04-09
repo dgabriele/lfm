@@ -1,8 +1,9 @@
-# Full fine-tune with interleaved isomorphic Xenoglot + English
-# Isomorphic romanization eliminates IPA Unicode bias.
+# Full fine-tune with interleaved Xenoglot + English
+# Natural paragraph format: isomorphic romanization, no hyphens,
+# no brackets, capitalized sentences with periods.
 
 model_name: Qwen/Qwen2.5-0.5B
-corpus_path: data/translator/dialogue_corpus_v7_romanized.txt
+corpus_path: data/translator/dialogue_corpus_v7_natural.txt
 english_corpus_path: data/translator/english_paragraphs.txt
 english_ratio: 0.3
 output_dir: data/translator_interleaved_romanized_v7

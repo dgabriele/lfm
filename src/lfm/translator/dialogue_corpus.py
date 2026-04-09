@@ -199,9 +199,26 @@ class DialogueCorpusGenerator(BaseCorpusGenerator):
                             if not doc_turns:
                                 continue
 
-                            tag = f"[{cfg.language_tag}]\n" if cfg.language_tag else ""
-                            doc_text = tag + "\n".join(doc_turns)
-                            f.write(doc_text + "\n\n")
+                            if cfg.paragraph_format:
+                                # Natural paragraph: strip turn markers,
+                                # capitalize, add periods, single line
+                                sentences = []
+                                for t in doc_turns:
+                                    # Remove [TN] prefix if present
+                                    text = t.split("] ", 1)[-1] if "] " in t else t
+                                    text = text.strip()
+                                    if text:
+                                        text = text[0].upper() + text[1:]
+                                        if not text.endswith("."):
+                                            text += "."
+                                        sentences.append(text)
+                                doc_text = " ".join(sentences)
+                            else:
+                                tag = f"[{cfg.language_tag}]\n" if cfg.language_tag else ""
+                                doc_text = tag + "\n".join(doc_turns)
+
+                            f.write(doc_text + "\n"
+                                    + ("" if cfg.paragraph_format else "\n"))
 
                             num_documents += 1
                             num_turns += len(doc_turns)

@@ -146,10 +146,11 @@ class DialogueCorpusConfig(LFMBaseConfig):
     embedding_store_dir: str = "data/embeddings"
     output_mode: str = "hyphenated_ipa"
     language_tag: str = "Xenoglot"
+    paragraph_format: bool = False  # natural paragraph: capitalize, periods, single line
     num_passes: int = 5
     batch_size: int = 16
     output_path: str = "data/translator/dialogue_corpus.txt"
-    tokenize_model: str | None = None  # HF model name; if set, also writes tokenized H5
+    tokenize_model: str | None = None
     tokenize_max_len: int = 512
     device: str = "cuda"
     seed: int = 42

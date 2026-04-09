@@ -46,7 +46,7 @@ def format_ipa(ipa: str, mode: str) -> str:
         return romanize(ipa)
     if mode == MODE_ROMANIZED_ISO:
         from lfm.translator.romanize import romanize_iso
-        return romanize_iso(syllable_hyphenate(ipa))
+        return romanize_iso(ipa)
     return syllable_hyphenate(ipa)
 
 
