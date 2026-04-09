@@ -127,12 +127,14 @@ def register_visualize_group(
         BinnedSimilarityCommand,
         PretrainBinnedSimilarityCommand,
     )
+    from lfm.cli.visualize.grammar import GrammarCommand
 
     standalone_commands = [
         TranslationCommand(),
         DatasetVizCommand(),
         BinnedSimilarityCommand(),
         PretrainBinnedSimilarityCommand(),
+        GrammarCommand(),
     ]
 
     for cmd in standalone_commands:
