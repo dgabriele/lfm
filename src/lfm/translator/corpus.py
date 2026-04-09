@@ -22,6 +22,7 @@ from lfm.translator.romanize import romanize, syllable_hyphenate
 MODE_HYPHENATED_IPA = "hyphenated_ipa"
 MODE_ROMANIZED = "romanized"
 MODE_HYPHENATED_ROMANIZED = "hyphenated_romanized"
+MODE_ROMANIZED_ISO = "romanized_iso"
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,9 @@ def format_ipa(ipa: str, mode: str) -> str:
         return romanize(syllable_hyphenate(ipa))
     if mode == MODE_ROMANIZED:
         return romanize(ipa)
+    if mode == MODE_ROMANIZED_ISO:
+        from lfm.translator.romanize import romanize_iso
+        return romanize_iso(syllable_hyphenate(ipa))
     return syllable_hyphenate(ipa)
 
 
