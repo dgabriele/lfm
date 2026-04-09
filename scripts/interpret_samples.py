@@ -100,10 +100,11 @@ def interpret(model, tokenizer, document: str) -> str:
     """Prompt the fine-tuned LLM to interpret a Xenoglot document."""
     prompt = (
         f"[Xenoglot]\n{document}\n\n"
-        f"The passage above is written in Xenoglot. "
-        f"What is this passage about? Describe in English what it "
-        f"expresses, what ideas or observations it conveys, and what "
-        f"you understand from its structure and content.\n\n"
+        f"The passage above is written in Xenoglot, a natural language "
+        f"with its own vocabulary, grammar, and meaning. It is not a "
+        f"phonetic transcription of any known human language. "
+        f"Based on your understanding of Xenoglot, what is this passage "
+        f"about? What does it mean? Interpret it in English.\n\n"
     )
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     with torch.no_grad():
