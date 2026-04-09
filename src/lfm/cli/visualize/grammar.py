@@ -30,7 +30,7 @@ class GrammarCommand(CLICommand):
     @property
     def description(self) -> str:
         return (
-            "Distributional grammar analysis of a Xenoglot corpus. "
+            "Distributional grammar analysis of a Neuroglot corpus. "
             "Discovers latent word categories via PPMI + SVD + KMeans, "
             "then generates transition heatmaps, positional distributions, "
             "productivity scatter plots, Zipf analysis, and compositionality metrics."

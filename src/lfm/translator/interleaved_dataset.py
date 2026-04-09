@@ -1,6 +1,6 @@
 """Interleaved multilingual dataset for cross-lingual transfer.
 
-Randomly samples from a primary corpus (Xenoglot) and a secondary
+Randomly samples from a primary corpus (Neuroglot) and a secondary
 corpus (English) based on a configurable ratio.  The model sees both
 languages in the same training distribution — the same mechanism that
 enables cross-lingual transfer in multilingual LLMs.
@@ -28,7 +28,7 @@ class InterleavedDataset(Dataset):
     explicit pairing.
 
     Args:
-        primary: Main dataset (e.g., Xenoglot).
+        primary: Main dataset (e.g., Neuroglot).
         secondary: Interleaved dataset (e.g., English).
         secondary_ratio: Fraction of samples drawn from secondary
             (0.0 = primary only, 1.0 = secondary only).

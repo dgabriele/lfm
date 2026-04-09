@@ -1,4 +1,4 @@
-"""Induce a PCFG from the Xenoglot corpus via distributional clustering.
+"""Induce a PCFG from the Neuroglot corpus via distributional clustering.
 
 1. Build word co-occurrence vectors (distributional semantics)
 2. Cluster words into POS-like categories via k-means
@@ -204,7 +204,7 @@ def induce_rules(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Induce PCFG from Xenoglot corpus")
+    parser = argparse.ArgumentParser(description="Induce PCFG from Neuroglot corpus")
     parser.add_argument("--corpus", default="data/translator/dialogue_corpus_v7_natural.txt")
     parser.add_argument("--num-samples", type=int, default=10000)
     parser.add_argument("--num-categories", type=int, default=24)

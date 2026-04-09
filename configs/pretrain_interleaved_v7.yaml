@@ -1,4 +1,4 @@
-# Full fine-tune with interleaved Xenoglot + English
+# Full fine-tune with interleaved Neuroglot + English
 # Prevents catastrophic forgetting via mixed-language training distribution.
 
 model_name: Qwen/Qwen2.5-0.5B

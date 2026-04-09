@@ -42,7 +42,7 @@ The contribution is moving the question from metaphysics to empirics, without ov
 
 ## What Faithful Interpretation Means
 
-The LLM's interpretation of a Xenoglot passage is not a translation of the original input to the source encoder. It is a linguistic interpretation of how the agent — the system trained via the communication game — learned to perceive the input.
+The LLM's interpretation of a Neuroglot passage is not a translation of the original input to the source encoder. It is a linguistic interpretation of how the agent — the system trained via the communication game — learned to perceive the input.
 
 If the source encoder (e.g., a sentence-transformer) encodes "China's economy grew" and "India's economy grew" with similar embeddings, and the agent treats them identically (same region of its representation space), the LLM should produce one interpretation for both. That is not a failure — it is a faithful report of the agent's perception.
 

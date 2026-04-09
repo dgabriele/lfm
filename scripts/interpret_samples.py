@@ -1,6 +1,6 @@
 """Generate IPA documents and prompt the fine-tuned LLM to interpret them.
 
-Picks diverse embeddings, generates 4-turn Xenoglot documents through
+Picks diverse embeddings, generates 4-turn Neuroglot documents through
 the dialogue game, then asks the fine-tuned Qwen to interpret each one.
 
 Usage:
@@ -88,7 +88,7 @@ def generate_documents(
 
 
 def compute_ppl(model, tokenizer, document: str) -> float:
-    """Compute perplexity of a Xenoglot document."""
+    """Compute perplexity of a Neuroglot document."""
     import math
     inputs = tokenizer(document, return_tensors="pt").to(model.device)
     with torch.no_grad():
@@ -97,13 +97,13 @@ def compute_ppl(model, tokenizer, document: str) -> float:
 
 
 def interpret(model, tokenizer, document: str) -> str:
-    """Prompt the fine-tuned LLM to interpret a Xenoglot document."""
+    """Prompt the fine-tuned LLM to interpret a Neuroglot document."""
     prompt = (
-        f"[Xenoglot]\n{document}\n\n"
-        f"The passage above is written in Xenoglot, a natural language "
+        f"[Neuroglot]\n{document}\n\n"
+        f"The passage above is written in Neuroglot, a natural language "
         f"with its own vocabulary, grammar, and meaning. It is not a "
         f"phonetic transcription of any known human language. "
-        f"Based on your understanding of Xenoglot, what is this passage "
+        f"Based on your understanding of Neuroglot, what is this passage "
         f"about? What does it mean? Interpret it in English.\n\n"
     )
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
@@ -185,7 +185,7 @@ def main():
     eos_id = game.gen.eos_id
 
     # Generate IPA documents
-    logger.info("Generating Xenoglot documents...")
+    logger.info("Generating Neuroglot documents...")
     embeddings = torch.tensor(
         store._embeddings[indices], dtype=torch.float32, device=device,
     )
@@ -215,7 +215,7 @@ def main():
 
         print(f"\n--- Sample {i+1} (embedding #{idx}, PPL={ppl:.1f}) ---")
         print(f"\nOriginal English:\n  {passage}")
-        print(f"\nXenoglot:")
+        print(f"\nNeuroglot:")
         for t in doc_turns:
             print(f"  {t}")
         print(f"\nLLM Interpretation:\n  {interpretation}")

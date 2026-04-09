@@ -1,5 +1,5 @@
-# LoRA pretraining — interleaved Xenoglot + English
-# Adapters learn Xenoglot, base model retains English.
+# LoRA pretraining — interleaved Neuroglot + English
+# Adapters learn Neuroglot, base model retains English.
 # Cross-lingual transfer emerges from shared training distribution.
 
 model_name: Qwen/Qwen2.5-0.5B

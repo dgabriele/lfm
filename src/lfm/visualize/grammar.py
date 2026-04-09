@@ -1,4 +1,4 @@
-"""Grammar analysis and visualization for emergent Xenoglot corpus.
+"""Grammar analysis and visualization for emergent Neuroglot corpus.
 
 Applies distributional analysis to discover latent grammatical structure:
 word categories via PPMI + SVD + KMeans clustering, transition probabilities,
@@ -642,7 +642,7 @@ def plot_sentence_length(
 
 
 def plot_zipf(analysis: GrammarAnalysis, output_dir: Path) -> Path:
-    """Log-log rank-frequency plot for the Xenoglot vocabulary."""
+    """Log-log rank-frequency plot for the Neuroglot vocabulary."""
     apply_style()
     fig, ax = plt.subplots(figsize=FIGSIZE_WIDE)
 

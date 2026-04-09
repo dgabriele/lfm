@@ -145,7 +145,7 @@ class DialogueCorpusConfig(LFMBaseConfig):
     spm_path: str = "data/spm.model"
     embedding_store_dir: str = "data/embeddings"
     output_mode: str = "hyphenated_ipa"
-    language_tag: str = "Xenoglot"
+    language_tag: str = "Neuroglot"
     paragraph_format: bool = False  # natural paragraph: capitalize, periods, single line
     num_passes: int = 5
     batch_size: int = 16
