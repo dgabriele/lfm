@@ -116,36 +116,28 @@ The result: 4 complementary sentences per embedding, each capturing a different 
 
 ### Step 4: Corpus generation and LLM pretraining
 
-The trained dialogue game generates a large corpus of syllable-hyphenated IPA paragraphs. Each document is a 4-sentence self-dialogue (turns T0-T3), with documents separated by blank lines. Here is a representative document from the corpus:
+The trained dialogue game generates a corpus of 900,000 natural paragraphs. Each document is a 4-sentence self-dialogue, isomorphically romanized to ASCII (no IPA Unicode, no hyphens, no brackets — the text looks like a natural Latin-script language):
 
 ```
-[T0] dɛːr dɹæftːn fɛːɐ̯k iːrn-tɛː aɪ̯n ʕbrɛ-ʃman-dɛːn taː-raɪ̯-nɛː-mɛʃ mɪsnz
-[T1] aːr va-tvaːn pa-nens miː-zon vθ ðraː-nɛː ɡɛs-klant aːl-nɛ-kuːm ʃn lɔ-zlaːd kuː-kon mnɒm waɪl nɪçt
-[T2] viːrt͡s qrʌd naː-fɛː-nɪ-ʃɪmps aːlbsʕ mɛl pleɪn-toː qbl tʃif ɪn-vɔːr raʊ̯s̤z aːj-tʌ-dɪʃt do paːɡ dan shu-p̤nɛːrz fɹʌm æn nim
-[T3] iʃ beɪ-sɪ-kɑp ɔɪ-rɪŋ æn vɛn-dem tʃu-zɪŋ spæ-nɪ-ʃɑɹt ʌnd ɡeɪv ju-naɪ-tʌd vi-dʌl ɪn-kʌl ɡɹoʊθ ɪz mɒjd bʌl naɪɪ-ʒʌn-dɪ-ʃɪŋ ðʌ sɛks neɪ-kʌl fɹʌm kʌ-nɛ-kweɪ-ʃʌnz ɪn ɔɹdɝ ɪt
+Kexxrihng vjiska tak na zaponte prjixka eyudrtj verscxons ehvjaaojeliix.
+Axrihng ttuxkxuxsihz krxieyutuxd txok aaptaashuung a lanuxrd provolmaxaxiscx
+b kdhowz tuzd disuxnt dhux kawrxtihng uxvuxn. Djuxllajnixe podnzonarit iz
+manjila tcjestjirexj bisa bexri vordatj skjuxjas ego tcxuxlixx domexjihada
+trsh. Uhnihngxr alax horxt txownihngs nax uxkr iht vokugehdaxm bahuxpix s
+infs tuxa sangfertji tcjuxjns s prxjuxnsex.
 ```
 
-Several structural properties inherited from the frozen decoder's multilingual pretraining are visible:
+Distributional analysis of the corpus reveals recoverable grammatical structure — distinct word categories, syntactic transition patterns, and Zipfian vocabulary — all inherited from the frozen decoder's multilingual pretraining:
 
-- **Cross-linguistic phonotactic blending**: T0 opens with Germanic diphthongs and consonant clusters (`dɹæftːn`, `fɛːɐ̯k`, `aɪ̯n`), T1 shifts toward broader European patterns with function words (`waɪl`, `nɪçt`), and T3 produces recognizable English-like morphology (`beɪ-sɪ-kɑp`, `tʃu-zɪŋ`, `ju-naɪ-tʌd`). The decoder navigates typological space differently on each turn.
-- **Syllable structure regularity**: Syllable boundaries follow the Sonority Sequencing Principle — onsets rise in sonority (`dɹæ-`, `ɡɹoʊ-`, `spæ-`), codas fall (`-klant`, `-dɪʃt`). This is not engineered — it emerges from the decoder's pretraining on real languages.
-- **Morphological compositionality**: Complex forms show productive affixation patterns: `naː-fɛː-nɪ-ʃɪmps` (prefix + root + suffix), `naɪɪ-ʒʌn-dɪ-ʃɪŋ` (root + derivational + inflectional). Bound morphemes recur across documents with consistent phonological shape.
-- **Progressive elaboration across turns**: T0 is compact (6 words), while T3 expands to a full clause-length utterance. Each turn builds on the same underlying embedding from a different angle — the context transformer ensures complementarity, not repetition.
+<p align="center">
+  <img src="docs/static/images/grammar_zipf.png" width="48%" alt="Zipf rank-frequency distribution (s=1.05)" />
+  <img src="docs/static/images/grammar_transition_heatmap.png" width="48%" alt="Category transition probability heatmap" />
+</p>
+<p align="center"><em>Left: near-perfect Zipf's law (s=1.05) over 338K word types — the strongest indicator of linguistic structure. Right: category-to-category transition probabilities reveal structured syntax with function/content word distinctions. Full analysis in <a href="docs/corpus-analysis.md">docs/corpus-analysis.md</a>.</em></p>
 
-A second document demonstrates the language's typological range:
+**Corpus statistics**: 900,000 documents, 3.6M sentences, 58.7M tokens, 99.998% unique. The isomorphic romanization preserves all phonemic contrasts from the IPA while eliminating Unicode characters that would trigger the LLM's "phonetic notation" prior.
 
-```
-[T0] æz pi-ɹɔs mʌst ɪ-fɹʌ-kʌnt fɹʌm i-θɛ-tɛn-dʌnt ɪn kɪl-zɛs jɔɹ æ-dmeɪlz tu ðʌ ɹɪ-mɑn æd-ɕɔɹ-twiʌt ɪn ɛ-ksʌ-lʌnt kɛɹ
-[T1] æz po-kɐ-mos kwɛ ʋɑi-no ɐ-kon-nostj daʔs ɛ suɐ pɐɾ-tɛɐ dɛ ɐɾ-mos ɐ wɛl-zɛɾ ɛm o-wi-sɐ sɛ-ksɐ-ɾa pɐ-ɾɐ sew po-dɛ-do ɛ-nːo-lɛ
-[T2] ʌnd fɔɹst nu-mʌ-neɪ kʊd mits ʌv leɪk ɛ-ʃʌ-lʌnt æ-tʌmz ðʌ ɡʌv-ɝmʌnt tu meɪk kʌ-mɪŋ oʊvɝ ɹi-sɔɹs ɡɹæ-sʌl ʌ pɹɑ-sɪ-kjʌlɝ tu ðʌ dɪt-ɝmʌ-nən fɔɹ dɹu hi dɪf-ɝɛn-sɪk ʌnd wɪl leɪt hɪm
-[T3] qrrːint͡s aːs ɰi-muː-loɡ ko d͡ʒjaːu-nlɛ-maː-tiɒ bo-traːn hoɟ ɒ ko-lːouʃ-ti-nɒk ʃɒn-hø-ɡeːn ki ki-ʃːiː saː-maː-jaːk asrt͡s-ta
-```
-
-Here the same embedding produces a T0 heavy with English-like phonotactics (`mʌst`, `fɹʌm`, `kɛɹ`), a T1 that shifts into Portuguese-like patterns (`ɐ-kon-nostj`, `pɐɾ-tɛɐ`, `pɐ-ɾɐ`), a T2 that returns to English morphosyntax (`ðʌ ɡʌv-ɝmʌnt tu meɪk`), and a T3 that veers into agglutinative Uralic-like structure (`ko-lːouʃ-ti-nɒk`, `saː-maː-jaːk`). The decoder's multilingual latent space allows a single embedding to be expressed through multiple typological lenses.
-
-**Corpus statistics**: 900,000 documents, 3.6M turns, 58.7M tokens, 99.998% unique documents. Syllable hyphens expose phonotactic structure to the LLM's BPE tokenizer — each syllable becomes a natural token boundary, preserving the decoder's learned morphological structure. The corpus preserves full IPA fidelity (no lossy romanization).
-
-A multilingual foundation LLM (Qwen 2.5 0.5B) is trained on this corpus via self-supervised next-token prediction. The LLM learns the emergent language's distributional structure — vocabulary, morphology, phrase patterns, discourse conventions — the same way it learned every human language. Few-shot translation is expected to emerge via cross-lingual transfer.
+A multilingual foundation LLM (Qwen 2.5 0.5B) is trained on this corpus interleaved with English paragraphs (30% English, 70% Xenoglot) via self-supervised next-token prediction. The interleaving prevents catastrophic forgetting of English while the model learns Xenoglot's distributional structure. EMA (exponential moving average) of weights provides additional forgetting mitigation.
 
 ## The Phrase Decoder
 
@@ -665,6 +657,7 @@ Each upload generates a YAML manifest in `releases/huggingface/` recording the a
 
 ## Further Reading
 
+- **[Corpus Analysis](docs/corpus-analysis.md)** — Distributional and grammatical analysis of the Xenoglot corpus: word categories, syntactic transitions, Zipf's law, productivity, compositionality. 10 diagnostic visualizations.
 - **[Perceptual Interpretability](docs/interpretability-thesis.md)** — LFM as a new form of interpretability: the model expresses its perception, you discover its ontology. Comparison with probing, mechanistic interpretability, concept bottleneck models. Implications for perceptual feedback and machine consciousness research.
 - **[Grounded Reasoning](docs/grounded-reasoning.md)** — How LFM enables reasoning in a data-reconstructive alien language rather than English, with self-verifying inference and learned compositional structure. Compares to chain-of-thought, tree-of-thought, and process reward models.
 - **[Translation Guide](docs/translation-guide.md)** — Self-supervised IPA → English translation: generate pairs, train, evaluate, and visualize the interpretability pipeline.
