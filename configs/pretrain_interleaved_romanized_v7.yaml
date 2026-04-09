@@ -1,0 +1,25 @@
+# Full fine-tune with interleaved isomorphic Xenoglot + English
+# Isomorphic romanization eliminates IPA Unicode bias.
+
+model_name: Qwen/Qwen2.5-0.5B
+corpus_path: data/translator/dialogue_corpus_v7_romanized.txt
+english_corpus_path: data/translator/english_paragraphs.txt
+english_ratio: 0.3
+output_dir: data/translator_interleaved_romanized_v7
+
+epochs: 2
+lr: 1e-4
+batch_size: 8
+max_len: 512
+gradient_accumulation_steps: 16
+use_amp: true
+warmup_fraction: 0.1
+max_grad_norm: 1.0
+checkpoint_fraction: 0.1
+
+use_ema: true
+ema_decay: 0.92
+ema_interval: 1
+
+device: cuda
+seed: 42
