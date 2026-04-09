@@ -320,6 +320,16 @@ class SelfSupervisedTrainer:
                 optimizer.zero_grad()
                 state.global_step += 1
 
+                # EMA update
+                if (self._ema_model is not None
+                        and state.global_step % self.config.ema_interval == 0):
+                    decay = self.config.ema_decay
+                    with torch.no_grad():
+                        for ema_p, model_p in zip(
+                            self._ema_model.parameters(), model.parameters(),
+                        ):
+                            ema_p.lerp_(model_p.data, 1 - decay)
+
             step_loss = out.loss.item()
             epoch_loss += step_loss
 
@@ -368,8 +378,12 @@ class SelfSupervisedTrainer:
 
     def _save_checkpoint(self, model, tokenizer, optimizer, scheduler, scaler,
                          state: TrainingState, val_loss: float) -> None:
-        """Save model weights + full training state."""
-        # Always save latest (for resume)
+        """Save model weights + full training state.
+
+        When EMA is enabled, saves the EMA model for inference (better
+        generalization) and the training model for resume.
+        """
+        # Save training model for resume
         model.save_pretrained(self.output_dir / "model_latest")
         tokenizer.save_pretrained(self.output_dir / "model_latest")
         state.save(
@@ -378,12 +392,14 @@ class SelfSupervisedTrainer:
             str(self.output_dir / "model_latest"),
         )
 
-        # Save best (for inference)
+        # Save best model for inference (EMA if available)
         if val_loss < state.best_val_loss:
             state.best_val_loss = val_loss
-            model.save_pretrained(self.output_dir / "model")
+            save_model = self._ema_model if self._ema_model is not None else model
+            save_model.save_pretrained(self.output_dir / "model")
             tokenizer.save_pretrained(self.output_dir / "model")
-            logger.info("  Saved best model (val_loss=%.4f)", val_loss)
+            logger.info("  Saved best model (val_loss=%.4f%s)", val_loss,
+                        ", EMA" if self._ema_model else "")
 
     # -- Entry point --
 
@@ -417,10 +433,25 @@ class SelfSupervisedTrainer:
         else:
             state = TrainingState()
 
+        # EMA for forgetting mitigation
+        ema_model = None
+        if cfg.use_ema:
+            import copy
+            ema_model = copy.deepcopy(model)
+            ema_model.eval()
+            for p in ema_model.parameters():
+                p.requires_grad_(False)
+            logger.info(
+                "EMA enabled: decay=%.3f, interval=%d",
+                cfg.ema_decay, cfg.ema_interval,
+            )
+        self._ema_model = ema_model
+
         logger.info(
-            "Training: epochs %d→%d, %d steps/epoch, lr=%.1e, batch=%d×%d",
+            "Training: epochs %d→%d, %d steps/epoch, lr=%.1e, batch=%d×%d%s",
             state.epoch, cfg.epochs, steps_per_epoch, cfg.lr,
             self._batch_size, cfg.gradient_accumulation_steps,
+            " +EMA" if cfg.use_ema else "",
         )
 
         train_loss = 0.0

@@ -189,3 +189,8 @@ class PretrainConfig(LFMBaseConfig):
     # Interleaved English corpus — maintains cross-lingual transfer
     english_corpus_path: str | None = None
     english_ratio: float = 0.3  # fraction of training data that is English
+
+    # EMA — exponential moving average of weights for forgetting mitigation
+    use_ema: bool = False
+    ema_decay: float = 0.92
+    ema_interval: int = 1  # update EMA every N optimizer steps
