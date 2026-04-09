@@ -99,19 +99,21 @@ def compute_ppl(model, tokenizer, document: str) -> float:
 def interpret(model, tokenizer, document: str) -> str:
     """Prompt the fine-tuned LLM to interpret a Xenoglot document."""
     prompt = (
-        f"Below is a passage in a language called Xenoglot. "
-        f"Please provide a natural English translation of what this passage means.\n\n"
-        f"Xenoglot:\n{document}\n\n"
-        f"English translation:\n"
+        f"[Xenoglot]\n{document}\n\n"
+        f"The passage above is written in Xenoglot. "
+        f"What is this passage about? Describe in English what it "
+        f"expresses, what ideas or observations it conveys, and what "
+        f"you understand from its structure and content.\n\n"
     )
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=200,
+            max_new_tokens=512,
             temperature=0.7,
             top_p=0.9,
             do_sample=True,
+            repetition_penalty=1.2,
             pad_token_id=tokenizer.pad_token_id,
         )
     # Decode only the generated part
