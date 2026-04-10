@@ -159,7 +159,7 @@ Distributional clustering reveals a Zipfian distribution across the 24 induced c
 
 ![Word category distribution](static/images/grammar_category_distribution.png)
 
-A single dominant category (C12, ~105K tokens) acts as the general content word class, followed by a power-law tail of progressively rarer categories. This mirrors the distribution of part-of-speech tags in natural languages, where nouns and verbs dominate and closed-class function words are fewer in type but high in frequency.
+A single dominant category (C17, ~1.4M tokens) acts as the general content word class, followed by C6 (~650K) as a secondary content class, then a power-law tail of progressively rarer categories. This mirrors the distribution of part-of-speech tags in natural languages, where nouns and verbs dominate and closed-class function words are fewer in type but high in frequency.
 
 ## Syntactic transition structure
 
@@ -167,13 +167,13 @@ The category-to-category transition probability matrix reveals structured syntac
 
 ![Transition heatmap](static/images/grammar_transition_heatmap.png)
 
-The dark column at C12 shows that most categories transition to the dominant content class. Off-diagonal hotspots indicate specific syntactic relationships: C3 frequently follows C3 (self-compounding), C0 self-repeats (function word sequences), and several categories show strong preferences for specific successors.
+Two dark columns at C17 and C6 show that most categories transition to these dominant content classes. The strongest transition hotspot is C17→C18 and C18→C17, suggesting a tightly coupled syntactic pair (possibly modifier-head or head-complement). Off-diagonal hotspots indicate specific syntactic relationships, and several categories show strong preferences for specific successors rather than transitioning uniformly.
 
 Transition entropy quantifies how constrained each category's syntactic behavior is:
 
 ![Transition entropy](static/images/grammar_transition_entropy.png)
 
-Low-entropy categories (C15, C2, C13 at 1.7-2.1 bits) are syntactically constrained — they transition to a small set of successors, behaving like function words or determiners. High-entropy categories (C19, C20, C5 at 3.7+ bits) are syntactically free, appearing in varied contexts like open-class content words. This function/content word distinction emerges without supervision from the decoder's multilingual pretraining.
+Low-entropy categories (C18 at ~1.5 bits, C17 and C5 at ~1.9-2.0 bits) are syntactically constrained — they transition to a small set of successors, behaving like function words or determiners. High-entropy categories (C22, C16, C20 at ~3.3 bits) are syntactically free, appearing in varied contexts like open-class content words. This function/content word distinction emerges without supervision from the decoder's multilingual pretraining.
 
 ## Sentence position preferences
 
@@ -181,7 +181,7 @@ The distribution of categories across sentence positions (initial, early, middle
 
 ![Sentence position](static/images/grammar_sentence_position.png)
 
-C12 (dominant content class) distributes uniformly — it appears in all positions, consistent with content words in free word order languages. C3 shows initial-position preference (sentence opener). Several categories show final-position bias, suggesting sentence-closing elements. These positional preferences indicate genuine word order structure, not random token placement.
+C17 (dominant content class) distributes relatively uniformly across all positions, consistent with content words in free word order languages. C6 shows a strong preference for initial and early positions (sentence opener). C5 also clusters at sentence-initial position. These positional preferences indicate genuine word order structure, not random token placement.
 
 ## Category hierarchy
 
@@ -189,7 +189,7 @@ Hierarchical clustering of categories by their transition probability profiles r
 
 ![Category dendrogram](static/images/grammar_category_dendrogram.png)
 
-Three major branches emerge: an orange cluster (C9, C1 — tightly related, possibly modifier-head pairs), a green cluster (C10-C20 range — diverse content categories with similar syntactic freedom), and a red cluster (C0, C14, C12, C3, C5 — the high-frequency categories that form the syntactic backbone). These groupings suggest phrase-level structure analogous to NP, VP, and PP groupings in natural language syntax.
+Three major branches emerge: an orange cluster (C6, C17 — the two dominant categories, tightly paired), a green cluster (C0, C5, C18 — syntactically constrained categories that form a function-word group), and a large red cluster containing the remaining content categories with diverse syntactic behavior. These groupings suggest phrase-level structure analogous to NP, VP, and PP groupings in natural language syntax.
 
 ## Productivity
 
@@ -197,7 +197,7 @@ Type-token ratio per category distinguishes open (productive) from closed word c
 
 ![Productivity](static/images/grammar_productivity.png)
 
-Categories in the upper-left (high type count, low token count, high TTR) are productive open classes — they contain many unique word forms used relatively infrequently. Categories in the lower-right (low type count, high token count, low TTR) are closed classes — a small set of words used very frequently. C12 exemplifies a closed-class pattern despite being the most frequent category: relatively few unique words appearing many times, suggesting function-word-like behavior at the aggregate level.
+C18 stands out in the upper-center: high type count (~7K unique words) with moderate token count — a highly productive open class generating many novel word forms. C17 occupies the far bottom-right: extremely high token count (~1.4M) with relatively low type count (~3.7K unique words, TTR ~0.003) — a closed-class pattern where a small vocabulary is reused very frequently, suggesting function-word-like behavior. C6 shows a similar closed-class pattern. Categories in the upper-left (high TTR, red coloring) like C11, C23, C3 are low-frequency but highly productive.
 
 ## Sentence length
 
@@ -205,15 +205,15 @@ Sentence lengths follow a natural bell-curve distribution:
 
 ![Sentence length](static/images/grammar_sentence_length.png)
 
-Mean sentence length is 15.3 words (median 14.0), with a range of 3-37 words. This distribution is comparable to sentence lengths in natural language corpora (English averages 15-20 words per sentence). The right-skewed tail reflects the variable-length encoding of the decoder — more complex inputs produce longer utterances.
+Mean sentence length is 15.3 words (median 14.0), with a range of 3-37 words. This distribution is comparable to sentence lengths in natural language corpora (English averages 15-20 words per sentence). The right-skewed tail reflects the variable-length encoding of the decoder — more complex inputs produce longer utterances. These statistics are stable across sample sizes (identical at 10K and 100K paragraphs).
 
 ## Zipf's law
 
-Word frequencies follow near-perfect Zipf's law with exponent s = 1.05:
+Word frequencies follow near-perfect Zipf's law with exponent s = 1.04:
 
 ![Zipf distribution](static/images/grammar_zipf.png)
 
-338,858 unique word types across the analyzed portion of the corpus. The fitted exponent of 1.05 is within the range observed for natural languages (typically 0.9-1.1). This is significant because emergent communication systems typically produce anti-Zipfian (uniform) or degenerate distributions. The Zipfian structure here is inherited from the frozen decoder's natural language prior and confirms the output is linguistically structured, not an efficient code.
+2,810,206 unique word types across 100K paragraphs (400K sentences). The fitted exponent of 1.04 is within the range observed for natural languages (typically 0.9-1.1). This is significant because emergent communication systems typically produce anti-Zipfian (uniform) or degenerate distributions. The Zipfian structure here is inherited from the frozen decoder's natural language prior and confirms the output is linguistically structured, not an efficient code.
 
 ## Category network
 
@@ -221,7 +221,7 @@ The category co-occurrence network visualizes syntactic "highways" between word 
 
 ![Category network](static/images/grammar_category_network.png)
 
-C12 acts as the central hub — nearly all other categories connect through it, consistent with its role as the dominant content class. Peripheral communities (clusters of tightly connected categories) suggest phrase-level units that internally cohere before connecting to the broader syntactic network. Self-loops on several categories indicate self-compounding or sequential modifier patterns.
+C17 acts as the central hub — nearly all other categories connect through it, consistent with its role as the dominant content class. C6 serves as a secondary hub. Peripheral communities (clusters of tightly connected categories) suggest phrase-level units that internally cohere before connecting to the broader syntactic network. Self-loops on several categories indicate self-compounding or sequential modifier patterns.
 
 ## Compositionality
 
@@ -231,7 +231,7 @@ Mutual information between word position and category assignment measures word o
 
 The overall position-category MI is 0.048 bits — low, indicating relatively free word order. This is expected from a decoder pretrained on 12 typologically diverse languages spanning SOV (Turkish, Korean), SVO (English, Portuguese), VSO (Arabic), and free-order (Hungarian) word orders. The decoder learned to produce valid output across all these patterns, so its output naturally has flexible word order rather than being locked to any single syntactic template.
 
-Per-category positional entropy shows that most categories are positionally free (entropy near maximum). Categories C9 and C13 show lower positional freedom, suggesting they serve as structurally anchored elements (sentence-boundary markers or obligatory positions).
+Per-category positional entropy shows that most categories are positionally free (entropy near maximum). Categories C0 and C5 show lower positional freedom, suggesting they serve as structurally anchored elements — likely sentence-initial markers or obligatory position fillers.
 
 ## Implications
 
@@ -242,7 +242,7 @@ The corpus exhibits the following properties of natural language grammar, all em
 3. **Word order regularities** — categories show positional preferences without rigid order, consistent with typologically diverse pretraining
 4. **Phrase structure** — hierarchical clustering of transition profiles reveals macro-level groupings analogous to phrase types
 5. **Productive morphology** — open classes show high type-token ratios, indicating the decoder generates novel word forms
-6. **Zipfian vocabulary** — near-perfect Zipf's law (s=1.05), ruling out degenerate or anti-Zipfian coding
+6. **Zipfian vocabulary** — near-perfect Zipf's law (s=1.04) over 2.8M word types, ruling out degenerate or anti-Zipfian coding
 7. **Natural sentence length** — mean 15.3 words with a right-skewed distribution, comparable to human language
 
 These structural properties are what enable cross-lingual transfer when an LLM learns Neuroglot alongside English. The LLM's existing machinery for recognizing syntactic categories, transition patterns, positional regularities, and phrase structure can engage with Neuroglot because these features are present — they were inherited from the same 12 human languages that the LLM itself was trained on.

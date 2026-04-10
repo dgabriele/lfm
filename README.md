@@ -130,10 +130,10 @@ infs tuxa sangfertji tcjuxjns s prxjuxnsex.
 Distributional analysis of the corpus reveals recoverable grammatical structure — distinct word categories, syntactic transition patterns, and Zipfian vocabulary — all inherited from the frozen decoder's multilingual pretraining:
 
 <p align="center">
-  <img src="docs/static/images/grammar_zipf.png" width="48%" alt="Zipf rank-frequency distribution (s=1.05)" />
+  <img src="docs/static/images/grammar_zipf.png" width="48%" alt="Zipf rank-frequency distribution (s=1.04)" />
   <img src="docs/static/images/grammar_transition_heatmap.png" width="48%" alt="Category transition probability heatmap" />
 </p>
-<p align="center"><em>Left: near-perfect Zipf's law (s=1.05) over 338K word types — the strongest indicator of linguistic structure. Right: category-to-category transition probabilities reveal structured syntax with function/content word distinctions. Full analysis in <a href="docs/corpus-analysis.md">docs/corpus-analysis.md</a>.</em></p>
+<p align="center"><em>Left: near-perfect Zipf's law (s=1.04) over 2.8M word types — the strongest indicator of linguistic structure. Right: category-to-category transition probabilities reveal structured syntax with function/content word distinctions. Full analysis in <a href="docs/corpus-analysis.md">docs/corpus-analysis.md</a>.</em></p>
 
 **Corpus statistics**: 900,000 documents, 3.6M sentences, 58.7M tokens, 99.998% unique. The isomorphic romanization preserves all phonemic contrasts from the IPA while eliminating Unicode characters that would trigger the LLM's "phonetic notation" prior.
 
