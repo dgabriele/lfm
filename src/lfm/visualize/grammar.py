@@ -116,24 +116,28 @@ class GrammarAnalyzer:
 
         Each paragraph is split into sentences on '.', then each sentence
         is lowercased and split on whitespace into word tokens.
+        Reads line-by-line to bound memory usage.
         """
-        text = self.corpus_path.read_text(encoding="utf-8")
-        paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
-        if self.num_samples and len(paragraphs) > self.num_samples:
-            paragraphs = paragraphs[: self.num_samples]
-
         sentences: list[list[str]] = []
-        for para in paragraphs:
-            for sent in para.split("."):
-                sent = sent.strip()
-                if not sent:
+        n_para = 0
+        with open(self.corpus_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
                     continue
-                tokens = sent.lower().split()
-                if tokens:
-                    sentences.append(tokens)
+                n_para += 1
+                if self.num_samples and n_para > self.num_samples:
+                    break
+                for sent in line.split("."):
+                    sent = sent.strip()
+                    if not sent:
+                        continue
+                    tokens = sent.lower().split()
+                    if tokens:
+                        sentences.append(tokens)
 
         logger.info(
-            "Loaded %d sentences from %d paragraphs", len(sentences), len(paragraphs)
+            "Loaded %d sentences from %d paragraphs", len(sentences), n_para
         )
         return sentences
 
@@ -171,10 +175,13 @@ class GrammarAnalyzer:
     ) -> np.ndarray:
         """Build PPMI co-occurrence matrix and reduce with SVD.
 
-        Returns an (n_vocab, n_components) matrix of word vectors.
+        Uses scipy sparse matrix to bound memory. Returns an
+        (n_vocab, n_components) matrix of word vectors.
         """
+        from scipy.sparse import lil_matrix
+
         V = len(vocab)
-        cooccur = np.zeros((V, V), dtype=np.float64)
+        cooccur = lil_matrix((V, V), dtype=np.float64)
 
         # Count co-occurrences within a symmetric window
         for sent in sentences:
@@ -184,22 +191,30 @@ class GrammarAnalyzer:
                     if i != j:
                         cooccur[wi, indices[j]] += 1.0
 
+        cooccur = cooccur.tocsr()
+
         # PPMI transformation
         total = cooccur.sum()
         if total == 0:
             logger.warning("Empty co-occurrence matrix; returning zero vectors")
             return np.zeros((V, min(self.n_svd_components, V)))
 
-        row_sums = cooccur.sum(axis=1, keepdims=True)
-        col_sums = cooccur.sum(axis=0, keepdims=True)
+        row_sums = np.array(cooccur.sum(axis=1)).flatten()
+        col_sums = np.array(cooccur.sum(axis=0)).flatten()
 
-        # Avoid division by zero
-        with np.errstate(divide="ignore", invalid="ignore"):
-            pmi = np.log2((cooccur * total) / (row_sums * col_sums + 1e-16) + 1e-16)
+        # Compute PPMI on non-zero entries only (memory efficient)
+        cx = cooccur.tocoo()
+        data = np.array(cx.data, dtype=np.float64)
+        rows, cols = cx.row, cx.col
+        pmi_data = np.log2(
+            (data * total) / (row_sums[rows] * col_sums[cols] + 1e-16) + 1e-16
+        )
+        pmi_data = np.maximum(pmi_data, 0)  # PPMI
 
-        ppmi = np.maximum(pmi, 0.0)
+        from scipy.sparse import csr_matrix
+        ppmi = csr_matrix((pmi_data, (rows, cols)), shape=(V, V))
 
-        # SVD reduction
+        # SVD reduction (works directly on sparse matrix)
         n_components = min(self.n_svd_components, V - 1)
         svd = TruncatedSVD(n_components=n_components, random_state=self.seed)
         vectors = svd.fit_transform(ppmi)
