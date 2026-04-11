@@ -113,6 +113,10 @@ class UNMTConfig(LFMBaseConfig):
     bt_start_step: int = 10_000
     grad_accum_steps: int = 1
     max_grad_norm: float = 1.0
+    # Mixed precision: bfloat16 autocast throughout DAE + BT.  bf16 has
+    # the same dynamic range as fp32 so no GradScaler is needed.
+    use_amp: bool = True
+    amp_dtype: str = "bfloat16"
 
     # Runtime
     device: str = "cuda"

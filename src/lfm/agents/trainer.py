@@ -258,14 +258,34 @@ class AgentTrainer:
             except RuntimeError as e:
                 if "out of memory" not in str(e):
                     raise
+                # Free Python references to any partial forward state, then
+                # release cached blocks.  This alone isn't enough when the
+                # allocator has fragmented — expandable_segments helps at
+                # launch time but won't save us mid-run.
+                if "out" in locals():
+                    del out
+                if "loss" in locals():
+                    del loss
+                self.optimizer.zero_grad(set_to_none=True)
                 torch.cuda.empty_cache()
-                new_bs = max(4, int(self._batch_size * 0.9))
+                # Bail out rather than loop forever once we hit the floor.
+                # Dynamic shrinkage only helps if the problem is batch size,
+                # not fragmentation — if it's fragmentation, reducing batch
+                # won't help and we should surface the failure clearly.
+                min_bs = 4
+                if self._batch_size <= min_bs:
+                    raise RuntimeError(
+                        f"OOM at step {step} even at batch_size={min_bs}. "
+                        "This usually indicates allocator fragmentation; "
+                        "set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+                        "and/or reduce max sequence length."
+                    ) from e
+                new_bs = max(min_bs, int(self._batch_size * 0.9))
                 logger.warning(
                     "OOM at step %d — reducing batch_size %d → %d",
                     step, self._batch_size, new_bs,
                 )
                 self._batch_size = new_bs
-                self.optimizer.zero_grad()
                 continue
             # Release cached allocator blocks to prevent reserved VRAM
             # from growing unboundedly over long training runs.
@@ -336,6 +356,8 @@ class AgentTrainer:
                     extra += f"  ce={out['ce_loss'].item():.3f}"
                 if "vocab_entropy" in out and out["vocab_entropy"].item() != 0:
                     extra += f"  vent={out['vocab_entropy'].item():.2f}"
+                if "llm_pressure" in out and out["llm_pressure"].item() != 0:
+                    extra += f"  llm={out['llm_pressure'].item():.3f}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
                 if torch.cuda.is_available():

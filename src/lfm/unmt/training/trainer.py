@@ -173,6 +173,17 @@ class UNMTTrainer:
             total_steps=config.total_steps,
         )
 
+        # Mixed-precision autocast context for all training and BT
+        # generation.  bf16 is the safe default — same dynamic range as
+        # fp32 so no gradient scaling is required.
+        self._amp_enabled = bool(config.use_amp) and self.device.type == "cuda"
+        dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }
+        self._amp_dtype = dtype_map.get(config.amp_dtype, torch.bfloat16)
+
         self.state = TrainingState()
         self._try_resume()
 
@@ -216,32 +227,40 @@ class UNMTTrainer:
         cfg = self.config
         losses: dict[str, torch.Tensor] = {}
 
-        # DAE on both languages
-        losses["dae_ng"] = compute_dae_loss(self.model, ng_batch)
-        losses["dae_en"] = compute_dae_loss(self.model, en_batch)
+        autocast_ctx = torch.autocast(
+            device_type=self.device.type,
+            dtype=self._amp_dtype,
+            enabled=self._amp_enabled,
+        )
 
-        total = cfg.dae_weight * (losses["dae_ng"] + losses["dae_en"])
+        with autocast_ctx:
+            # DAE on both languages
+            losses["dae_ng"] = compute_dae_loss(self.model, ng_batch)
+            losses["dae_en"] = compute_dae_loss(self.model, en_batch)
 
-        if self.state.step >= cfg.bt_start_step and cfg.bt_weight > 0:
-            # BT in both directions.  Each direction consumes its own
-            # language's clean batch and generates into the other.
-            losses["bt_ng2en"] = compute_bt_loss(
-                self.model,
-                ng_batch,
-                target_lang_tag_id=EN_TAG_ID,
-                target_token_range=self.tokenizer.english_range,
-                max_len=cfg.max_len,
-            )
-            losses["bt_en2ng"] = compute_bt_loss(
-                self.model,
-                en_batch,
-                target_lang_tag_id=NG_TAG_ID,
-                target_token_range=self.tokenizer.neuroglot_range,
-                max_len=cfg.max_len,
-            )
-            total = total + cfg.bt_weight * (
-                losses["bt_ng2en"] + losses["bt_en2ng"]
-            )
+            total = cfg.dae_weight * (losses["dae_ng"] + losses["dae_en"])
+
+            if self.state.step >= cfg.bt_start_step and cfg.bt_weight > 0:
+                # BT in both directions.  The inner greedy decode and
+                # teacher-forced forward pass both inherit this autocast
+                # context automatically.
+                losses["bt_ng2en"] = compute_bt_loss(
+                    self.model,
+                    ng_batch,
+                    target_lang_tag_id=EN_TAG_ID,
+                    target_token_range=self.tokenizer.english_range,
+                    max_len=cfg.max_len,
+                )
+                losses["bt_en2ng"] = compute_bt_loss(
+                    self.model,
+                    en_batch,
+                    target_lang_tag_id=NG_TAG_ID,
+                    target_token_range=self.tokenizer.neuroglot_range,
+                    max_len=cfg.max_len,
+                )
+                total = total + cfg.bt_weight * (
+                    losses["bt_ng2en"] + losses["bt_en2ng"]
+                )
 
         losses["total"] = total
         return losses
@@ -258,9 +277,10 @@ class UNMTTrainer:
 
         logger.info(
             "UNMT training: target_steps=%d warmup=%d bt_start=%d "
-            "batch=%d device=%s",
+            "batch=%d device=%s amp=%s",
             cfg.total_steps, cfg.warmup_steps, cfg.bt_start_step,
             cfg.batch_size, self.device,
+            f"{self._amp_dtype}" if self._amp_enabled else "off",
         )
 
         running: dict[str, float] = {}

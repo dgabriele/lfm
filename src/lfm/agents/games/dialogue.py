@@ -45,6 +45,7 @@ from lfm.agents.components import (
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
 from lfm.agents.decode import ExpressionDecoder, rerun_decoder_multiphrase_with_grad
 from lfm.agents.diffusion import DiffusionZGenerator, length_distribution_loss
+from lfm.agents.llm_pressure import LLMPressureScorer
 from lfm.agents.vram_monitor import VRAMMonitor
 from lfm.config.base import LFMBaseConfig
 from lfm.faculty.config import FacultyConfig
@@ -108,6 +109,19 @@ class DialogueGameConfig(LFMBaseConfig):
     # EMA decay for the corpus-level marginal.  High α = slow-moving
     # (cross-document stability), low α = more reactive to recent batches.
     vocab_entropy_ema_alpha: float = 0.99
+
+    # LLM-distribution pressure.  When > 0, a frozen pretrained LLM
+    # (default Qwen 2.5 0.5B) scores each turn's generated logits and
+    # a cross-entropy loss pressures the agent to produce sequences
+    # that sit inside the LLM's own latent distribution.  Gradient
+    # flows through a learned projection matrix and the agent's
+    # output head, all the way back to the VAE decoder hidden states.
+    # 0.0 = disabled.  Typical range 0.1–1.0.
+    llm_loss_weight: float = 0.0
+    llm_model_name: str = "Qwen/Qwen2.5-0.5B"
+    # Gumbel-softmax temperature for the straight-through one-hot that
+    # bridges the agent's SPM vocab into Qwen's input-embedding space.
+    llm_gumbel_tau: float = 1.0
 
     # Independent turns: each turn sees only the embedding + turn position,
     # not previous turns.  Produces 4 independent views of the same input,
@@ -376,6 +390,22 @@ class DialogueGame(nn.Module):
             torch.full((vocab_size,), 1.0 / vocab_size),
         )
 
+        # LLM-pressure scorer (frozen Qwen + learned SPM→Qwen projection).
+        # Instantiated only when the config enables it; otherwise left as
+        # None so runs that don't use this feature pay no cost.
+        self.llm_pressure: LLMPressureScorer | None = None
+        if config.llm_loss_weight > 0:
+            if gen._tokenizer is None:
+                raise RuntimeError(
+                    "llm_loss_weight > 0 requires a sentencepiece-backed "
+                    "generator (spm_model_path must be set in GeneratorConfig)"
+                )
+            self.llm_pressure = LLMPressureScorer(
+                spm_model=gen._tokenizer._sp,
+                spm_vocab_size=gen._full_vocab,
+                llm_model_name=config.llm_model_name,
+            )
+
         # VRAM monitor (daemon process, saves every ~1 min)
         trace_path = str(Path(config.output_dir) / "vram_trace.npz")
         self.vram_monitor = VRAMMonitor(
@@ -426,7 +456,7 @@ class DialogueGame(nn.Module):
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         self.vram_monitor.save(str(trace_path))
 
-        return {
+        state = {
             "z_gen": self.z_gen.state_dict(),
             "context_transformer": self.context_transformer.state_dict(),
             "turn_embeddings": self.turn_embeddings.data,
@@ -441,6 +471,12 @@ class DialogueGame(nn.Module):
             "z_generator": "diffusion",
             "version": 2,
         }
+        # LLM-pressure projection is a learned parameter (not in the
+        # frozen Qwen) and must be persisted so resumes don't throw
+        # away the SPM→Qwen bridge.
+        if self.llm_pressure is not None:
+            state["llm_pressure_projection"] = self.llm_pressure.projection.data.cpu()
+        return state
 
     def load_checkpoint_state(self, ckpt: dict) -> None:
         """Restore from a checkpoint dict (V1 and V2 compatible)."""
@@ -462,6 +498,24 @@ class DialogueGame(nn.Module):
             self.turn_agg_logits.data.copy_(ckpt["turn_agg_logits"])
         if "vocab_marginal_ema" in ckpt:
             self.vocab_marginal_ema.data.copy_(ckpt["vocab_marginal_ema"])
+        if (
+            self.llm_pressure is not None
+            and "llm_pressure_projection" in ckpt
+        ):
+            saved_proj = ckpt["llm_pressure_projection"]
+            if saved_proj.shape == self.llm_pressure.projection.shape:
+                self.llm_pressure.projection.data.copy_(
+                    saved_proj.to(self.llm_pressure.projection.device),
+                )
+                logger.info(
+                    "Restored LLM-pressure projection matrix from checkpoint",
+                )
+            else:
+                logger.warning(
+                    "LLM-pressure projection shape mismatch %s vs %s — "
+                    "keeping fresh MUSE init",
+                    saved_proj.shape, self.llm_pressure.projection.shape,
+                )
         version = ckpt.get("version", 1)
         if version < 2:
             logger.info("Loaded V1 checkpoint — using V2 fixed-size context")
@@ -469,7 +523,7 @@ class DialogueGame(nn.Module):
     def trainable_param_groups(self) -> list[dict]:
         """Return optimizer param groups with per-group learning rates."""
         cfg = self.config
-        return [
+        groups = [
             {"params": list(self.z_gen.parameters()), "lr": cfg.gru_lr},
             {"params": list(self.context_transformer.parameters()), "lr": cfg.receiver_lr},
             {"params": [self.turn_embeddings], "lr": cfg.receiver_lr},
@@ -479,6 +533,16 @@ class DialogueGame(nn.Module):
             {"params": list(self.receiver.parameters()), "lr": cfg.receiver_lr},
             {"params": [self.turn_agg_logits], "lr": cfg.receiver_lr},
         ]
+        # The LLM-pressure scorer holds a frozen LLM (no grad) plus a
+        # learnable SPM→LLM projection.  Only the projection needs to
+        # be in the optimizer; we give it the receiver LR because the
+        # bridge is a low-dimensional linear layer that adapts quickly.
+        if self.llm_pressure is not None:
+            groups.append({
+                "params": [self.llm_pressure.projection],
+                "lr": cfg.receiver_lr,
+            })
+        return groups
 
     # -- Stage methods --
 
@@ -783,13 +847,15 @@ class DialogueGame(nn.Module):
 
     def _compute_aux_losses(
         self, turns: list[TurnOutput],
-    ) -> tuple[Tensor, Tensor]:
-        """Length regularization, z diversity, and vocab entropy across all turns.
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Length regularization, z diversity, vocab entropy, and LLM pressure.
 
         Returns:
             aux: Weighted sum of all auxiliary loss terms.
             vocab_entropy: Raw (unweighted) marginal entropy scalar, detached,
                 for logging.  Zero when vocab_entropy_weight == 0.
+            llm_pressure: Raw (unweighted) LLM NLL scalar, detached, for
+                logging.  Zero when llm_loss_weight == 0.
         """
         cfg = self.config
         device = turns[0].hidden.device
@@ -856,7 +922,26 @@ class DialogueGame(nn.Module):
                     alpha * ema + (1.0 - alpha) * p_batch.detach()
                 )
 
-        return aux, vocab_entropy.detach()
+        llm_pressure = torch.tensor(0.0, device=device)
+        if self.llm_pressure is not None and cfg.llm_loss_weight > 0:
+            # Score each turn independently.  The agent's generated
+            # logits per position come from the output head applied
+            # to the Phase 2 hidden states; they are already on the
+            # autograd graph, so gradient flows from the LLM NLL back
+            # through the VAE decoder → z-generator.
+            turn_losses: list[Tensor] = []
+            for t in turns:
+                logits = self.gen.output_head(t.hidden)  # (B, T, V_spm)
+                turn_loss = self.llm_pressure(
+                    agent_logits=logits,
+                    mask=t.mask,
+                    tau=cfg.llm_gumbel_tau,
+                )
+                turn_losses.append(turn_loss)
+            llm_pressure = torch.stack(turn_losses).mean()
+            aux = aux + cfg.llm_loss_weight * llm_pressure
+
+        return aux, vocab_entropy.detach(), llm_pressure.detach()
 
     def _build_output(
         self,
@@ -867,6 +952,7 @@ class DialogueGame(nn.Module):
         surface_loss: Tensor | None = None,
         ce_loss: Tensor | None = None,
         vocab_entropy: Tensor | None = None,
+        llm_pressure: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Assemble output dict for trainer."""
         cfg = self.config
@@ -902,6 +988,7 @@ class DialogueGame(nn.Module):
             "surface_loss": surface_loss if surface_loss is not None else torch.tensor(0.0),
             "ce_loss": ce_loss if ce_loss is not None else torch.tensor(0.0),
             "vocab_entropy": vocab_entropy if vocab_entropy is not None else torch.tensor(0.0),
+            "llm_pressure": llm_pressure if llm_pressure is not None else torch.tensor(0.0),
         }
 
     @contextmanager
@@ -1010,7 +1097,7 @@ class DialogueGame(nn.Module):
         # Stage 4: auxiliary losses
         mon.stage = "aux_losses"
         loss = progressive_loss / cfg.num_turns
-        aux, vocab_entropy = self._compute_aux_losses(turns)
+        aux, vocab_entropy, llm_pressure = self._compute_aux_losses(turns)
         loss = loss + aux
 
         # Stage 5: output
@@ -1018,4 +1105,5 @@ class DialogueGame(nn.Module):
             loss, logits, target_idx, turns,
             surface_loss=surface_loss, ce_loss=ce_loss,
             vocab_entropy=vocab_entropy,
+            llm_pressure=llm_pressure,
         )

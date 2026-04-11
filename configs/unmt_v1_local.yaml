@@ -1,0 +1,51 @@
+# Local 8-hour UNMT training config — full-scale model but shorter
+# total step budget so the run fits on a single consumer GPU.
+# Reuses the tokenizers, embeddings, and MUSE alignment from the
+# shared data/unmt_v1 directory produced by unmt_v1.yaml / embed /
+# align.
+
+neuroglot_corpus: data/translator/dialogue_corpus_v7_natural.txt
+english_corpus: data/embeddings/passages.jsonl
+output_dir: data/unmt_v1
+
+neuroglot_tokenizer_prefix: spm_neuroglot
+english_tokenizer_prefix: spm_english
+neuroglot_vocab_size: 16000
+english_vocab_size: 16000
+character_coverage_neuroglot: 1.0
+character_coverage_english: 0.9995
+max_sentence_length: 4096
+max_tokenizer_lines: 200000
+
+neuroglot_lang_tag: "<ng>"
+english_lang_tag: "<en>"
+# 96 instead of 128 — BT decode is O(max_len^2) and this is the
+# single biggest throughput lever after AMP
+max_len: 96
+
+word_drop_prob: 0.1
+word_swap_window: 3
+word_mask_prob: 0.1
+
+# Full model dims — must match the 512-dim skipgram embeddings
+model_dim: 512
+n_layers: 6
+n_heads: 8
+ff_dim: 2048
+dropout: 0.1
+
+# Training
+batch_size: 32
+lr: 1.0e-4
+warmup_steps: 1000
+total_steps: 30000
+dae_weight: 1.0
+bt_weight: 1.0
+bt_start_step: 8000
+grad_accum_steps: 1
+max_grad_norm: 1.0
+use_amp: true
+amp_dtype: bfloat16
+
+device: cuda
+seed: 42

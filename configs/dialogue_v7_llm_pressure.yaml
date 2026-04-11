@@ -1,0 +1,82 @@
+# Dialogue game with LLM-pressure loss — v7 full-constituency decoder
+# Based on the known-good dialogue_v7_phase1.yaml (98.3% discrimination)
+# with two additions:
+#   1) an explicit vocab_entropy_weight=0 line so the entropy EMA is
+#      guaranteed off (not relying on the config default)
+#   2) llm_loss_weight > 0 which instantiates an LLMPressureScorer
+#      backed by frozen Qwen 2.5 0.5B.  The scorer forces the agent's
+#      generated sequences to sit inside the LLM's latent distribution,
+#      bypassing the need for a downstream UNMT bridge.
+
+decoder_path: data/models/v7/vae_decoder.pt
+spm_path: data/models/v7/spm.model
+output_dir: data/dialogue_game_v7_llm_pressure
+embedding_store_dir: data/embeddings
+
+# Dialogue structure
+num_turns: 4
+context_hidden_dim: 512
+context_heads: 4
+
+# Diffusion z-generator
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_phrases: 3
+variable_phrases: true
+target_phrases: 2.0
+length_weight: 0.5
+z_diversity_weight: 0.3
+
+# Loss
+per_turn_weight: 0.0
+ce_weight: 0.1
+independent_turns: false
+
+# Explicitly disabled — no vocab-entropy EMA
+vocab_entropy_weight: 0.0
+
+# LLM pressure — frozen Qwen 2.5 0.5B + learned SPM→Qwen projection.
+# Weight history: 0.3 and 0.05 from-scratch runs both collapsed
+# discrimination (agent cheated with verbose English or high-freq
+# filler tokens).  Resume-from-98% run at 0.01 with 10x lower LRs
+# was stable at 91% avg accuracy but descent was too slow — got to
+# llm=5.96 at step 2300 then asymptoted.  Bumping to 0.02 while
+# keeping the lower LRs so the optimizer dynamics stay smooth but
+# the LLM term has roughly twice the gradient pull per step.
+llm_loss_weight: 0.02
+llm_model_name: "Qwen/Qwen2.5-0.5B"
+llm_gumbel_tau: 1.0
+
+# Phase 2 VRAM management — reduced from phase1 to make room for
+# the Qwen 0.5B forward pass.  Qwen adds ~1 GB weights + activations
+# so we pull the budget down to fit 8 GB total.
+phase2_vram_budget_mb: 900
+phase2_min_chunk: 1
+
+# Training — batch 12 leaves real headroom for sequence-length growth
+# under LLM pressure.  Previous runs at batch 16 hit OOM around step
+# 40 when tokens/turn climbed above 140.  With the pressure weight
+# now 6× smaller the agent should not cheat with long sequences, but
+# give the margin anyway.
+#
+# Learning rates: 10× smaller than the from-scratch config.  The
+# first LLM-pressure fine-tuning run (steps 740 → 1340 with the
+# original LRs) oscillated accuracy between 58 % and 100 % at high
+# amplitude because the optimizer kept overshooting.  With gentler
+# LRs the agent should drift rather than thrash toward the Pareto
+# frontier between discrimination and LLM plausibility.
+batch_size: 12
+gradient_accumulation_steps: 1
+steps: 6000
+gru_lr: 0.000005
+receiver_lr: 0.00003
+num_distractors: 15
+min_targets: 1
+max_targets: 1
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100
