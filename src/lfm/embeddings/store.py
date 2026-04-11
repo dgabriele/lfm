@@ -162,6 +162,13 @@ class EmbeddingStore:
             raw_index = json.load(fh)
         self._cluster_index = {int(k): v for k, v in raw_index.items()}
 
+        # Pre-allocate numpy arrays for each cluster so rng.choice never
+        # has to re-convert Python lists at sampling time.
+        self._cluster_arrays: dict[int, np.ndarray] = {
+            cid: np.array(members, dtype=np.intp)
+            for cid, members in self._cluster_index.items()
+        }
+
         # Metadata
         meta_path = self.store_dir / "metadata.json"
         with meta_path.open("r", encoding="utf-8") as fh:

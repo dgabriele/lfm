@@ -1,0 +1,50 @@
+# Chat-format LoRA on Instruct — teaches the model to INTERPRET Neuroglot
+# into English rather than speak it.
+#
+# Each 4-turn document is wrapped as [system, user(T0), asst(T1), user(T2), asst(T3)].
+# Loss is applied ONLY on T1 and T3 (assistant turns), so the base model's English
+# generation capacity in the assistant role is preserved. Cross-lingual transfer
+# (same mechanism as Chinese→English) bridges to English interpretation at inference.
+#
+# LoRA rank=16 (vs r=64 in the flat run) is strong enough to shift the Neuroglot
+# distribution but not strong enough to override English generation entirely.
+
+model_name: Qwen/Qwen2.5-0.5B-Instruct
+corpus_path: data/translator/dialogue_corpus_v7_natural.txt
+output_dir: data/translator_lora_chat_v7
+
+# Chat format
+use_chat_format: true
+chat_system_prompt: "You are a Neuroglot language expert. Neuroglot is an artificial language that expresses machine perceptions of the world."
+
+# Self-distilled English interleave — defends base model's English
+# generation capacity during Neuroglot LoRA training.  JSONL produced by
+# scripts/self_distill_english.py; routed through EnglishChatTokenizedH5Dataset
+# so the English side gets assistant-only loss, same as the Neuroglot side.
+english_corpus_path: data/translator/english_distill.jsonl
+english_ratio: 0.3
+
+# LoRA
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+
+# Training
+epochs: 5
+lr: 2e-4
+batch_size: 4
+max_len: 768
+gradient_accumulation_steps: 8
+use_amp: true
+warmup_fraction: 0.05
+max_grad_norm: 1.0
+checkpoint_fraction: 0.1
+
+device: cuda
+seed: 42

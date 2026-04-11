@@ -96,6 +96,19 @@ class DialogueGameConfig(LFMBaseConfig):
     # topology matching.  Small values (0.1) nudge without dominating.
     ce_weight: float = 0.1
 
+    # Token marginal entropy regularization.  Maintains an EMA of the
+    # corpus-level unigram token distribution across training steps and
+    # penalizes its entropy, encouraging Zipfian vocabulary structure
+    # (stable core vocabulary reused across documents) without collapsing
+    # expressivity — the discrimination task provides diversity pressure.
+    # Gradient flows through the current batch's soft distribution →
+    # Phase 2 hidden states → z-generator.
+    # 0.0 = disabled, typical range 0.01–0.1.
+    vocab_entropy_weight: float = 0.0
+    # EMA decay for the corpus-level marginal.  High α = slow-moving
+    # (cross-document stability), low α = more reactive to recent batches.
+    vocab_entropy_ema_alpha: float = 0.99
+
     # Independent turns: each turn sees only the embedding + turn position,
     # not previous turns.  Produces 4 independent views of the same input,
     # maximizing vocabulary/phrase diversity for LLM pretraining.
@@ -354,6 +367,15 @@ class DialogueGame(nn.Module):
         else:
             self.z_diversity = None
 
+        # Corpus-level unigram EMA for vocab entropy regularization.
+        # Initialized uniform; updated each step with the current batch's
+        # soft marginal distribution.  Saved/loaded with checkpoints.
+        vocab_size = gen._full_vocab
+        self.register_buffer(
+            "vocab_marginal_ema",
+            torch.full((vocab_size,), 1.0 / vocab_size),
+        )
+
         # VRAM monitor (daemon process, saves every ~1 min)
         trace_path = str(Path(config.output_dir) / "vram_trace.npz")
         self.vram_monitor = VRAMMonitor(
@@ -365,6 +387,10 @@ class DialogueGame(nn.Module):
         # Ensure clean GPU release on exit
         import atexit
         atexit.register(self.vram_monitor.stop)
+
+        # Tracks whether gen was stranded on CPU by a failed OOM recovery.
+        # Checked at the start of every forward() and restored before use.
+        self._gen_stranded_on_cpu: bool = False
 
     @staticmethod
     def _simplex_init(n: int, dim: int, scale: float = 0.02) -> Tensor:
@@ -409,6 +435,7 @@ class DialogueGame(nn.Module):
             "surface_encoder": self.surface_encoder.state_dict(),
             "receiver": self.receiver.state_dict(),
             "turn_agg_logits": self.turn_agg_logits.data,
+            "vocab_marginal_ema": self.vocab_marginal_ema.data,
             "num_turns": self.config.num_turns,
             "max_phrases": self.config.max_phrases,
             "z_generator": "diffusion",
@@ -433,6 +460,8 @@ class DialogueGame(nn.Module):
         self.receiver.load_state_dict(ckpt["receiver"])
         if "turn_agg_logits" in ckpt:
             self.turn_agg_logits.data.copy_(ckpt["turn_agg_logits"])
+        if "vocab_marginal_ema" in ckpt:
+            self.vocab_marginal_ema.data.copy_(ckpt["vocab_marginal_ema"])
         version = ckpt.get("version", 1)
         if version < 2:
             logger.info("Loaded V1 checkpoint — using V2 fixed-size context")
@@ -560,50 +589,59 @@ class DialogueGame(nn.Module):
         context: Tensor | None,
         target_mask: Tensor | None = None,
     ) -> TurnOutput:
-        """Generate one dialogue turn in micro-batches.
+        """Generate one dialogue turn.
 
-        The entire generation pipeline (z-gen → Phase 1 → Phase 2) is
-        micro-batched to bound peak VRAM.  Only the context transformer
-        runs at full batch (it's cheap — single-token cross-attention).
+        Phase 1 (no_grad decode) runs at full batch — it stores no
+        activations for backward, so VRAM cost is just the KV cache
+        (~1–2MB/sample) and does not need chunking.  Chunking Phase 1
+        forces many small autoregressive loops, keeping the GPU at low
+        utilization.
+
+        Only Phase 2 (gradient rerun) is chunked to stay within the
+        configured VRAM budget.
         """
         batch = targets.size(0)
         conditioning = self.context_transformer(
             targets, turn_emb, context, target_mask,
         )
-        chunk = self._compute_generation_chunk(batch)
 
-        all_hidden, all_mask, all_z_seq, all_z_weights = [], [], [], []
-        all_num_phrases, all_tokens_cpu, all_gen_mask_cpu = [], [], []
+        # Phase 1: z-gen + no_grad decode at full batch.
+        z_seq, z_weights, num_phrases = self.z_gen(conditioning)
+        tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(z_seq, z_weights)
+        tokens_cpu = tokens.cpu()
+        gen_mask_cpu = gen_mask.cpu()
+
+        # Phase 2: gradient rerun chunked to bound activation VRAM.
+        # Compute adaptive chunk using actual sequence length from Phase 1.
+        avg_tok = gen_mask.float().sum(-1).mean().item()
+        chunk = self._compute_generation_chunk(batch, avg_tok)
+        all_hidden, all_mask = [], []
         max_seq = 0
 
         for start in range(0, batch, chunk):
             end = min(start + chunk, batch)
-            cond_chunk = conditioning[start:end]
-
-            z_seq, z_weights, num_phrases = self.z_gen(cond_chunk)
-            tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(z_seq, z_weights)
             hidden = rerun_decoder_multiphrase_with_grad(
-                self.gen, z_seq, z_weights, tokens, gen_mask, seg_bounds,
+                self.gen,
+                z_seq[start:end],
+                z_weights[start:end],
+                tokens[start:end],
+                gen_mask[start:end],
+                seg_bounds[start:end],
             )
-
-            max_seq = max(max_seq, hidden.size(1))
+            seq_len = hidden.size(1)
+            max_seq = max(max_seq, seq_len)
             all_hidden.append(hidden)
-            all_mask.append(gen_mask[:, :hidden.size(1)])
-            all_z_seq.append(z_seq)
-            all_z_weights.append(z_weights)
-            all_num_phrases.append(num_phrases)
-            all_tokens_cpu.append(tokens.cpu())
-            all_gen_mask_cpu.append(gen_mask.cpu())
+            all_mask.append(gen_mask[start:end, :seq_len])
 
-            del tokens, gen_mask, seg_bounds
-            # Only flush cache if VRAM is tight (>60% used)
             if torch.cuda.is_available():
                 used = torch.cuda.memory_allocated()
                 total = torch.cuda.get_device_properties(0).total_memory
                 if used / total > 0.60:
                     torch.cuda.empty_cache()
 
-        # Pad hidden/mask to common seq length and concatenate
+        del tokens, seg_bounds
+
+        # Pad hidden/mask chunks to common seq length
         for i, h in enumerate(all_hidden):
             if h.size(1) < max_seq:
                 pad = h.new_zeros(h.size(0), max_seq - h.size(1), h.size(2))
@@ -614,18 +652,6 @@ class DialogueGame(nn.Module):
 
         hidden = torch.cat(all_hidden, dim=0)
         trimmed_mask = torch.cat(all_mask, dim=0)
-        z_seq = torch.cat(all_z_seq, dim=0)
-        z_weights = torch.cat(all_z_weights, dim=0)
-        num_phrases = torch.cat(all_num_phrases, dim=0)
-
-        # Pad tokens/masks on CPU to common size
-        max_tok = max(t.size(1) for t in all_tokens_cpu)
-        for i, t in enumerate(all_tokens_cpu):
-            if t.size(1) < max_tok:
-                all_tokens_cpu[i] = F.pad(t, (0, max_tok - t.size(1)))
-                all_gen_mask_cpu[i] = F.pad(all_gen_mask_cpu[i], (0, max_tok - all_gen_mask_cpu[i].size(1)))
-        tokens_cpu = torch.cat(all_tokens_cpu, dim=0)
-        gen_mask_cpu = torch.cat(all_gen_mask_cpu, dim=0)
 
         summary = self._summarize_turn(hidden, trimmed_mask)
 
@@ -640,19 +666,33 @@ class DialogueGame(nn.Module):
             gen_mask_cpu=gen_mask_cpu,
         )
 
-    def _compute_generation_chunk(self, batch: int) -> int:
-        """Chunk size for full turn generation (z-gen + Phase 1 + Phase 2).
+    def _compute_generation_chunk(self, batch: int, avg_tok: float = 50.0) -> int:
+        """Chunk size for Phase 2 gradient rerun.
 
-        Uses the configured VRAM budget with a conservative per-sample
-        estimate.  The estimate accounts for z-gen, Phase 1 KV cache,
-        Phase 2 activations, causal masks, and gradient graph overhead.
+        Phase 2 attention maps scale as O(seq_len²) so we scale the
+        per-sample VRAM estimate quadratically with the observed average
+        token count from Phase 1.
+        Calibration: ~720 MB per sample at 113 tok/turn (measured).
+
+        Uses actual available GPU memory (sampled after Phase 1) with a
+        conservative headroom budget so chunk size adapts to whatever is
+        already allocated (prior-turn hidden states, model params, etc.).
         """
-        # Empirically measured: batch 48 at 25 tok/turn peaked at 3.4GB
-        # over a ~185MB static baseline → ~67MB per sample.
-        # At 50 tok/turn this grows to ~130MB.  Use 150MB for safety.
-        bytes_per_sample = 150 * 1024 * 1024
-        budget = self.config.phase2_vram_budget_mb * 1024 * 1024
-        chunk = max(self.config.phase2_min_chunk, int(budget / bytes_per_sample))
+        # Empirically calibrated: ~975 MB/sample at 113 tok/turn.
+        # Using base=190MB so that at tok=113: 190 × (113/50)² ≈ 972MB.
+        tok_scale = max(1.0, (avg_tok / 50.0) ** 2)
+        bytes_per_sample = int(190 * tok_scale * 1024 * 1024)
+
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated()
+            total = torch.cuda.get_device_properties(0).total_memory
+            # Reserve 1.5 GB headroom for backward pass, scoring, aux losses.
+            headroom = int(1.5 * 1024 ** 3)
+            available = max(0, total - allocated - headroom)
+        else:
+            available = int(self.config.phase2_vram_budget_mb * 1024 * 1024)
+
+        chunk = max(self.config.phase2_min_chunk, int(available / bytes_per_sample))
         return min(chunk, batch)
 
     def _score_progressive(
@@ -743,8 +783,14 @@ class DialogueGame(nn.Module):
 
     def _compute_aux_losses(
         self, turns: list[TurnOutput],
-    ) -> Tensor:
-        """Length regularization and z diversity across all turns."""
+    ) -> tuple[Tensor, Tensor]:
+        """Length regularization, z diversity, and vocab entropy across all turns.
+
+        Returns:
+            aux: Weighted sum of all auxiliary loss terms.
+            vocab_entropy: Raw (unweighted) marginal entropy scalar, detached,
+                for logging.  Zero when vocab_entropy_weight == 0.
+        """
         cfg = self.config
         device = turns[0].hidden.device
         aux = torch.tensor(0.0, device=device)
@@ -775,7 +821,42 @@ class DialogueGame(nn.Module):
                 off_diag = ~torch.eye(len(turns), dtype=torch.bool, device=device)
                 aux = aux + cfg.z_diversity_weight * sim[off_diag].mean()
 
-        return aux
+        vocab_entropy = torch.tensor(0.0, device=device)
+        if cfg.vocab_entropy_weight > 0:
+            # Compute the current batch's marginal token distribution.
+            # Accumulate online (sum then divide) to avoid holding all turns'
+            # (N_valid × vocab_size) logit tensors simultaneously — with long
+            # sequences and large vocabularies this can be several hundred MB.
+            p_sum = None
+            total_count = 0
+            for t in turns:
+                valid_hidden = t.hidden[t.mask]  # (N_valid, H)
+                logits = self.gen.output_head(valid_hidden)  # (N_valid, vocab_size)
+                probs = torch.softmax(logits, dim=-1)
+                n = probs.size(0)
+                p_sum = probs.sum(dim=0) if p_sum is None else p_sum + probs.sum(dim=0)
+                total_count += n
+                del logits, probs  # free immediately
+            p_batch = p_sum / total_count  # (vocab_size,)
+
+            # Anchor to the corpus-level EMA.  Gradient flows through p_batch's
+            # (1-α) contribution; the EMA provides cross-document context so the
+            # pressure reflects accumulated vocabulary frequency, not just this batch.
+            # Individual documents remain free to be diverse — the discrimination
+            # task maintains expressive diversity independently.
+            alpha = cfg.vocab_entropy_ema_alpha
+            ema = self.vocab_marginal_ema  # (vocab_size,), no grad
+            p_ema_anchored = alpha * ema + (1.0 - alpha) * p_batch
+            vocab_entropy = -(p_ema_anchored * (p_ema_anchored + 1e-8).log()).sum()
+            aux = aux + cfg.vocab_entropy_weight * vocab_entropy
+
+            # Update the EMA buffer for subsequent steps (detached — not part of graph).
+            with torch.no_grad():
+                self.vocab_marginal_ema.copy_(
+                    alpha * ema + (1.0 - alpha) * p_batch.detach()
+                )
+
+        return aux, vocab_entropy.detach()
 
     def _build_output(
         self,
@@ -785,6 +866,7 @@ class DialogueGame(nn.Module):
         turns: list[TurnOutput],
         surface_loss: Tensor | None = None,
         ce_loss: Tensor | None = None,
+        vocab_entropy: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Assemble output dict for trainer."""
         cfg = self.config
@@ -819,6 +901,7 @@ class DialogueGame(nn.Module):
             "_dialogue_masks": [t.gen_mask_cpu.detach() for t in turns],
             "surface_loss": surface_loss if surface_loss is not None else torch.tensor(0.0),
             "ce_loss": ce_loss if ce_loss is not None else torch.tensor(0.0),
+            "vocab_entropy": vocab_entropy if vocab_entropy is not None else torch.tensor(0.0),
         }
 
     @contextmanager
@@ -843,7 +926,18 @@ class DialogueGame(nn.Module):
             try:
                 yield
             finally:
-                self.gen.to(device)
+                torch.cuda.empty_cache()
+                try:
+                    self.gen.to(device)
+                    self._gen_stranded_on_cpu = False
+                except RuntimeError:
+                    # GPU restore failed (likely secondary OOM after fragmentation).
+                    # Mark gen as stranded; forward() will restore it next step
+                    # after the trainer has cleared gradients and reduced batch size.
+                    self._gen_stranded_on_cpu = True
+                    logger.warning(
+                        "Decoder restore to GPU failed — will retry at next forward()."
+                    )
         else:
             yield
 
@@ -866,6 +960,16 @@ class DialogueGame(nn.Module):
 
         mon = self.vram_monitor
         mon.set_step(step)
+
+        # Restore decoder to GPU if it was stranded by a prior failed recovery.
+        # The trainer has cleared gradients and reduced batch size by now, so
+        # VRAM is much lower and the restore should succeed.
+        if self._gen_stranded_on_cpu:
+            device = anchor.device
+            torch.cuda.empty_cache()
+            self.gen.to(device)
+            self._gen_stranded_on_cpu = False
+            logger.info("Decoder restored to %s after stranded-on-CPU recovery.", device)
 
         # Stage 1: candidates and teacher topology
         mon.stage = "prepare"
@@ -906,10 +1010,12 @@ class DialogueGame(nn.Module):
         # Stage 4: auxiliary losses
         mon.stage = "aux_losses"
         loss = progressive_loss / cfg.num_turns
-        loss = loss + self._compute_aux_losses(turns)
+        aux, vocab_entropy = self._compute_aux_losses(turns)
+        loss = loss + aux
 
         # Stage 5: output
         return self._build_output(
             loss, logits, target_idx, turns,
             surface_loss=surface_loss, ce_loss=ce_loss,
+            vocab_entropy=vocab_entropy,
         )

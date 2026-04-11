@@ -174,25 +174,46 @@ class SelfSupervisedTrainer:
     def _build_dataloaders(self, tokenizer):
         """Load corpus, tokenize to HDF5 if needed, return train/val loaders.
 
-        When ``english_corpus_path`` is set, interleaves English data
-        to maintain cross-lingual transfer capability.
+        When ``use_chat_format`` is set, wraps each 4-sentence document as
+        a multi-turn instruct conversation with loss only on assistant
+        turns.  When ``english_corpus_path`` is set, interleaves English
+        data to maintain cross-lingual transfer capability.  In chat-
+        format runs, a ``.jsonl`` English corpus is routed through
+        :class:`EnglishChatTokenizedH5Dataset` so the English side also
+        gets assistant-only loss on self-distilled instruct examples.
         """
-        from lfm.translator.tokenized_dataset import TokenizedH5Dataset
+        from lfm.translator.tokenized_dataset import (
+            ChatTokenizedH5Dataset,
+            EnglishChatTokenizedH5Dataset,
+            TokenizedH5Dataset,
+        )
 
         cfg = self.config
         corpus_path = Path(cfg.corpus_path)
 
-        primary_train, self._val_ds = TokenizedH5Dataset.from_corpus(
-            corpus_path, tokenizer, cfg.max_len,
-        )
+        if cfg.use_chat_format:
+            primary_train, self._val_ds = ChatTokenizedH5Dataset.from_corpus(
+                corpus_path, tokenizer, cfg.max_len,
+                system_prompt=cfg.chat_system_prompt,
+            )
+        else:
+            primary_train, self._val_ds = TokenizedH5Dataset.from_corpus(
+                corpus_path, tokenizer, cfg.max_len,
+            )
 
         # Interleave English if configured
         if cfg.english_corpus_path:
             from lfm.translator.interleaved_dataset import InterleavedDataset
 
-            english_train, _ = TokenizedH5Dataset.from_corpus(
-                Path(cfg.english_corpus_path), tokenizer, cfg.max_len,
-            )
+            english_path = Path(cfg.english_corpus_path)
+            if cfg.use_chat_format and english_path.suffix == ".jsonl":
+                english_train, _ = EnglishChatTokenizedH5Dataset.from_corpus(
+                    english_path, tokenizer, cfg.max_len,
+                )
+            else:
+                english_train, _ = TokenizedH5Dataset.from_corpus(
+                    english_path, tokenizer, cfg.max_len,
+                )
             self._train_ds = InterleavedDataset(
                 primary_train, english_train,
                 secondary_ratio=cfg.english_ratio,

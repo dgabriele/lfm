@@ -195,3 +195,13 @@ class PretrainConfig(LFMBaseConfig):
     use_ema: bool = False
     ema_decay: float = 0.92
     ema_interval: int = 1  # update EMA every N optimizer steps
+
+    # Chat format — wraps each 4-turn document as a multi-turn instruct conversation.
+    # T0/T2 go in user role (context, no loss); T1/T3 go in assistant role (loss).
+    # Preserves the base model's English generation capability in the assistant role
+    # so that zero-shot cross-lingual transfer works at inference time.
+    use_chat_format: bool = False
+    chat_system_prompt: str = (
+        "You are a Neuroglot language expert. "
+        "Neuroglot is an artificial language that expresses machine perceptions of the world."
+    )

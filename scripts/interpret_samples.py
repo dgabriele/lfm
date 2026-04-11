@@ -68,19 +68,17 @@ def generate_documents(
         summary = game._summarize_turn(hidden, trimmed_mask)
         context_summaries.append(summary)
 
-        # Decode to IPA
-        from lfm.translator.romanize import syllable_hyphenate
-        ipa_strings = []
+        # Decode to romanized text (matching training corpus format)
+        from lfm.translator.romanize import romanize_iso
         for j in range(batch):
             ids = [
                 t.item() for t, m in zip(tokens[j], gen_mask[j])
                 if m and t.item() != eos_id and t.item() < vocab_size
             ]
             ipa = sp.decode(ids).strip()
-            ipa_strings.append(syllable_hyphenate(ipa) if ipa else "")
-        for i, ipa in enumerate(ipa_strings):
-            if ipa:
-                documents[i].append(f"[T{turn_idx}] {ipa}")
+            rom = romanize_iso(ipa).strip() if ipa else ""
+            if rom:
+                documents[j].append(rom)
 
         del hidden, tokens, gen_mask, bounds, z_seq, z_weights
 
@@ -98,13 +96,23 @@ def compute_ppl(model, tokenizer, document: str) -> float:
 
 def interpret(model, tokenizer, document: str) -> str:
     """Prompt the fine-tuned LLM to interpret a Neuroglot document."""
-    prompt = (
-        f"[Neuroglot]\n{document}\n\n"
-        f"The passage above is written in Neuroglot, a natural language "
-        f"with its own vocabulary, grammar, and meaning. It is not a "
-        f"phonetic transcription of any known human language. "
-        f"Based on your understanding of Neuroglot, what is this passage "
-        f"about? What does it mean? Interpret it in English.\n\n"
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert interpreter of Neuroglot, a natural language "
+                "with its own vocabulary, grammar, and meaning. It is not a "
+                "phonetic transcription of any known human language. "
+                "When given a Neuroglot passage, interpret what it is about in English."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"{document}\n\nWhat is this Neuroglot passage about? Interpret it in English.",
+        },
+    ]
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True,
     )
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     with torch.no_grad():
@@ -196,11 +204,22 @@ def main():
     del game, faculty
     torch.cuda.empty_cache()
 
-    # Load fine-tuned LLM
+    # Load fine-tuned LLM (supports both full models and LoRA adapters)
     logger.info("Loading fine-tuned LLM...")
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    import os
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
-    model = AutoModelForCausalLM.from_pretrained(args.model_path).to(device)
+    if os.path.exists(os.path.join(args.model_path, "adapter_config.json")):
+        import json
+        with open(os.path.join(args.model_path, "adapter_config.json")) as f:
+            adapter_cfg = json.load(f)
+        base_model_name = adapter_cfg["base_model_name_or_path"]
+        logger.info("LoRA adapter detected — loading base model: %s", base_model_name)
+        from peft import PeftModel
+        base = AutoModelForCausalLM.from_pretrained(base_model_name).to(device)
+        model = PeftModel.from_pretrained(base, args.model_path).to(device)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(args.model_path).to(device)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model.eval()
@@ -208,16 +227,15 @@ def main():
     # Run interpretations
     print("=" * 80)
     for i, (idx, passage, doc_turns) in enumerate(zip(indices, passages, documents)):
-        doc_text = "\n".join(doc_turns)
+        # Join turns as natural paragraph sentences (matching training format)
+        doc_text = " ".join(s.rstrip(".") + "." for s in doc_turns)
 
         ppl = compute_ppl(model, tokenizer, doc_text)
         interpretation = interpret(model, tokenizer, doc_text)
 
         print(f"\n--- Sample {i+1} (embedding #{idx}, PPL={ppl:.1f}) ---")
         print(f"\nOriginal English:\n  {passage}")
-        print(f"\nNeuroglot:")
-        for t in doc_turns:
-            print(f"  {t}")
+        print(f"\nNeuroglot:\n  {doc_text}")
         print(f"\nLLM Interpretation:\n  {interpretation}")
         print()
 

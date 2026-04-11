@@ -1,0 +1,33 @@
+# LoRA on Instruct — Neuroglot only, no English interleaving.
+# Frozen Instruct weights preserve English as metalanguage + instruction following.
+# LoRA adapters learn Neuroglot distribution on its own terms.
+# No English corpus: we explicitly don't want Neuroglot-English co-occurrence alignment.
+
+model_name: Qwen/Qwen2.5-0.5B-Instruct
+corpus_path: data/translator/dialogue_corpus_v7_natural.txt
+output_dir: data/translator_lora_instruct_v7
+
+# LoRA
+use_lora: true
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+
+# Training
+epochs: 3
+lr: 2e-4
+batch_size: 10
+max_len: 512
+gradient_accumulation_steps: 16
+use_amp: true
+warmup_fraction: 0.1
+max_grad_norm: 1.0
+checkpoint_fraction: 0.1
+
+device: cuda
+seed: 42

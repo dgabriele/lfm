@@ -67,7 +67,12 @@ class AgentTrainer:
     def _sample_batch(
         self, step: int,
     ) -> tuple[torch.Tensor, torch.Tensor, float, torch.Tensor | None]:
-        """Sample anchor + distractors with curriculum difficulty."""
+        """Sample anchor + distractors with curriculum difficulty.
+
+        Vectorized: hard-negative sampling groups batch items by cluster and
+        bulk-samples all distractors for each group at once, avoiding the
+        per-item Python loop that starves the GPU between steps.
+        """
         cfg = self.config
         curriculum = cfg.curriculum
 
@@ -80,38 +85,54 @@ class AgentTrainer:
         else:
             hard_ratio = 1.0
 
+        n_hard = int(hard_ratio * cfg.num_distractors)
+        medium_ratio = getattr(curriculum, "medium_ratio", 0.0) if curriculum.enabled else 0.0
+        n_medium = int(medium_ratio * cfg.num_distractors)
+        n_easy = cfg.num_distractors - n_hard - n_medium
+
         idx = self._rng.integers(0, self._n, size=self._batch_size)
-        anchor = torch.tensor(
-            self._embeddings[idx], dtype=torch.float32,
-        ).to(self.device)
+        clusters = self._cluster_labels[idx]  # (B,)
 
         dist_indices = np.empty(
             (self._batch_size, cfg.num_distractors), dtype=np.intp,
         )
-        medium_ratio = getattr(curriculum, "medium_ratio", 0.0) if curriculum.enabled else 0.0
 
-        for i in range(self._batch_size):
-            n_hard = int(hard_ratio * cfg.num_distractors)
-            n_medium = int(medium_ratio * cfg.num_distractors)
-            n_easy = cfg.num_distractors - n_hard - n_medium
+        # Easy distractors: fully vectorized
+        if n_easy > 0:
+            dist_indices[:, n_hard + n_medium:] = self._rng.integers(
+                0, self._n, size=(self._batch_size, n_easy),
+            )
 
-            cluster = int(self._cluster_labels[idx[i]])
+        # Hard distractors: same cluster — group by cluster, bulk sample per group
+        if n_hard > 0:
+            unique_clusters, inv_idx = np.unique(clusters, return_inverse=True)
+            cluster_arrays = self.store._cluster_arrays
+            for ci, cid in enumerate(unique_clusters):
+                mask = inv_idx == ci
+                count = int(mask.sum())
+                members = cluster_arrays[cid]
+                total = count * n_hard
+                drawn = self._rng.choice(members, size=total, replace=len(members) < total)
+                dist_indices[mask, :n_hard] = drawn.reshape(count, n_hard)
 
-            hard_idx = np.empty(0, dtype=np.intp)
-            if n_hard > 0:
-                hard_idx = self.store.sample_from_cluster(
-                    cluster, n_hard, rng=self._rng,
+        # Medium distractors: different cluster — one Python loop, but n_medium is
+        # typically 0; kept for completeness.
+        if n_medium > 0:
+            eligible_ids = [cid for cid in self.store._cluster_index]
+            cluster_arrays = self.store._cluster_arrays
+            for i in range(self._batch_size):
+                anchor_cluster = int(clusters[i])
+                chosen_clusters = self._rng.choice(
+                    [c for c in eligible_ids if c != anchor_cluster],
+                    size=n_medium, replace=True,
                 )
+                for j, cid in enumerate(chosen_clusters):
+                    members = cluster_arrays[cid]
+                    dist_indices[i, n_hard + j] = self._rng.choice(members)
 
-            medium_idx = np.empty(0, dtype=np.intp)
-            if n_medium > 0:
-                medium_idx = self.store.sample_from_different_cluster(
-                    cluster, n_medium, rng=self._rng,
-                )
-
-            easy_idx = self._rng.integers(0, self._n, size=max(n_easy, 0))
-            dist_indices[i] = np.concatenate([hard_idx, medium_idx, easy_idx])
-
+        anchor = torch.tensor(
+            self._embeddings[idx], dtype=torch.float32,
+        ).to(self.device)
         distractors = torch.tensor(
             self._embeddings[dist_indices], dtype=torch.float32,
         ).to(self.device)
@@ -137,6 +158,7 @@ class AgentTrainer:
         ckpt["step"] = step
         ckpt["accuracy"] = accuracy
         ckpt["hard_ratio"] = hard_ratio
+        ckpt["batch_size"] = self._batch_size  # persist actual (post-OOM) batch size
 
         torch.save(ckpt, str(self._output_dir / "latest.pt"))
         self._history.save(str(self._output_dir / "history.parquet"))
@@ -164,6 +186,16 @@ class AgentTrainer:
             ckpt = torch.load(resume, map_location=self.device, weights_only=False)
             game.load_checkpoint_state(ckpt)
             start_step = ckpt.get("step", 0)
+            # Restore the actual batch size from when the checkpoint was saved
+            # (may be smaller than config due to prior OOM auto-recovery).
+            if "batch_size" in ckpt:
+                saved_bs = ckpt["batch_size"]
+                if saved_bs < self._batch_size:
+                    logger.info(
+                        "Restored batch_size=%d from checkpoint (config=%d)",
+                        saved_bs, self._batch_size,
+                    )
+                    self._batch_size = saved_bs
             logger.info("Resumed from %s at step %d", resume, start_step)
 
         logger.info(
@@ -262,8 +294,13 @@ class AgentTrainer:
                 ckpt["accuracy"] = step_acc
                 ckpt["hard_ratio"] = hard_ratio
                 torch.save(ckpt, str(self._output_dir / "best.pt"))
+                # Timestamped backup so OOM cascades can't destroy the best
+                # weights by resuming from a degenerate checkpoint.
+                backup_dir = self._output_dir / "backups"
+                backup_dir.mkdir(exist_ok=True)
+                torch.save(ckpt, str(backup_dir / f"best_step{step}.pt"))
                 logger.info(
-                    "  New best acc=%.1f%% at step %d — saved best.pt",
+                    "  New best acc=%.1f%% at step %d — saved best.pt + backup",
                     step_acc * 100, step,
                 )
 
@@ -297,6 +334,8 @@ class AgentTrainer:
                     extra += f"  surf={out['surface_loss'].item():.3f}"
                 if "ce_loss" in out and out["ce_loss"].item() != 0:
                     extra += f"  ce={out['ce_loss'].item():.3f}"
+                if "vocab_entropy" in out and out["vocab_entropy"].item() != 0:
+                    extra += f"  vent={out['vocab_entropy'].item():.2f}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
                 if torch.cuda.is_available():

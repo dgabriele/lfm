@@ -1,0 +1,49 @@
+# Dialogue game — v7 full constituency decoder
+# Vocabulary entropy regularization enabled (vocab_entropy_weight=0.01)
+# to encourage word reuse while preserving referential discrimination.
+
+decoder_path: data/models/v7/vae_decoder.pt
+spm_path: data/models/v7/spm.model
+output_dir: data/dialogue_game_v7_vent
+embedding_store_dir: data/embeddings
+
+# Dialogue structure
+num_turns: 4
+context_hidden_dim: 512
+context_heads: 4
+
+# Diffusion z-generator
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_phrases: 3
+variable_phrases: true
+target_phrases: 2.0
+length_weight: 0.5
+z_diversity_weight: 0.3
+
+# Loss
+per_turn_weight: 0.0
+ce_weight: 0.1
+independent_turns: false
+vocab_entropy_weight: 0.01
+
+# Phase 2 VRAM management
+phase2_vram_budget_mb: 1500
+phase2_min_chunk: 4
+
+# Training — correct LRs from expression game
+batch_size: 90
+gradient_accumulation_steps: 1
+steps: 4000
+gru_lr: 0.00005
+receiver_lr: 0.0003
+num_distractors: 15
+min_targets: 1
+max_targets: 1
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100
