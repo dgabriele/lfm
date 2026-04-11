@@ -1,0 +1,37 @@
+# Build a Qwen-latent EmbeddingStore from the existing Leipzig corpus.
+# This is the minimum-setup starting config: one source (Leipzig), last-
+# layer last-token pooling of Qwen 2.5 0.5B, density-aware resampling
+# with temperature 0.7.  For broader coverage, add more entries to
+# `sources:` pointing at Wikipedia, code, fiction, etc.
+
+sources:
+  - path: data/embeddings/passages.jsonl
+    text_field: text
+    weight: 1.0
+    max_samples: null
+    name: leipzig
+
+output_dir: data/embeddings_qwen_v1
+
+extractor:
+  model_name: Qwen/Qwen2.5-0.5B
+  layer: -1
+  pooling: last_token
+  dtype: bfloat16
+  batch_size: 16
+  max_len: 256
+
+density:
+  enabled: true
+  knn_k: 10
+  temperature: 0.7
+  target_size: 300000
+
+cluster:
+  num_clusters: 2047
+  random_state: 42
+  batch_size: 4096
+
+shuffle_seed: 42
+device: cuda
+max_extracted: null

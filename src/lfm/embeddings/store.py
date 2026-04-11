@@ -129,6 +129,23 @@ class EmbeddingStore:
         store.load()
         return store
 
+    @classmethod
+    def read_metadata(cls, store_dir: str | Path) -> dict[str, Any]:
+        """Read ``metadata.json`` without loading the full store.
+
+        Useful for configuration auto-detection (e.g. pulling the
+        ``embedding_dim`` before constructing a game config that has
+        to match).  No embeddings, cluster labels, or other heavy
+        resources are touched.
+        """
+        path = Path(store_dir) / "metadata.json"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"metadata.json not found in {store_dir}; is it an EmbeddingStore?"
+            )
+        with path.open("r", encoding="utf-8") as fh:
+            return json.load(fh)
+
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------

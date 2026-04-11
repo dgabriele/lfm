@@ -57,6 +57,22 @@ class DialogueCorpusGenerator(BaseCorpusGenerator):
         ckpt = torch.load(
             cfg.dialogue_checkpoint, map_location=device, weights_only=False,
         )
+
+        # Auto-detect embedding_dim from the store so the game config
+        # matches whatever latent space the store was built in.
+        from lfm.embeddings.store import EmbeddingStore
+        dim_kwargs: dict = {}
+        try:
+            meta = EmbeddingStore.read_metadata(cfg.embedding_store_dir)
+            if "embedding_dim" in meta:
+                dim_kwargs["embedding_dim"] = int(meta["embedding_dim"])
+                logger.info(
+                    "Auto-detected embedding_dim=%d from store at %s",
+                    dim_kwargs["embedding_dim"], cfg.embedding_store_dir,
+                )
+        except FileNotFoundError:
+            pass
+
         game_cfg = DialogueGameConfig(
             decoder_path=cfg.decoder_path,
             spm_path=cfg.spm_path,
@@ -64,6 +80,7 @@ class DialogueCorpusGenerator(BaseCorpusGenerator):
             max_phrases=ckpt.get("max_phrases", ckpt.get("max_segments", 4)),
             num_turns=ckpt.get("num_turns", 4),
             device=cfg.device,
+            **dim_kwargs,
         )
         faculty = LanguageFaculty(game_cfg.build_faculty_config()).to(device)
         game = DialogueGame(game_cfg, faculty).to(device)

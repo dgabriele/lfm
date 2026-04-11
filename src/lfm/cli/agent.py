@@ -10,6 +10,41 @@ logger = logging.getLogger(__name__)
 from lfm.cli.base import CLICommand
 
 
+def _auto_detect_embedding_dim(
+    cfg_dict: dict, store_dir_key: str = "embedding_store_dir",
+) -> dict:
+    """Sync ``embedding_dim`` in a config dict with its embedding store.
+
+    Reads ``metadata.json`` from the configured store directory and sets
+    ``cfg_dict["embedding_dim"]`` to match — but only when the user has
+    NOT explicitly specified a value in the config.  Explicit user
+    values are always respected so experiments that want a mismatched
+    dim (e.g. for projection layers) can opt in by setting it directly.
+
+    This keeps the dialogue game adaptive: pointing at a new embedding
+    store with a different native dim requires no config changes.
+    """
+    from lfm.embeddings.store import EmbeddingStore
+
+    store_dir = cfg_dict.get(store_dir_key)
+    if not store_dir:
+        return cfg_dict
+    if "embedding_dim" in cfg_dict:
+        return cfg_dict  # respect explicit override
+    try:
+        meta = EmbeddingStore.read_metadata(store_dir)
+    except FileNotFoundError:
+        return cfg_dict
+    detected = meta.get("embedding_dim")
+    if detected is None:
+        return cfg_dict
+    logger.info(
+        "Auto-detected embedding_dim=%d from store at %s",
+        detected, store_dir,
+    )
+    return {**cfg_dict, "embedding_dim": int(detected)}
+
+
 class ReferentialCommand(CLICommand):
     """Train the referential backprop game through the linguistic bottleneck."""
 
@@ -84,6 +119,19 @@ class ReferentialCommand(CLICommand):
         )
         from lfm.agents.trainer import AgentTrainer
         from lfm.faculty.model import LanguageFaculty
+
+        extra_kwargs: dict = {}
+        from lfm.embeddings.store import EmbeddingStore
+        try:
+            meta = EmbeddingStore.read_metadata(args.embedding_store)
+            if "embedding_dim" in meta:
+                extra_kwargs["embedding_dim"] = int(meta["embedding_dim"])
+                logger.info(
+                    "Auto-detected embedding_dim=%d from store at %s",
+                    extra_kwargs["embedding_dim"], args.embedding_store,
+                )
+        except FileNotFoundError:
+            pass
 
         config = ReferentialGameConfig(
             decoder_path=args.decoder_path,
@@ -221,10 +269,28 @@ class ExpressionCommand(CLICommand):
                 return cli_val
             return cfg_dict.get(key, cli_val)
 
+        resolved_store = _get("embedding_store_dir", args.embedding_store, "data/embeddings")
+        # Auto-detect embedding_dim from store unless YAML explicitly sets it.
+        extra_kwargs: dict = {}
+        if "embedding_dim" not in cfg_dict:
+            from lfm.embeddings.store import EmbeddingStore
+            try:
+                meta = EmbeddingStore.read_metadata(resolved_store)
+                if "embedding_dim" in meta:
+                    extra_kwargs["embedding_dim"] = int(meta["embedding_dim"])
+                    logger.info(
+                        "Auto-detected embedding_dim=%d from store at %s",
+                        extra_kwargs["embedding_dim"], resolved_store,
+                    )
+            except FileNotFoundError:
+                pass
+        else:
+            extra_kwargs["embedding_dim"] = cfg_dict["embedding_dim"]
+
         config = ExpressionGameConfig(
             decoder_path=_get("decoder_path", args.decoder_path, "data/vae_decoder.pt"),
             spm_path=_get("spm_path", args.spm_path, "data/spm.model"),
-            embedding_store_dir=_get("embedding_store_dir", args.embedding_store, "data/embeddings"),
+            embedding_store_dir=resolved_store,
             vq_codebook_path=_get("vq_codebook_path", args.vq_codebook, None),
             output_dir=_get("output_dir", args.output_dir, "data/expression_game"),
             num_memory_tokens=_get("num_memory_tokens", args.num_memory_tokens, 8),
@@ -266,6 +332,7 @@ class ExpressionCommand(CLICommand):
                 enabled=not _get("no_curriculum", args.no_curriculum, False),
                 warmup_steps=_get("curriculum_warmup", args.curriculum_warmup, 500),
             ),
+            **extra_kwargs,
         )
 
         resume = _get("resume", args.resume, None)
@@ -385,13 +452,16 @@ class DialogueCommand(CLICommand):
                 # Restore curriculum from saved config
                 if "curriculum" in merged and isinstance(merged["curriculum"], dict):
                     merged["curriculum"] = CurriculumConfig(**merged["curriculum"])
+                merged = _auto_detect_embedding_dim(merged)
                 config = DialogueGameConfig(**merged)
                 logger.info("Restored training config from checkpoint (step %d)", ckpt.get("step", 0))
             else:
-                config = DialogueGameConfig(**{**cfg_dict, **cli_overrides})
+                merged = _auto_detect_embedding_dim({**cfg_dict, **cli_overrides})
+                config = DialogueGameConfig(**merged)
             del ckpt
         else:
-            config = DialogueGameConfig(**{**cfg_dict, **cli_overrides})
+            merged = _auto_detect_embedding_dim({**cfg_dict, **cli_overrides})
+            config = DialogueGameConfig(**merged)
 
         device = torch.device(config.device)
         faculty = LanguageFaculty(config.build_faculty_config()).to(device)
@@ -450,6 +520,7 @@ class MultiViewCommand(CLICommand):
                 cfg_dict[key] = val
 
         import torch
+        cfg_dict = _auto_detect_embedding_dim(cfg_dict)
         config = MultiViewGameConfig(**cfg_dict)
         device = torch.device(config.device)
         faculty = LanguageFaculty(config.build_faculty_config()).to(device)
@@ -510,6 +581,7 @@ class DocumentCommand(CLICommand):
                 cfg_dict[key] = val
 
         import torch
+        cfg_dict = _auto_detect_embedding_dim(cfg_dict)
         config = DocumentGameConfig(**cfg_dict)
         device = torch.device(config.device)
         faculty = LanguageFaculty(config.build_faculty_config()).to(device)

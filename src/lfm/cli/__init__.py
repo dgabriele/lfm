@@ -67,6 +67,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     register_unmt_group(subparsers)
 
+    # --- qwen-targets subcommand group ---
+    from lfm.cli.qwen_targets import register_qwen_targets_group
+
+    register_qwen_targets_group(subparsers)
+
     # --- pretrain command ---
     from lfm.cli.pretrain import PretrainCommand
 

@@ -252,6 +252,15 @@ class ExpressionSampleCommand(CLICommand):
 
         # Build expression game from checkpoint config
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+
+        dim_kwargs: dict = {}
+        try:
+            meta = EmbeddingStore.read_metadata(args.embedding_store)
+            if "embedding_dim" in meta:
+                dim_kwargs["embedding_dim"] = int(meta["embedding_dim"])
+        except FileNotFoundError:
+            pass
+
         cfg = ExpressionGameConfig(
             decoder_path=args.decoder_path,
             spm_path=args.spm_path,
@@ -260,6 +269,7 @@ class ExpressionSampleCommand(CLICommand):
             diffusion_steps=ckpt.get("diffusion_steps", 4),
             diffusion_layers=ckpt.get("diffusion_layers", 4),
             device=device,
+            **dim_kwargs,
         )
         faculty = LanguageFaculty(cfg.build_faculty_config()).to(device)
         game = ExpressionGame(cfg, faculty).to(device)

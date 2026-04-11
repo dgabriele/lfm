@@ -151,12 +151,22 @@ class ExpressionCorpusGenerator(BaseCorpusGenerator):
         ckpt = torch.load(
             cfg.expression_checkpoint, map_location=device, weights_only=False,
         )
+        # Prefer checkpoint; fall back to store metadata; 384 only as last resort.
+        from lfm.embeddings.store import EmbeddingStore
+        fallback_dim = 384
+        try:
+            meta = EmbeddingStore.read_metadata(cfg.embedding_store_dir)
+            if "embedding_dim" in meta:
+                fallback_dim = int(meta["embedding_dim"])
+        except FileNotFoundError:
+            pass
+
         game_cfg = ExpressionGameConfig(
             decoder_path=cfg.decoder_path,
             spm_path=cfg.spm_path,
             z_generator=ckpt.get("z_generator", "gru"),
             max_phrases=ckpt.get("max_phrases", ckpt.get("max_segments", 4)),
-            embedding_dim=ckpt.get("embedding_dim", 384),
+            embedding_dim=ckpt.get("embedding_dim", fallback_dim),
             z_hidden_dim=ckpt.get("z_hidden_dim", 512),
             num_memory_tokens=ckpt.get("num_memory_tokens", 8),
             diffusion_steps=ckpt.get("diffusion_steps", 4),

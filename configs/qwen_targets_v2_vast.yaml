@@ -1,0 +1,89 @@
+# Diversified Qwen-latent target build — vast.ai RTX 3090 variant.
+#
+# Differences from qwen_targets_v2_mixed.yaml:
+# - batch_size 256 → 512 (fits comfortably in 24 GB)
+# - compile: true   (torch.compile reduce-overhead for CUDA graph capture)
+# - attn_implementation: sdpa  (PyTorch SDPA, picks up Flash Attn when avail)
+
+sources:
+  - hf_dataset: DKYoon/SlimPajama-6B
+    hf_split: train
+    text_field: text
+    weight: 0.30
+    max_samples: 900000
+    name: slimpajama-6b
+
+  - hf_dataset: HuggingFaceFW/fineweb-edu
+    hf_config: sample-10BT
+    hf_split: train
+    text_field: text
+    weight: 0.17
+    max_samples: 500000
+    name: fineweb-edu
+
+  - hf_dataset: HuggingFaceFW/fineweb-2
+    hf_config: cmn_Hani
+    hf_split: train
+    text_field: text
+    weight: 0.15
+    max_samples: 450000
+    name: fineweb2-cmn
+
+  - hf_dataset: HuggingFaceFW/fineweb-2
+    hf_config: jpn_Jpan
+    hf_split: train
+    text_field: text
+    weight: 0.10
+    max_samples: 300000
+    name: fineweb2-jpn
+
+  - hf_dataset: bigcode/the-stack-smol-xl
+    hf_split: train
+    text_field: content
+    weight: 0.15
+    max_samples: 450000
+    name: stack-smol-xl
+
+  - hf_dataset: HuggingFaceTB/smollm-corpus
+    hf_config: cosmopedia-v2
+    hf_split: train
+    text_field: text
+    weight: 0.10
+    max_samples: 300000
+    name: cosmopedia-v2
+
+  - hf_dataset: manu/project_gutenberg
+    hf_split: en
+    text_field: text
+    weight: 0.03
+    max_samples: 50000
+    min_length: 200
+    max_length: 4000
+    name: gutenberg-en
+
+output_dir: data/embeddings_qwen_v2
+
+extractor:
+  model_name: Qwen/Qwen2.5-0.5B
+  layer: -1
+  pooling: last_token
+  dtype: bfloat16
+  batch_size: 512
+  max_len: 256
+  compile: true
+  attn_implementation: sdpa
+
+density:
+  enabled: true
+  knn_k: 10
+  temperature: 0.7
+  target_size: 1000000
+
+cluster:
+  num_clusters: 2047
+  random_state: 42
+  batch_size: 4096
+
+shuffle_seed: 42
+device: cuda
+max_extracted: null
