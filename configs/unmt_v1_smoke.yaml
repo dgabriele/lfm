@@ -1,0 +1,53 @@
+# Smoke-test config for UNMT — tiny scale to verify the training
+# loop composes end-to-end without crashes.  Reuses the tokenizers,
+# embeddings, and MUSE alignment already trained by unmt_v1.yaml
+# (same output_dir).  Because it reuses those 512-dim embeddings it
+# cannot shrink model_dim; instead it drops layer count and total
+# step budget so the whole smoke run finishes in a couple minutes.
+#
+# IMPORTANT: writes the smoke checkpoint to the same `latest.pt` path
+# as unmt_v1.yaml.  After running the smoke, delete
+# data/unmt_v1/latest.pt before starting a real training run,
+# otherwise the real trainer will auto-resume from the 2-layer smoke
+# checkpoint and fail on a shape mismatch with the 6-layer real model.
+
+neuroglot_corpus: data/translator/dialogue_corpus_v7_natural.txt
+english_corpus: data/embeddings/passages.jsonl
+output_dir: data/unmt_v1
+
+neuroglot_tokenizer_prefix: spm_neuroglot
+english_tokenizer_prefix: spm_english
+neuroglot_vocab_size: 16000
+english_vocab_size: 16000
+character_coverage_neuroglot: 1.0
+character_coverage_english: 0.9995
+max_sentence_length: 4096
+max_tokenizer_lines: 200000
+
+neuroglot_lang_tag: "<ng>"
+english_lang_tag: "<en>"
+max_len: 64
+
+word_drop_prob: 0.1
+word_swap_window: 3
+word_mask_prob: 0.1
+
+# Must match the 512-dim skipgram / MUSE output
+model_dim: 512
+n_layers: 2
+n_heads: 8
+ff_dim: 1024
+dropout: 0.1
+
+batch_size: 8
+lr: 5.0e-4
+warmup_steps: 20
+total_steps: 150
+dae_weight: 1.0
+bt_weight: 1.0
+bt_start_step: 80
+grad_accum_steps: 1
+max_grad_norm: 1.0
+
+device: cuda
+seed: 42

@@ -216,33 +216,171 @@ class AlignCommand(CLICommand):
         return 0
 
 
-class _NotImplementedCommand(CLICommand):
-    """Stub for commands scheduled for later stages."""
-
-    def __init__(self, name: str, help_text: str, stage: str) -> None:
-        self._name = name
-        self._help = help_text
-        self._stage = stage
+class TrainCommand(CLICommand):
+    """Train the shared-weight seq2seq model with DAE + backtranslation."""
 
     @property
     def name(self) -> str:
-        return self._name
+        return "train"
 
     @property
     def help(self) -> str:
-        return self._help
+        return "Train the UNMT seq2seq model (DAE + backtranslation)"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Train the shared encoder-decoder transformer on "
+            "monolingual Neuroglot + English.  Runs denoising "
+            "autoencoder losses immediately and introduces iterative "
+            "backtranslation after `bt_start_step`.  Checkpoints to "
+            "`<output_dir>/latest.pt` every `--checkpoint-every` "
+            "steps and automatically resumes if that file exists."
+        )
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "config", nargs="?", default=None,
             help="YAML config file",
         )
+        parser.add_argument(
+            "--checkpoint-every", type=int, default=1000,
+            help="Save checkpoint every N optimizer steps (default: 1000)",
+        )
+        parser.add_argument(
+            "--log-every", type=int, default=50,
+            help="Log average losses every N steps (default: 50)",
+        )
 
     def execute(self, args: argparse.Namespace) -> int:
-        print(
-            f"`lfm unmt {self._name}` is not implemented yet — scheduled for {self._stage}.",
+        from lfm.unmt.training.trainer import UNMTTrainer
+
+        config = _load_config(args.config)
+        trainer = UNMTTrainer(
+            config,
+            checkpoint_every=args.checkpoint_every,
+            log_every=args.log_every,
         )
-        return 1
+        trainer.train()
+        return 0
+
+
+class TranslateCommand(CLICommand):
+    """Run a trained UNMT model on source-language input."""
+
+    @property
+    def name(self) -> str:
+        return "translate"
+
+    @property
+    def help(self) -> str:
+        return "Translate text with a trained UNMT model"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Load the latest UNMT checkpoint and translate source-"
+            "language text into the target language.  Input can come "
+            "from a file (one sentence per line) or from the --text "
+            "flag.  If neither is given, runs a round-trip BLEU "
+            "sanity check on held-out samples from both corpora."
+        )
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "config", nargs="?", default=None,
+            help="YAML config file",
+        )
+        parser.add_argument("--source-lang", default="ng", choices=["ng", "en"])
+        parser.add_argument("--target-lang", default="en", choices=["ng", "en"])
+        parser.add_argument(
+            "--input", type=Path, default=None,
+            help="Input file, one sentence per line",
+        )
+        parser.add_argument(
+            "--text", default=None,
+            help="Single string to translate (overrides --input)",
+        )
+        parser.add_argument(
+            "--checkpoint", type=Path, default=None,
+            help="Explicit checkpoint path (default: <output_dir>/latest.pt)",
+        )
+        parser.add_argument(
+            "--round-trip-samples", type=int, default=20,
+            help="If no input given, sample this many lines from each "
+                 "corpus for a round-trip BLEU sanity check",
+        )
+        parser.add_argument(
+            "--no-restrict", action="store_true",
+            help="Disable the target-language logit restriction",
+        )
+
+    def execute(self, args: argparse.Namespace) -> int:
+        from lfm.unmt.evaluation.metrics import round_trip_bleu
+        from lfm.unmt.evaluation.translate import (
+            load_model_from_checkpoint,
+            translate_texts,
+        )
+
+        if args.source_lang == args.target_lang:
+            print("Error: source_lang and target_lang must differ")
+            return 1
+
+        config = _load_config(args.config)
+        model, tokenizer = load_model_from_checkpoint(config, args.checkpoint)
+
+        restrict = not args.no_restrict
+        max_len = config.max_len
+
+        def _do_translate(
+            texts: list[str], src: str, tgt: str,
+        ) -> list[str]:
+            return translate_texts(
+                model, tokenizer, texts, src, tgt,
+                max_len=max_len,
+                restrict_target_language=restrict,
+            )
+
+        # Mode 1: single text
+        if args.text is not None:
+            out = _do_translate([args.text], args.source_lang, args.target_lang)
+            print(out[0])
+            return 0
+
+        # Mode 2: file input
+        if args.input is not None:
+            if not args.input.exists():
+                print(f"Error: input file not found: {args.input}")
+                return 1
+            with open(args.input, encoding="utf-8") as f:
+                texts = [line.strip() for line in f if line.strip()]
+            outs = _do_translate(texts, args.source_lang, args.target_lang)
+            for src, out in zip(texts, outs):
+                print(f"{src} ||| {out}")
+            return 0
+
+        # Mode 3: round-trip sanity check
+        from lfm.unmt.data.monolingual import _read_corpus_lines
+
+        for src_lang, tgt_lang, corpus_path in [
+            ("ng", "en", config.neuroglot_corpus),
+            ("en", "ng", config.english_corpus),
+        ]:
+            logger.info(
+                "Round-trip sanity: %s → %s (%d samples)",
+                src_lang, tgt_lang, args.round_trip_samples,
+            )
+            samples = _read_corpus_lines(Path(corpus_path))[:args.round_trip_samples]
+            bleu, pairs = round_trip_bleu(
+                _do_translate, samples, src_lang, tgt_lang,
+            )
+            logger.info("  BLEU=%.4f", bleu)
+            for orig, mid, back in pairs[:3]:
+                logger.info("  orig:   %s", orig[:140])
+                logger.info("  mid:    %s", mid[:140])
+                logger.info("  back:   %s", back[:140])
+                logger.info("")
+        return 0
 
 
 def register_unmt_group(
@@ -268,16 +406,8 @@ def register_unmt_group(
         TokenizeCommand(),
         EmbedCommand(),
         AlignCommand(),
-        _NotImplementedCommand(
-            "train",
-            "Shared-weight seq2seq DAE + backtranslation training (Stage 4)",
-            "Stage 4",
-        ),
-        _NotImplementedCommand(
-            "translate",
-            "Translate with a trained UNMT model (Stage 4)",
-            "Stage 4",
-        ),
+        TrainCommand(),
+        TranslateCommand(),
     ]
 
     for cmd in commands:
