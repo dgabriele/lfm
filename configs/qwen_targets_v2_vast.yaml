@@ -68,7 +68,7 @@ extractor:
   layer: -1
   pooling: last_token
   dtype: bfloat16
-  batch_size: 512
+  batch_size: 1024
   max_len: 256
   compile: true
   attn_implementation: sdpa
