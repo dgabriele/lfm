@@ -39,6 +39,7 @@ from lfm.embeddings.store import EmbeddingStore
 from lfm.qwen_targets.cluster import run_minibatch_kmeans
 from lfm.qwen_targets.config import QwenTargetsConfig
 from lfm.qwen_targets.corpora import (
+    ChunkedCorpusSource,
     CorpusSource,
     CorpusText,
     HFStreamingCorpusSource,
@@ -152,6 +153,24 @@ class QwenEmbeddingStoreBuilder:
                     f"Source '{entry.name}' must set either hf_dataset or path.",
                 )
             sources.append(src)
+
+        # If chunking is enabled, wrap every source with a
+        # :class:`ChunkedCorpusSource` sharing a single chunker.  The
+        # chunker uses the *same* tokenizer as the extractor so chunk
+        # token counts align with ``extractor.max_len``.
+        if self.config.chunking.enabled:
+            from lfm.qwen_targets.chunking import SentenceAwareChunker
+            chunker = SentenceAwareChunker(
+                tokenizer_name=self.config.extractor.model_name,
+                max_tokens=self.config.chunking.max_tokens,
+                max_chunks_per_doc=self.config.chunking.max_chunks_per_doc,
+                min_chunk_tokens=self.config.chunking.min_chunk_tokens,
+            )
+            sources = [ChunkedCorpusSource(s, chunker) for s in sources]
+            logger.info(
+                "Chunking enabled: wrapped %d source(s) with SentenceAwareChunker",
+                len(sources),
+            )
         return sources
 
     def _build_mixer(self) -> MixedCorpusLoader:

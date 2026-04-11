@@ -94,6 +94,36 @@ class DensityConfig(LFMBaseConfig):
     target_size: int = 300_000
 
 
+class ChunkingConfig(LFMBaseConfig):
+    """Sentence-aware document chunking settings.
+
+    When enabled, every input document is split into one or more
+    chunks that end at natural sentence (or paragraph) boundaries and
+    fit within ``max_tokens`` of the extractor's tokenizer.  This
+    guarantees that every pooled hidden state we extract represents a
+    *complete* semantic unit, rather than a mid-sentence fragment
+    produced by naive token truncation.
+
+    Attributes:
+        enabled: Whether to apply chunking at all.  Off → each
+            document is passed to the extractor as a single input
+            (truncated mid-sequence if necessary — not recommended).
+        max_tokens: Maximum tokens per chunk.  Should equal — or sit
+            slightly under — the extractor's ``max_len`` to leave
+            headroom for tokenizer idiosyncrasies.
+        max_chunks_per_doc: Cap on chunks emitted per document.
+            Prevents a single very long source (a book, a long
+            cosmopedia essay) from dominating the output distribution.
+        min_chunk_tokens: Drop chunks shorter than this to avoid
+            emitting single-word or single-phrase fragments.
+    """
+
+    enabled: bool = False
+    max_tokens: int = 240
+    max_chunks_per_doc: int = 3
+    min_chunk_tokens: int = 30
+
+
 class ClusterConfig(LFMBaseConfig):
     """K-means clustering settings (for hard-negative sampling downstream).
 
@@ -132,6 +162,7 @@ class QwenTargetsConfig(LFMBaseConfig):
     output_dir: str = "data/embeddings_qwen"
     prefetch_dir: str = "data/qwen_targets_cache"
     extractor: ExtractorConfig = ExtractorConfig()
+    chunking: ChunkingConfig = ChunkingConfig()
     density: DensityConfig = DensityConfig()
     cluster: ClusterConfig = ClusterConfig()
     shuffle_seed: int = 42

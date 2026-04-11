@@ -1,16 +1,21 @@
 # Diversified Qwen-latent target build — vast.ai RTX 3090 variant.
 #
-# Differences from qwen_targets_v2_mixed.yaml:
-# - batch_size 256 → 512 (fits comfortably in 24 GB)
-# - compile: true   (torch.compile reduce-overhead for CUDA graph capture)
-# - attn_implementation: sdpa  (PyTorch SDPA, picks up Flash Attn when avail)
+# Sentence-aware chunking is ENABLED: every input document is split
+# into coherent multi-sentence chunks of up to ``chunking.max_tokens``,
+# so every pooled hidden state represents a complete semantic unit
+# (not a mid-sentence fragment).  Per-source caps are correspondingly
+# reduced — each doc produces ~1-3 chunks on average, so 1.3M raw docs
+# yields roughly 2M chunks for extraction.
+#
+# Extractor config: batch 1024, compile, sdpa attention on 24 GB 3090.
 
 sources:
+  # --- English pretraining baseline -----------------------------------
   - hf_dataset: DKYoon/SlimPajama-6B
     hf_split: train
     text_field: text
     weight: 0.30
-    max_samples: 900000
+    max_samples: 400000
     name: slimpajama-6b
 
   - hf_dataset: HuggingFaceFW/fineweb-edu
@@ -18,15 +23,16 @@ sources:
     hf_split: train
     text_field: text
     weight: 0.17
-    max_samples: 500000
+    max_samples: 220000
     name: fineweb-edu
 
+  # --- Multilingual coverage (Qwen 2.5 is strong in EN/ZH/JA) ---------
   - hf_dataset: HuggingFaceFW/fineweb-2
     hf_config: cmn_Hani
     hf_split: train
     text_field: text
     weight: 0.15
-    max_samples: 450000
+    max_samples: 200000
     name: fineweb2-cmn
 
   - hf_dataset: HuggingFaceFW/fineweb-2
@@ -34,29 +40,32 @@ sources:
     hf_split: train
     text_field: text
     weight: 0.10
-    max_samples: 300000
+    max_samples: 130000
     name: fineweb2-jpn
 
+  # --- Code (upweighted above SlimPajama's GitHub share) -------------
   - hf_dataset: bigcode/the-stack-smol-xl
     hf_split: train
     text_field: content
     weight: 0.15
-    max_samples: 450000
+    max_samples: 200000
     name: stack-smol-xl
 
+  # --- Synthetic educational / technical register --------------------
   - hf_dataset: HuggingFaceTB/smollm-corpus
     hf_config: cosmopedia-v2
     hf_split: train
     text_field: text
     weight: 0.10
-    max_samples: 300000
+    max_samples: 130000
     name: cosmopedia-v2
 
+  # --- Long-form books (public domain) -------------------------------
   - hf_dataset: manu/project_gutenberg
     hf_split: en
     text_field: text
     weight: 0.03
-    max_samples: 50000
+    max_samples: 20000
     min_length: 200
     max_length: 4000
     name: gutenberg-en
@@ -72,6 +81,12 @@ extractor:
   max_len: 256
   compile: true
   attn_implementation: sdpa
+
+chunking:
+  enabled: true
+  max_tokens: 240
+  max_chunks_per_doc: 3
+  min_chunk_tokens: 30
 
 density:
   enabled: true
