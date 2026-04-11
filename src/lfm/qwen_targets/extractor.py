@@ -55,6 +55,12 @@ class HiddenStateExtractor:
         self.device = torch.device(device)
         self.dtype = _DTYPE_MAP[config.dtype]
 
+        # Enable TF32 tensor cores for any float32 matmul paths (e.g.
+        # inductor-generated reductions when compiled).  Harmless for
+        # extraction — we never use float32 model math, only post-hoc
+        # normalize of pooled vectors.
+        torch.set_float32_matmul_precision("high")
+
         logger.info(
             "Loading causal LM %s (%s) for hidden-state extraction",
             config.model_name, config.dtype,
