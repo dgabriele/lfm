@@ -148,3 +148,82 @@ If the sanity checks pass AND training succeeds but geometric retrieval shows no
 - Check whether Qwen's encoding of Neuroglot is different when the model is in train vs eval mode.
 - Check whether dropout/attention quirks are affecting reproducibility.
 - Consider whether a separate "Neuroglot-to-Qwen" encoder head is needed vs relying on Qwen's default reading.
+
+## Beyond Corpus Sampling: Direct Latent-Space Coverage
+
+The current pipeline samples Qwen's latent manifold **through a fixed external corpus** (SlimPajama, FineWeb, etc.). Every point in our store is "Qwen's hidden state after reading some real human-authored text." This is pragmatic — we inherit semantic grounding and interpretability for free — but it's also the biggest conceptual weakness of the approach. We don't see Qwen's true representational distribution; we see Qwen filtered through whatever text our curators included.
+
+The principled question is: **can we sample points from Qwen's internal topology directly, without depending on pre-constructed text corpora?** The answer is yes, and there are several paths ordered roughly by ambition vs implementability. Any of these could complement (or eventually replace) the corpus bootstrap.
+
+### Phase 6a: self-sampling (Qwen generates its own inputs)
+
+Use Qwen itself to generate text, then extract hidden states from its own generations. The generated text is drawn from Qwen's own learned distribution, so there's no external curatorial bias — it's the most self-consistent possible probe of Qwen's "native" distribution.
+
+Sketch:
+
+```python
+# Each prompt is a short random seed (a few tokens) or an empty string.
+# High-temperature nucleus sampling keeps generations diverse.
+seeds = [empty, random_token_mix, random_cjk_start, random_code_fragment, ...]
+for seed in seeds:
+    continuation = qwen.generate(
+        seed,
+        max_new_tokens=200,
+        do_sample=True,
+        temperature=1.2,
+        top_p=0.95,
+        num_return_sequences=N,
+    )
+    hidden = extract_last_token_hidden(qwen, continuation)
+    store.append(hidden, provenance="qwen_selfgen")
+```
+
+**Risks**: unconditional LM generation tends toward high-probability mode — well-trained models produce their own prior ("The quick brown fox..."), not a uniform spread. Mitigations: high temperature, diverse random seeds, stochastic beam with diversity penalty, or conditioning on random short prefixes drawn from Qwen's vocabulary.
+
+**Cost**: afternoon implementation. Could generate 1-10M novel points in a few GPU-hours.
+
+### Phase 6b: vocabulary-atomic sampling
+
+Qwen's token embedding matrix is ~150K vectors — each an atomic concept in its vocabulary. Sample directly:
+
+- **Single-token inputs**: feed each of the 150K tokens as a single-token input, extract its resulting final-layer hidden state. Gives a concept-level atomic sample of Qwen's vocabulary in context. Semi-meaningful (single tokens are underspecified) but complete.
+- **Pair/triple composition**: combine random token pairs or triples as synthetic pseudo-prompts to sample "bigram" and "trigram" concept intersections.
+- **Soft-mixed inputs**: treat the embedding matrix as a continuous space, feed convex combinations of token embeddings to reach points no discrete text input could hit.
+
+**Cost**: nearly free (150K forward passes × batch 1024 = ~150 batches).
+
+### Phase 6c: normalizing flow augmentation
+
+Fit a normalizing flow (~2M params, trains in minutes on CPU) to the current corpus-derived point cloud, then sample 10× more points from the flow. New samples fill in interpolations and small extrapolations without requiring additional corpus.
+
+**Risk**: flow can only explore the convex hull of its training distribution; it won't discover regions we never saw in the corpus.
+
+**Cost**: 1-2 days end-to-end including training and evaluation of the resulting augmented store.
+
+### Phase 6d: gradient-guided manifold walk (Langevin MCMC)
+
+Treat Qwen's hidden-state space as having an implicit energy function defined by `∇_h log p_Qwen(next_token | h)` — states Qwen is confident will continue naturally are "low energy," unusual states are "high energy." Run Langevin dynamics or diffusion-based sampling starting from seed points to walk toward natural regions of the manifold.
+
+Analogous to MCMC sampling from an implicit model. Requires computing gradients through Qwen's forward pass, which is differentiable but expensive.
+
+**Cost**: 1-2 weeks research-grade implementation. Tuning step size and mixing is non-trivial.
+
+### Phase 6e: sparse autoencoder features (mech-interp style)
+
+The most faithful answer to "sample from Qwen's ontology directly": train a sparse autoencoder on Qwen's layer-L activations using a bootstrap corpus. The SAE learns a dictionary of interpretable atomic features that are the dimensions Qwen actually uses internally. Anthropic extracted ~34M features from Claude 3 Sonnet this way.
+
+Then sample in **feature space** (one-hot activations, sparse combinations) to generate latent points that correspond to Qwen's own data-driven decomposition of its ontology. This is literally "intelligently walking the LLM's internal topology."
+
+**Cost**: research project. Requires millions of activations to train a good SAE plus a non-trivial training loop (L1 sparsity + reconstruction loss + feature-selection tricks).
+
+### Recommended next-iteration order
+
+After the current corpus-bootstrap run lands and the dialogue game is shown to train on it:
+
+1. **Phase 6a (self-sampling)** first — biggest corpus-bias win for afternoon implementation. Run it, produce ~1M selfgen points, append to the store with provenance tags. Compare dialogue-game accuracy with and without the selfgen augmentation.
+2. **Phase 6b (vocabulary-atomic)** as a free diagnostic — even if it doesn't move training accuracy, the single-token hidden states are a useful interpretability artifact for understanding what Qwen "thinks each token means" in its final-layer space.
+3. **Phase 6c (normalizing flow)** if we want to cheaply multiply coverage once we have a good base.
+4. **Phase 6e (SAE)** is the principled endgame — if the project matures to the point of a publishable result, the SAE-based sampling would be the version we'd actually stand behind as "a faithful map of Qwen's ontology."
+5. **Phase 6d (Langevin)** remains an interesting research tangent but isn't on the critical path.
+
+The corpus bootstrap is the pragmatic starting point. It's not the final answer.
