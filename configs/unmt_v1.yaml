@@ -1,0 +1,55 @@
+# Unsupervised NMT v1 — Neuroglot ↔ English
+#
+# Initial small-scale configuration for local development.  The model
+# dimensions and step counts are sized to fit an 8 GB GPU; a full
+# training run will use a larger config on vast.ai.
+
+# Data
+neuroglot_corpus: data/translator/dialogue_corpus_v7_natural.txt
+english_corpus: data/embeddings/passages.jsonl
+output_dir: data/unmt_v1
+
+# Tokenizers — separate BPE per language, disjoint global vocab
+neuroglot_tokenizer_prefix: spm_neuroglot
+english_tokenizer_prefix: spm_english
+neuroglot_vocab_size: 16000
+english_vocab_size: 16000
+character_coverage_neuroglot: 1.0
+character_coverage_english: 0.9995
+max_sentence_length: 4096
+# Cap tokenizer training at 200K lines per language for local dev.
+# SPM BPE training scales roughly linearly with input size; 200K
+# produces a quality tokenizer in ~1-2 min vs 15+ min on the full 900K.
+# Full vast.ai runs should bump this to 2000000.
+max_tokenizer_lines: 200000
+
+# Language tags + max tokenized length
+neuroglot_lang_tag: "<ng>"
+english_lang_tag: "<en>"
+max_len: 128
+
+# DAE noise
+word_drop_prob: 0.1
+word_swap_window: 3
+word_mask_prob: 0.1
+
+# Model — small for 8 GB local dev
+model_dim: 512
+n_layers: 6
+n_heads: 8
+ff_dim: 2048
+dropout: 0.1
+
+# Training — filled out as stages land
+batch_size: 32
+lr: 1.0e-4
+warmup_steps: 4000
+total_steps: 200000
+dae_weight: 1.0
+bt_weight: 1.0
+bt_start_step: 10000
+grad_accum_steps: 1
+max_grad_norm: 1.0
+
+device: cuda
+seed: 42
