@@ -95,6 +95,127 @@ class TokenizeCommand(CLICommand):
         return 0
 
 
+class EmbedCommand(CLICommand):
+    """Train monolingual skip-gram embeddings for both languages."""
+
+    @property
+    def name(self) -> str:
+        return "embed"
+
+    @property
+    def help(self) -> str:
+        return "Train monolingual skip-gram BPE embeddings for each language"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Train skip-gram with negative sampling on BPE-tokenized "
+            "Neuroglot and English corpora.  Produces one embedding "
+            "matrix per language, saved under the config output_dir.  "
+            "These matrices are the input to MUSE alignment."
+        )
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "config", nargs="?", default=None,
+            help="YAML config file",
+        )
+        parser.add_argument("--embed-dim", type=int, default=None,
+                            help="Override model_dim as the embedding size")
+        parser.add_argument("--window", type=int, default=5)
+        parser.add_argument("--neg-samples", type=int, default=5)
+        parser.add_argument("--subsample-t", type=float, default=1e-4)
+        parser.add_argument("--batch-size", type=int, default=8192)
+        parser.add_argument("--steps", type=int, default=50_000)
+        parser.add_argument("--lr", type=float, default=1e-3)
+        parser.add_argument("--max-lines", type=int, default=200_000)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        from lfm.unmt.embeddings.skipgram import train_embeddings
+
+        config = _load_config(args.config)
+        artifacts = train_embeddings(
+            config,
+            embed_dim=args.embed_dim,
+            window=args.window,
+            neg_samples=args.neg_samples,
+            subsample_t=args.subsample_t,
+            batch_size=args.batch_size,
+            total_steps=args.steps,
+            lr=args.lr,
+            max_lines_per_language=args.max_lines,
+        )
+        logger.info("Embedding artifacts:")
+        logger.info("  Neuroglot: %s", artifacts.neuroglot_embeddings)
+        logger.info("  English:   %s", artifacts.english_embeddings)
+        return 0
+
+
+class AlignCommand(CLICommand):
+    """Run MUSE adversarial + Procrustes alignment on the embeddings."""
+
+    @property
+    def name(self) -> str:
+        return "align"
+
+    @property
+    def help(self) -> str:
+        return "Align Neuroglot and English embedding spaces via MUSE"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Learn an orthogonal rotation W such that source-language "
+            "embeddings mapped by W land near semantically-similar "
+            "target-language embeddings.  Uses adversarial training "
+            "followed by iterative CSLS-refined Procrustes.  Operates "
+            "on the monolingual embeddings produced by `lfm unmt embed`."
+        )
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "config", nargs="?", default=None,
+            help="YAML config file",
+        )
+        parser.add_argument("--source-lang", default="ng", choices=["ng", "en"])
+        parser.add_argument("--target-lang", default="en", choices=["ng", "en"])
+        parser.add_argument("--adv-epochs", type=int, default=5)
+        parser.add_argument("--adv-epoch-size", type=int, default=1_000_000)
+        parser.add_argument("--adv-batch-size", type=int, default=128)
+        parser.add_argument("--adv-lr", type=float, default=0.1)
+        parser.add_argument("--refine-rounds", type=int, default=5)
+        parser.add_argument("--dico-max-rank", type=int, default=15_000)
+        parser.add_argument("--k-csls", type=int, default=10)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        from lfm.unmt.embeddings.muse_align import run_muse_alignment
+
+        if args.source_lang == args.target_lang:
+            print("Error: source and target languages must differ")
+            return 1
+
+        config = _load_config(args.config)
+        result = run_muse_alignment(
+            config,
+            source_lang=args.source_lang,
+            target_lang=args.target_lang,
+            n_adv_epochs=args.adv_epochs,
+            adv_epoch_size=args.adv_epoch_size,
+            adv_batch_size=args.adv_batch_size,
+            adv_lr=args.adv_lr,
+            n_refine_rounds=args.refine_rounds,
+            dico_max_rank=args.dico_max_rank,
+            k_csls=args.k_csls,
+        )
+        logger.info("Alignment complete:")
+        logger.info("  direction: %s → %s", result.source_lang, result.target_lang)
+        logger.info("  W shape:   %s", tuple(result.W.shape))
+        logger.info("  adv loss:  %.4f", result.adversarial_loss)
+        logger.info("  refine rounds: %d", result.refinement_rounds)
+        logger.info("  final mean CSLS: %.4f", result.final_csls_mean)
+        return 0
+
+
 class _NotImplementedCommand(CLICommand):
     """Stub for commands scheduled for later stages."""
 
@@ -145,16 +266,8 @@ def register_unmt_group(
 
     commands: list[CLICommand] = [
         TokenizeCommand(),
-        _NotImplementedCommand(
-            "embed",
-            "Train monolingual subword embeddings (Stage 2)",
-            "Stage 2",
-        ),
-        _NotImplementedCommand(
-            "align",
-            "MUSE Procrustes alignment between embedding spaces (Stage 2)",
-            "Stage 2",
-        ),
+        EmbedCommand(),
+        AlignCommand(),
         _NotImplementedCommand(
             "train",
             "Shared-weight seq2seq DAE + backtranslation training (Stage 4)",
