@@ -94,3 +94,6 @@ datasets/*.backup
 # Temporary session notes (should be in docs/sessions/)
 /*_SUMMARY.md
 /RESUME_*.md
+
+# Claude Code session-local state
+.claude/
