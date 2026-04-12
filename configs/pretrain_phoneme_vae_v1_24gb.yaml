@@ -1,0 +1,92 @@
+# ==========================================================================
+# Phoneme VAE decoder pretraining — v1, 24GB-targeted (RTX 3090 / similar)
+#
+# Scaled up from the 6GB local config: larger effective batch, no gradient
+# accumulation, 3 epochs. Architecture mirrors v7's proven config.
+# ==========================================================================
+
+# --- Data source ---
+dataset_path: /workspace/lfm/data/datasets/constituents-12lang-phonemes
+corpus_loader: phoneme_h5
+corpus_loader_config:
+  h5_path: /workspace/lfm/data/datasets/constituents-12lang-phonemes/samples.h5
+
+# --- Phoneme alphabet (repurposes spm_model_path slot) ---
+spm_model_path: /workspace/lfm/data/phoneme_alphabet_multi.json
+spm_vocab_size: 51   # 50 phonemes + 1 <ws> marker
+syllable_aligned_bpe: false
+
+# --- Model architecture (mirrors v7) ---
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+
+# --- Linguistic attention structure ---
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 0  # auto-scale from dataset (phoneme corpus: ~237 max + 2)
+encoder_pooling: mean
+
+# --- KL divergence ---
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+kl_beta: 0.0
+
+# --- Auxiliary losses ---
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+use_vq: false
+
+# --- Training (24GB targeted) ---
+batch_size: 256          # up from 80; RTX 3090 fits this at seq_len~240
+gradient_accumulation_steps: 1  # eff batch = 256
+use_amp: true
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 3            # more passes; phoneme seqs are longer so more tokens/step
+
+# --- Latent regularization ---
+z_var_weight: 0.01
+z_var_target: 0.03
+z_var_floor: 0.01
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 0
+dip_weight: 0.1
+bow_weight: 0.0
+
+# --- Sampling balance ---
+length_boost_threshold: 30
+length_boost_factor: 5.0
+
+# --- Checkpointing & diagnostics ---
+diagnostic_every: 2000       # more frequent — checkpoints sync to local
+checkpoint_every_steps: 2000 # periodic snapshots for copyback
+val_fraction: 0.02
+seed: 42
+device: cuda
+output_path: /workspace/lfm/data/models/phoneme_v1/vae_decoder.pt
+
+# --- Disabled ---
+topo_weight: 0.0
+topo_sample_pairs: 32
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true
+constituent_context: false

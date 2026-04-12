@@ -1,0 +1,27 @@
+# Cloud deployment — Vast.ai RTX 3090 for phoneme VAE pretraining
+#
+# Usage:
+#   export $(grep VAST_API_KEY .secrets)
+#   poetry run lfm cloud launch configs/pretrain_phoneme_vae_v1_24gb.yaml \
+#     --cloud-config configs/cloud_vastai_phoneme.yaml --provider vastai
+
+cloud:
+  provider: vastai
+  instance_type: RTX_3090   # 24GB, ~$0.20-0.40/hr on vast
+  ssh_user: root
+  # Framework auto-appends the training config path, so omit it here.
+  command: "lfm pretrain"
+  auto_terminate: true
+  max_runtime_hours: 12
+
+  # Uploaded as extra files alongside the project tarball.
+  # Paths are preserved relative to project root.
+  upload_data:
+    - data/phoneme_alphabet_multi.json
+    - data/datasets/constituents-12lang-phonemes/samples.h5
+    - data/datasets/constituents-12lang-phonemes/mapping.json
+    - data/datasets/constituents-12lang-phonemes/manifest.yaml
+
+  remote_workdir: /workspace/lfm
+  remote_output_dir: /workspace/lfm/data/models/phoneme_v1
+  local_download_dir: data/cloud_results/phoneme_v1

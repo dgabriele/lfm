@@ -38,7 +38,7 @@ class PhonemeTokenizer:
     def __init__(
         self,
         alphabet_path: str | Path,
-        word_boundary: str = "",
+        word_boundary: str = "-",
     ) -> None:
         with open(alphabet_path, encoding="utf-8") as f:
             alphabet = json.load(f)

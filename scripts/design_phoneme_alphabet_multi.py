@@ -34,8 +34,16 @@ Exclusion signals (negative — tokens must be rare here):
 A candidate passes if:
   1. Common enough in at least one source language (meaningful fragment somewhere)
   2. Rare in ALL of the exclusion sources
-  3. BPE concat-stable
-  4. Latin-script word-like form
+  3. Latin-script word-like form
+  4. Passes pairwise concat stability (sanity check)
+  5. **Passes chain stability under the committed surface separator** (hyphen
+     by default, matching PhonemeTokenizer / GeneratorConfig default).  This
+     is the decisive test: we generate random N-phoneme chains joined by
+     the separator and verify each phoneme preserves its own token identity
+     after Qwen BPE tokenizes the chain.  This catches cases the pairwise
+     test missed — e.g. phonemes starting with characters like ``v``, ``j``,
+     ``w`` where Qwen has ``-v``, ``-j``, ``-w`` merges that swallow the
+     phoneme's leading character.
 """
 
 from __future__ import annotations
@@ -50,6 +58,8 @@ import torch
 from transformers import AutoTokenizer
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B"
+# Output path can be overridden via --output flag (see main) so repeated
+# runs don't clobber an alphabet already in use by active training.
 OUTPUT = Path("data/phoneme_alphabet_multi.json")
 TARGET_SIZE = 50
 SEED = 42
@@ -59,6 +69,27 @@ MAX_LEN = 3  # tightened: length 4-5 tokens fragment under concat
 STABILITY_THRESHOLD = 0.5  # English tokens themselves median ~0.7, 25%ile ~0.6
 STABILITY_PARTNERS = 60
 PER_FIRST_CHAR_CAP = 6
+
+# ----- Chain-stability gating parameters -----
+#
+# Surface rendering is hyphen-separated within words ("ott-ell-och") per
+# the finding (scripts/diagnose_separator_mode.py) that hyphens preserve
+# language-mode processing while pipes shift Qwen into code-mode.  The
+# chain test must exercise this exact format, because merge failures like
+# "-v" → single token only surface under hyphen-joined chains.
+SEPARATOR = "-"
+# Per-phoneme chain stability threshold: fraction of random-chain probes
+# where the phoneme preserves its own token identity in Qwen's tokenization.
+CHAIN_STABILITY_THRESHOLD = 0.80
+# How many random chain probes to run per candidate phoneme.
+CHAIN_PROBES_PER_PHONEME = 40
+# Word-length stats are computed empirically from the source IPA corpus
+# (data/datasets/constituents-12lang-all/samples.h5) — mean ± 2σ bounds
+# the uniform sampling range for chain lengths.  Fallback values are
+# used if the IPA corpus isn't present.
+IPA_SOURCE_H5 = Path("data/datasets/constituents-12lang-all/samples.h5")
+WORD_LEN_FALLBACK_MEAN = 6.0
+WORD_LEN_FALLBACK_STD = 2.5
 
 # Drop tokens Qwen will recognize as code abbreviations regardless of
 # their (low) rate in our prose/code sample.
@@ -172,6 +203,80 @@ def count_corpus_tokens(
     return c
 
 
+def compute_word_length_stats(h5_path: Path) -> tuple[float, float, int, int]:
+    """Empirical word-length stats (in IPA letters) from the source corpus.
+
+    Returns (mean, std, lo_2sigma, hi_2sigma).  Word = whitespace-separated
+    run of IPA letters.  Falls back to module constants if the corpus is
+    absent.
+    """
+    if not h5_path.exists():
+        mean = WORD_LEN_FALLBACK_MEAN
+        std = WORD_LEN_FALLBACK_STD
+    else:
+        import h5py
+        lens: list[int] = []
+        MAX_SCAN = 500_000  # sample enough for stable stats
+        with h5py.File(h5_path, "r") as f:
+            n = f["samples/ipa"].shape[0]
+            stride = max(n // MAX_SCAN, 1)
+            for i in range(0, n, stride):
+                b = f["samples/ipa"][i]
+                try:
+                    text = b.decode("utf-8") if isinstance(b, bytes) else b
+                except UnicodeDecodeError:
+                    continue
+                for w in text.split():
+                    # Count only letters (matches transcoder behavior)
+                    wl = sum(1 for ch in w if unicodedata.category(ch)[0] == "L")
+                    if wl >= 2:
+                        lens.append(wl)
+        if len(lens) < 1000:
+            mean = WORD_LEN_FALLBACK_MEAN
+            std = WORD_LEN_FALLBACK_STD
+        else:
+            import statistics
+            mean = statistics.fmean(lens)
+            std = statistics.pstdev(lens)
+    lo = max(2, int(round(mean - 2 * std)))
+    hi = max(lo + 1, int(round(mean + 2 * std)))
+    return mean, std, lo, hi
+
+
+def chain_stability(
+    tok, phoneme: str, all_phonemes: list[str],
+    separator: str, lo: int, hi: int, n_probes: int, rng: random.Random,
+) -> float:
+    """Fraction of random probes where `phoneme` preserves its own Qwen
+    token identity when embedded in a separator-joined chain.
+
+    For each probe: pick a chain length L uniformly in [lo, hi], place
+    `phoneme` at a random position in the chain, fill the other slots
+    with random other phonemes, join by `separator`, space-prefix, and
+    tokenize.  Success = the piece sequence contains `phoneme` (bare) as
+    an isolated token, preserving its identity.
+    """
+    expected_piece = phoneme  # Qwen emits 'Ġ<p>' for word-initial, '<p>' bare
+    expected_init = "\u0120" + phoneme
+    ok = 0
+    pool = [p for p in all_phonemes if p != phoneme]
+    for _ in range(n_probes):
+        L = rng.randint(lo, hi)
+        pos = rng.randint(0, L - 1)
+        chain = [rng.choice(pool) for _ in range(L)]
+        chain[pos] = phoneme
+        text = separator.join(chain)
+        ids = tok.encode(" " + text, add_special_tokens=False)
+        pieces = tok.convert_ids_to_tokens(ids)
+        if pos == 0:
+            preserved = expected_init in pieces
+        else:
+            preserved = expected_piece in pieces
+        if preserved:
+            ok += 1
+    return ok / max(n_probes, 1)
+
+
 def measure_stability(
     tok, candidates: list[tuple[int, str]], partners: list[str],
 ) -> list[tuple[int, str, float, float]]:
@@ -196,6 +301,14 @@ def measure_stability(
 
 
 def main() -> None:
+    global OUTPUT
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", default=str(OUTPUT),
+                        help="Where to write the alphabet JSON")
+    args = parser.parse_args()
+    OUTPUT = Path(args.output)
+
     print(f"Loading tokenizer: {MODEL_NAME}")
     tok = AutoTokenizer.from_pretrained(MODEL_NAME)
 
@@ -316,6 +429,49 @@ def main() -> None:
     )
 
     # --------------------------------------------------------------
+    # [4b] Chain stability gate — the decisive test under hyphen rendering.
+    #
+    # Pairwise concat stability in [4] is a necessary but insufficient
+    # check.  Real usage: phonemes get joined by SEPARATOR into chains of
+    # length ~empirical word length ± 2σ.  We probe each stable-kept
+    # candidate at realistic chain lengths and drop any whose identity
+    # gets swallowed by BPE merges (e.g. "-v"/"-j"/"-w" patterns).
+    # --------------------------------------------------------------
+    mean_wl, std_wl, lo_wl, hi_wl = compute_word_length_stats(IPA_SOURCE_H5)
+    print(f"\n[4b] Chain-stability gate under separator={SEPARATOR!r}")
+    print(f"  empirical word length: mean={mean_wl:.2f}  std={std_wl:.2f}  "
+          f"chain-length range (mean±2σ) = [{lo_wl}, {hi_wl}]")
+    print(f"  threshold: {CHAIN_STABILITY_THRESHOLD*100:.0f}% of probes preserve "
+          f"phoneme identity  ({CHAIN_PROBES_PER_PHONEME} probes/phoneme)")
+
+    rng = random.Random(SEED)
+    all_phonemes_pool = [k["bare"] for k in stable_kept]
+    chain_pass: list[dict] = []
+    chain_fail: list[tuple[str, float]] = []
+    for k in stable_kept:
+        frac = chain_stability(
+            tok, k["bare"], all_phonemes_pool,
+            separator=SEPARATOR, lo=lo_wl, hi=hi_wl,
+            n_probes=CHAIN_PROBES_PER_PHONEME, rng=rng,
+        )
+        k["chain_stab"] = frac
+        if frac >= CHAIN_STABILITY_THRESHOLD:
+            chain_pass.append(k)
+        else:
+            chain_fail.append((k["bare"], frac))
+    chain_fail.sort(key=lambda x: x[1])
+    print(f"  {len(chain_pass)} / {len(stable_kept)} pass chain gate")
+    if chain_fail:
+        print(f"  rejected (worst first): "
+              f"{', '.join(f'{p!r}={f:.2f}' for p, f in chain_fail[:15])}")
+
+    stable_kept = chain_pass
+    stable_kept.sort(
+        key=lambda k: (k["chain_stab"], k["stab_product"], k["max_src_rate"]),
+        reverse=True,
+    )
+
+    # --------------------------------------------------------------
     # [5] Select diverse inventory
     # --------------------------------------------------------------
     print(f"\n[5] Selecting diverse inventory (target={TARGET_SIZE}, cap={PER_FIRST_CHAR_CAP})...")
@@ -347,26 +503,59 @@ def main() -> None:
         print(f"    {k['bare']!r:>7}  dominant={k['dominant_source']}  rates=[{rates}]")
 
     # --------------------------------------------------------------
-    # [6] Validation — 3-phoneme word tokenization
+    # [6] Validation — hyphen-joined word tokenization at realistic lengths
+    #
+    # Matches the surface rendering that will actually be sent to Qwen
+    # (PhonemeTokenizer default word_boundary="-").  Word length sampled
+    # uniformly in [mean-2σ, mean+2σ] from the empirical IPA distribution.
+    # Count words where every selected phoneme is preserved as its own
+    # Qwen token in the tokenization.
     # --------------------------------------------------------------
-    print("\n[6] Validating 3-phoneme word tokenization...")
+    print(f"\n[6] Validating hyphen-joined word tokenization (lengths "
+          f"[{lo_wl}, {hi_wl}])...")
     random.seed(SEED)
-    sample_words = [
-        "".join(random.choice(selected_bare) for _ in range(3))
-        for _ in range(5000)
-    ]
+    sample_words: list[tuple[list[str], str]] = []
+    for _ in range(5000):
+        L = random.randint(lo_wl, hi_wl)
+        phs = [random.choice(selected_bare) for _ in range(L)]
+        sample_words.append((phs, SEPARATOR.join(phs)))
+
     word_to_ids: dict[str, tuple[int, ...]] = {}
+    preserved_all = 0
+    preserved_any = 0
     token_lengths: list[int] = []
-    for w in sample_words:
+    for phs, w in sample_words:
         if w in word_to_ids:
             continue
         ids = tuple(tok.encode(" " + w, add_special_tokens=False))
         word_to_ids[w] = ids
         token_lengths.append(len(ids))
-    print(f"  Unique words: {len(word_to_ids)}")
+        pieces = tok.convert_ids_to_tokens(list(ids))
+        # Expected piece set: each phoneme appears (word-initial as Ġ<p>)
+        expect_init = "\u0120" + phs[0]
+        if expect_init in pieces:
+            preserved_count = 1
+        else:
+            preserved_count = 0
+        for p in phs[1:]:
+            if p in pieces:
+                preserved_count += 1
+        if preserved_count == len(phs):
+            preserved_all += 1
+        if preserved_count > 0:
+            preserved_any += 1
+    n_unique = len(word_to_ids)
+    print(f"  Unique words: {n_unique}")
+    print(f"  All phonemes preserved: {preserved_all}/{n_unique} "
+          f"({100*preserved_all/max(n_unique,1):.1f}%)")
+    print(f"  ≥1 phoneme preserved:    {preserved_any}/{n_unique} "
+          f"({100*preserved_any/max(n_unique,1):.1f}%)")
     lc = Counter(token_lengths)
-    for k in sorted(lc):
-        print(f"    {k} tokens: {lc[k]} ({100*lc[k]/len(token_lengths):.1f}%)")
+    # Show a few representative lengths
+    print("  Token-count distribution (truncated):")
+    common_lengths = sorted(lc.most_common(6))
+    for k, v in common_lengths:
+        print(f"    {k} tokens: {v} ({100*v/n_unique:.1f}%)")
 
     test_words = list(word_to_ids.keys())[:200]
     pref1 = " the "
@@ -387,13 +576,25 @@ def main() -> None:
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     alphabet = {
-        "version": "multilingual-latin-v1",
+        "version": "multilingual-latin-v2",
         "model": MODEL_NAME,
         "method": "Latin word-like tokens from non-dominant Latin-script "
                   "languages (ces/pol/fin/est/hun/tur/ind), excluding "
-                  "primary-language tokens (eng/deu/spa/por/code)",
+                  "primary-language tokens (eng/deu/spa/por/code), "
+                  "chain-stability gated under hyphen-separated rendering at "
+                  "empirical word-length mean±2σ",
         "size": len(selected_bare),
         "phonemes": selected_bare,
+        "surface_separator": SEPARATOR,
+        "empirical_word_length": {
+            "mean": round(mean_wl, 3), "std": round(std_wl, 3),
+            "lo_2sigma": lo_wl, "hi_2sigma": hi_wl,
+        },
+        "chain_stability": {
+            "threshold": CHAIN_STABILITY_THRESHOLD,
+            "probes_per_phoneme": CHAIN_PROBES_PER_PHONEME,
+            "per_phoneme": {k["bare"]: round(k["chain_stab"], 3) for k in selected},
+        },
         "source_distribution": dict(per_src),
         "first_char_distribution": dict(per_first),
         "length_distribution": {
