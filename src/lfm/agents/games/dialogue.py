@@ -876,11 +876,27 @@ class DialogueGame(nn.Module):
 
         # 4. Temperature-scaled cosine similarity → InfoNCE
         temperature = self.log_temperature.exp().clamp(min=0.01, max=100.0)
-        logits = msg @ tgt.t() / temperature  # (B, B)
+        sim = msg @ tgt.t()  # (B, B) raw cosine
+        logits = sim / temperature
         labels = torch.arange(logits.size(0), device=logits.device)
         loss = F.cross_entropy(logits, labels)
 
-        return loss, logits
+        # 5. Topographic ρ: Pearson correlation between pairwise
+        #    target similarity and pairwise message similarity.
+        #    This is the diagnostic we measured as ρ≈0.09 in the RSA
+        #    test — tracking it per batch shows whether the contrastive
+        #    loss is actually producing topographic structure.
+        with torch.no_grad():
+            B = sim.size(0)
+            idx = torch.triu_indices(B, B, offset=1, device=sim.device)
+            tgt_upper = (tgt @ tgt.t())[idx[0], idx[1]]
+            msg_upper = sim[idx[0], idx[1]]
+            tc = tgt_upper - tgt_upper.mean()
+            mc = msg_upper - msg_upper.mean()
+            denom = (tc.norm() * mc.norm()).clamp(min=1e-8)
+            topo_rho = (tc * mc).sum() / denom
+
+        return loss, logits, topo_rho
 
     def _score_progressive(
         self,
@@ -1347,10 +1363,11 @@ class DialogueGame(nn.Module):
 
         if cfg.contrastive_scoring:
             with self._decoder_offloaded():
-                contrastive_loss, logits = self._score_contrastive(
+                contrastive_loss, logits, topo_rho = self._score_contrastive(
                     turns, anchor,
                 )
             loss = contrastive_loss
+            topo_loss = topo_rho  # reuse the field for logging
             target_idx = torch.arange(anchor.size(0), device=anchor.device)
         else:
             with self._decoder_offloaded():

@@ -361,7 +361,7 @@ class AgentTrainer:
                 if "qwen_roundtrip" in out and out["qwen_roundtrip"].item() != 0:
                     extra += f"  rt_cos={out['qwen_roundtrip'].item():.4f}"
                 if "topo_loss" in out and out["topo_loss"].item() != 0:
-                    extra += f"  topo={out['topo_loss'].item():.4f}"
+                    extra += f"  ρ={out['topo_loss'].item():.4f}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
                 if torch.cuda.is_available():
