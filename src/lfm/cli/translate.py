@@ -440,6 +440,16 @@ class GenerateDialogueCorpusCommand(CLICommand):
         parser.add_argument("--output", default="data/translator/dialogue_corpus.txt")
         parser.add_argument("--device", default="cuda")
         parser.add_argument("--seed", type=int, default=42)
+        parser.add_argument(
+            "--output-mode",
+            choices=["hyphenated_ipa", "romanized", "hyphenated_romanized"],
+            default="hyphenated_ipa",
+            help="Corpus text format",
+        )
+        parser.add_argument(
+            "--paragraph-format", action="store_true",
+            help="Natural paragraph: capitalize each turn, end with period, single line",
+        )
 
     def execute(self, args: argparse.Namespace) -> int:
         from lfm.translator.config import DialogueCorpusConfig
@@ -455,6 +465,8 @@ class GenerateDialogueCorpusCommand(CLICommand):
             output_path=args.output,
             device=args.device,
             seed=args.seed,
+            output_mode=args.output_mode,
+            paragraph_format=args.paragraph_format,
         )
 
         gen = DialogueCorpusGenerator(config)

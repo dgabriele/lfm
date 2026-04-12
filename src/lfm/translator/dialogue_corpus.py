@@ -80,6 +80,7 @@ class DialogueCorpusGenerator(BaseCorpusGenerator):
             max_phrases=ckpt.get("max_phrases", ckpt.get("max_segments", 4)),
             num_turns=ckpt.get("num_turns", 4),
             device=cfg.device,
+            contrastive_scoring=bool(ckpt.get("contrastive_scoring", False)),
             **dim_kwargs,
         )
         faculty = LanguageFaculty(game_cfg.build_faculty_config()).to(device)
