@@ -84,6 +84,15 @@ class GeneratorConfig(LFMBaseConfig):
     spm_model_path: str | None = None
     freeze_decoder: bool = True
 
+    # Phoneme-VAE surface formatting.  Applies only to PhonemeVAEGenerator.
+    # When non-empty, phonemes within a "word" are joined by this string
+    # (e.g. "-" yields hyphenated display like "baz-py-aby"; "" yields
+    # concatenated words like "bazpyaby").  Words are always separated by
+    # spaces.  Default "" produces natural word-like Neuroglot surface.
+    phoneme_word_boundary: str = ""
+    phoneme_word_size: int = 3
+    """How many phonemes per Neuroglot 'word' in the decoded surface form."""
+
     # Post-hoc VQ codebook for hybrid discrete+continuous agent interface.
     # Fitted to the pretrained encoder's z distribution via fit_vq_codebook.py.
     # When set, the agent's z is decomposed into a discrete VQ code (anchor)

@@ -65,7 +65,10 @@ class VAEPretrainer:
         bos_id = data.bos_id
         eos_id = data.eos_id
         vocab_size = data.vocab_size
-        sp = data.sp
+        # Text backend: either SentencePieceProcessor (IPA/SPM path) or
+        # PhonemeTokenizer (phoneme alphabet path).  Diagnostics decode
+        # via _backend_decode, which duck-types both.
+        sp = data.sp if data.sp is not None else data.phoneme_tokenizer
         spm_path = data.spm_path
         token_ids_list = data.token_ids_list
         languages_list = data.languages_list
@@ -594,7 +597,7 @@ class VAEPretrainer:
                         eos_id=eos_id,
                         vocab_size=vocab_size,
                         full_vocab=full_vocab,
-                        sp=data.sp,
+                        sp=sp,
                         z_running_mean=z_running_mean,
                         z_running_std=z_running_std,
                         device=device,

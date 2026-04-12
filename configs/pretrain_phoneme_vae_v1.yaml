@@ -1,0 +1,114 @@
+# ==========================================================================
+# Phoneme VAE decoder pretraining — v1
+#
+# Trains a new VAE decoder over the multilingual Latin-script phoneme
+# alphabet (data/phoneme_alphabet_multi.json) using the 12-language
+# phrase constituent corpus transcoded to phoneme-id sequences via
+# scripts/transcode_ipa_to_phoneme.py.
+#
+# See docs/phoneme-alphabet-design.md for the alphabet rationale.
+# Architecture matches v7 (which achieved val CE=0.0082 on IPA tokens);
+# the only change is the output vocabulary (8000 SPM tokens → 50 phonemes).
+# ==========================================================================
+
+# --- Data source ---
+# Phoneme-transcoded corpus produced by scripts/transcode_ipa_to_phoneme.py
+dataset_path: /home/daniel/projects/lfm/data/datasets/constituents-12lang-phonemes
+
+# Phoneme dataset loader (to be implemented as sibling of leipzig/labeled_constituents)
+corpus_loader: phoneme_h5
+corpus_loader_config:
+  h5_path: data/datasets/constituents-12lang-phonemes/samples.h5
+
+# Note: pretraining assembles VAE components directly (see model.py) rather
+# than instantiating a registered Generator class, so no generator_type field
+# is needed here.  The PhonemeVAEGenerator subclass is used at agent-training
+# and corpus-generation time via GeneratorConfig.
+
+# --- Phoneme alphabet (repurposes spm_model_path slot) ---
+spm_model_path: data/phoneme_alphabet_multi.json
+# 50 phonemes + 1 reserved word-boundary id = 51 total tokens.  The
+# extra id (50) is emitted by the transcoder wherever the source IPA
+# had a word boundary (space), so the VAE learns to produce
+# space-separated Neuroglot words instead of one flat phoneme stream.
+spm_vocab_size: 51
+# Tokenizer is character-class (phoneme-level) — no SPM training.
+syllable_aligned_bpe: false
+
+# --- Model architecture (mirrors v7) ---
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+
+# --- Linguistic attention structure (mirrors v7) ---
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 0  # auto-scale from dataset
+encoder_pooling: mean
+
+# --- KL divergence ---
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+kl_beta: 0.0
+
+# --- Auxiliary losses ---
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+use_vq: false
+
+# --- Training ---
+# Smaller vocab → cheaper per-token ops; keep batch comparable to v7.
+batch_size: 80
+gradient_accumulation_steps: 4
+use_amp: true
+lr: 0.0005
+lr_min: 0.0001
+# Phoneme sequences are LONGER per phrase (character-level vs 8K-SPM),
+# so one epoch is more tokens; start with 2 epochs and scale if needed.
+num_epochs: 2
+
+# --- Latent regularization ---
+z_var_weight: 0.01
+z_var_target: 0.03
+z_var_floor: 0.01
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 0
+dip_weight: 0.1
+bow_weight: 0.0
+
+# --- Sampling balance ---
+length_boost_threshold: 30
+length_boost_factor: 5.0
+
+# --- Checkpointing & diagnostics ---
+diagnostic_every: 5000
+checkpoint_every_steps: 5000
+val_fraction: 0.05
+seed: 42
+device: cuda
+output_path: /home/daniel/projects/lfm/data/models/phoneme_v1/vae_decoder.pt
+
+# --- Disabled ---
+topo_weight: 0.0
+topo_sample_pairs: 32
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true
+constituent_context: false

@@ -106,24 +106,38 @@ def sample_decode(
         probs = F.softmax(logits, dim=-1)
         nxt = torch.multinomial(probs, num_samples=1)
         ids = torch.cat([ids, nxt], dim=1)
-    # Decode single-sentence output: truncate at first EOS
-    _spm_specials = {0, 1, 2, 3, bos_id, eos_id}
+    # Decode single-sentence output: truncate at first EOS.
+    # Specials differ by backend: SPM reserves ids 0-3 for UNK/BOS/EOS/PAD,
+    # while the phoneme alphabet uses 0..vocab_size-1 all as valid phonemes.
     texts = []
+    _spm_internal = {0, 1, 2, 3} if hasattr(sp, "id_to_piece") else set()
+    _specials = _spm_internal | {bos_id, eos_id}
     for j in range(n):
         toks = ids[j, 1:].cpu().tolist()
         if eos_id in toks:
             toks = toks[: toks.index(eos_id)]
-        toks = [
-            x for x in toks
-            if x < vocab_size and x not in _spm_specials
-        ]
-        text = sp.decode(toks)
-        # Strip trailing orphan consonants
+        toks = [x for x in toks if x < vocab_size and x not in _specials]
+        text = _backend_decode(sp, toks)
+        # Strip trailing orphan consonants (IPA-specific heuristic; harmless
+        # on phoneme output since phonemes are multi-char).
         words = text.split()
         while words and len(words[-1]) == 1 and not _is_vowel(words[-1]):
             words.pop()
         texts.append(" ".join(words))
     return texts
+
+
+def _backend_decode(backend: object, ids: list[int]) -> str:
+    """Decode token ids via whichever backend is present (SPM or phoneme)."""
+    if backend is None:
+        return ""
+    # SentencePieceProcessor exposes `.decode(list[int]) -> str` directly.
+    if hasattr(backend, "id_to_piece"):
+        return backend.decode(ids)  # type: ignore[attr-defined]
+    # PhonemeTokenizer exposes `.batch_decode([list[int]]) -> list[str]`.
+    if hasattr(backend, "batch_decode"):
+        return backend.batch_decode([ids])[0]  # type: ignore[attr-defined]
+    return ""
 
 
 def encode_text(
@@ -377,7 +391,7 @@ def run_epoch_diagnostics(
     for j in range(min(2, len(_lang_labels))):
         orig_ids = val_batch_tokens[j].cpu().tolist()
         orig_ids = [x for x in orig_ids[:val_batch_lengths[j]] if x < vocab_size]
-        orig = sp.decode(orig_ids)
+        orig = _backend_decode(sp, orig_ids)
         dec = recon_texts[j]
         ed, ml = word_edit_distance(orig, dec)
         wer = ed / max(ml, 1)

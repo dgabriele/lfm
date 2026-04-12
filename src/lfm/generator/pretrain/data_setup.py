@@ -26,7 +26,20 @@ def _encode_ipa(sp: Any, text: str) -> list[int]:
 
 
 class PreprocessedData:
-    """Container for preprocessed corpus data ready for training."""
+    """Container for preprocessed corpus data ready for training.
+
+    Supports two alphabet backends via a uniform interface:
+
+    * **SentencePiece over IPA** (default): ``sp`` is a
+      ``SentencePieceProcessor`` and ``spm_path`` points to a ``.model`` file.
+    * **Phoneme alphabet** (Qwen-BPE-stable Latin phonemes): ``sp`` is ``None``
+      and ``phoneme_tokenizer`` carries a
+      :class:`~lfm.generator.phoneme_tokenizer.PhonemeTokenizer`.
+
+    Call :meth:`decode_tokens` to render a token-id list as a string
+    regardless of backend — diagnostics and validation code should use
+    this instead of reaching for ``sp.decode`` directly.
+    """
 
     def __init__(
         self,
@@ -38,7 +51,7 @@ class PreprocessedData:
         bos_id: int,
         eos_id: int,
         spm_path: str,
-        sp: Any,  # SentencePieceProcessor
+        sp: Any | None,  # SentencePieceProcessor or None (phoneme backend)
         dataset: MultilingualCorpusDataset,
         train_dataset: Any,
         val_dataset: Any,
@@ -50,6 +63,7 @@ class PreprocessedData:
         use_contrastive: bool,
         use_constituent_context: bool,
         surviving_indices: list[int],
+        phoneme_tokenizer: Any | None = None,
     ) -> None:
         self.token_ids_list = token_ids_list
         self.languages_list = languages_list
@@ -70,6 +84,18 @@ class PreprocessedData:
         self.use_contrastive = use_contrastive
         self.use_constituent_context = use_constituent_context
         self.surviving_indices = surviving_indices
+        self.phoneme_tokenizer = phoneme_tokenizer
+
+    def decode_tokens(self, ids: list[int]) -> str:
+        """Decode a token-id list to a string using whichever backend is set.
+
+        Returns an empty string if neither backend is configured.
+        """
+        if self.sp is not None:
+            return self.sp.decode(ids)
+        if self.phoneme_tokenizer is not None:
+            return self.phoneme_tokenizer.batch_decode([ids])[0]
+        return ""
 
 
 def _load_constituents(
@@ -289,16 +315,167 @@ def _align_constituent_ipa(
     return None
 
 
+def _load_and_preprocess_phoneme_h5(
+    cfg: VAEPretrainConfig,
+) -> tuple[PreprocessedData, VAEPretrainConfig]:
+    """Phoneme-alphabet data loader (sibling of the SPM path).
+
+    Reads pre-tokenized phoneme-id sequences from an HDF5 produced by
+    ``scripts/transcode_ipa_to_phoneme.py`` — no SentencePiece training,
+    no IPA conversion.  The HDF5 must contain group ``samples`` with
+    variable-length int32 dataset ``phoneme_ids`` and string dataset
+    ``language``; group attr ``vocab_size`` is optional (falls back to
+    the alphabet JSON).  ``cfg.corpus_loader_config['h5_path']``
+    overrides the default location.
+    """
+    import h5py
+    import numpy as np
+
+    from lfm.generator.phoneme_tokenizer import PhonemeTokenizer
+
+    h5_path = Path(
+        cfg.corpus_loader_config.get(
+            "h5_path",
+            "data/datasets/constituents-12lang-phonemes/samples.h5",
+        ),
+    )
+    if not h5_path.exists():
+        raise FileNotFoundError(
+            f"Phoneme HDF5 not found: {h5_path}. "
+            "Run `poetry run python scripts/transcode_ipa_to_phoneme.py` first.",
+        )
+
+    alphabet_path = cfg.spm_model_path  # repurposed for phoneme alphabet JSON
+    if alphabet_path is None:
+        raise ValueError(
+            "GeneratorConfig.spm_model_path must point to the phoneme "
+            "alphabet JSON when corpus_loader='phoneme_h5'.",
+        )
+    phoneme_tokenizer = PhonemeTokenizer(alphabet_path)
+    vocab_size = phoneme_tokenizer.vocab_size
+    full_vocab = vocab_size + 2
+    bos_id = vocab_size
+    eos_id = vocab_size + 1
+
+    logger.info("Loading phoneme corpus from %s", h5_path)
+    with h5py.File(h5_path, "r") as f:
+        g = f["samples"]
+        n = g["phoneme_ids"].shape[0]
+        # Streaming read to keep memory bounded on the 11.6M-row corpus
+        token_ids_list: list[list[int]] = []
+        languages_list: list[str] = []
+        dropped = 0
+        CHUNK = 200_000
+        for start in range(0, n, CHUNK):
+            end = min(start + CHUNK, n)
+            ids_chunk = g["phoneme_ids"][start:end]
+            lang_chunk = g["language"][start:end]
+            for i in range(end - start):
+                arr = ids_chunk[i]
+                if len(arr) < 5:
+                    dropped += 1
+                    continue
+                token_ids_list.append(arr.tolist())
+                lang_b = lang_chunk[i]
+                languages_list.append(
+                    lang_b.decode() if isinstance(lang_b, bytes) else str(lang_b),
+                )
+            if end % (CHUNK * 5) == 0 or end == n:
+                logger.info("  loaded %d / %d (dropped %d short)", end, n, dropped)
+    logger.info(
+        "Phoneme corpus ready: %d sequences, vocab_size=%d (dropped %d <5)",
+        len(token_ids_list), vocab_size, dropped,
+    )
+
+    # Auto-scale max_seq_len if 0
+    if cfg.max_seq_len <= 0:
+        actual_max = max(len(t) for t in token_ids_list)
+        cfg_dict = cfg.model_dump()
+        cfg_dict["max_seq_len"] = actual_max + 2  # +BOS +EOS
+        cfg = type(cfg)(**cfg_dict)
+        logger.info(
+            "Auto-scaled max_seq_len to %d (max phoneme len %d + 2)",
+            cfg.max_seq_len, actual_max,
+        )
+
+    dataset = MultilingualCorpusDataset(
+        token_ids_list, cfg.max_seq_len, eos_id,
+        word_boundary_ids=set(),  # phoneme seqs have no word-boundary markers
+    )
+    val_size = max(1, int(len(dataset) * cfg.val_fraction))
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = random_split(
+        dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(cfg.seed),
+    )
+
+    # Length-boosted sampling (mirror of the SPM path's logic).
+    _boost_thresh = getattr(cfg, "length_boost_threshold", 0)
+    if _boost_thresh > 0:
+        _boost_factor = getattr(cfg, "length_boost_factor", 10.0)
+        _train_indices = list(train_dataset.indices)
+        _train_lengths = [len(token_ids_list[i]) for i in _train_indices]
+        _len_arr = torch.tensor(_train_lengths, dtype=torch.float32)
+        _weights = torch.where(_len_arr >= _boost_thresh, _boost_factor, 1.0)
+        _sampler = torch.utils.data.WeightedRandomSampler(
+            _weights, num_samples=len(_weights), replacement=True,
+        )
+        train_loader = DataLoader(
+            train_dataset, batch_size=cfg.batch_size,
+            sampler=_sampler, drop_last=True,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset, batch_size=cfg.batch_size,
+            shuffle=True, drop_last=True,
+        )
+    val_loader = DataLoader(
+        val_dataset, batch_size=cfg.batch_size,
+        shuffle=False, drop_last=False,
+    )
+
+    return PreprocessedData(
+        token_ids_list=token_ids_list,
+        languages_list=languages_list,
+        vocab_size=vocab_size,
+        full_vocab=full_vocab,
+        bos_id=bos_id,
+        eos_id=eos_id,
+        spm_path=str(alphabet_path),
+        sp=None,  # phoneme backend — no SentencePiece processor
+        dataset=dataset,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        interleaved_loader=None,  # phoneme path doesn't support constituent context yet
+        constituent_dataset=None,
+        corpus_embeddings=None,
+        use_contrastive=False,
+        use_constituent_context=False,
+        surviving_indices=[],
+        phoneme_tokenizer=phoneme_tokenizer,
+    ), cfg
+
+
 def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPretrainConfig]:
     """Load corpus, tokenize, build datasets and dataloaders.
 
-    Handles preprocessing cache (v3 format), sentencepiece training,
-    contrastive embedding alignment, and constituent context setup.
+    Dispatches on ``cfg.corpus_loader``:
+
+    * ``"phoneme_h5"`` — skips SPM training; loads pre-tokenized
+      phoneme-id sequences from an HDF5 file produced by
+      ``scripts/transcode_ipa_to_phoneme.py``.
+    * anything else (default path) — IPA text + SentencePiece, as before.
 
     Returns:
         A ``PreprocessedData`` container with everything needed to start
         the training loop.
     """
+    if cfg.corpus_loader == "phoneme_h5":
+        return _load_and_preprocess_phoneme_h5(cfg)
+
     output_dir = str(Path(cfg.output_path).parent)
     cache_path = Path(output_dir) / "preprocessed_cache.pt"
     spm_path_cached = Path(output_dir) / "spm.model"
