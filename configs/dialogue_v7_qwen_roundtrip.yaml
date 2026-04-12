@@ -45,6 +45,10 @@ qwen_roundtrip_samples: 20
 phase2_vram_budget_mb: 1200
 phase2_min_chunk: 4
 
+# Curriculum — slower ramp than baseline to give the REINFORCE signal
+# time to build up alongside receiver discrimination.
+warmup_steps: 1000
+
 # Training — reduced batch for VRAM headroom
 batch_size: 90
 gradient_accumulation_steps: 1
