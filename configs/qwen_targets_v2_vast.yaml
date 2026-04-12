@@ -17,6 +17,7 @@ sources:
     weight: 0.30
     max_samples: 400000
     name: slimpajama-6b
+    filters: [duplicate]
 
   - hf_dataset: HuggingFaceFW/fineweb-edu
     hf_config: sample-10BT
@@ -25,6 +26,7 @@ sources:
     weight: 0.17
     max_samples: 220000
     name: fineweb-edu
+    filters: [duplicate]
 
   # --- Multilingual coverage (Qwen 2.5 is strong in EN/ZH/JA) ---------
   - hf_dataset: HuggingFaceFW/fineweb-2
@@ -34,6 +36,7 @@ sources:
     weight: 0.15
     max_samples: 200000
     name: fineweb2-cmn
+    filters: [duplicate]
 
   - hf_dataset: HuggingFaceFW/fineweb-2
     hf_config: jpn_Jpan
@@ -42,14 +45,18 @@ sources:
     weight: 0.10
     max_samples: 130000
     name: fineweb2-jpn
+    filters: [duplicate]
 
   # --- Code (upweighted above SlimPajama's GitHub share) -------------
+  # Filter out files whose cached prefix is dominated by Apache/BSD/
+  # GPL/MIT license headers — these crowd the clustering otherwise.
   - hf_dataset: bigcode/the-stack-smol-xl
     hf_split: train
     text_field: content
     weight: 0.15
     max_samples: 200000
     name: stack-smol-xl
+    filters: [license_boilerplate, duplicate]
 
   # --- Synthetic educational / technical register --------------------
   - hf_dataset: HuggingFaceTB/smollm-corpus
@@ -59,16 +66,22 @@ sources:
     weight: 0.10
     max_samples: 130000
     name: cosmopedia-v2
+    filters: [duplicate]
 
   # --- Long-form books (public domain) -------------------------------
+  # Bumped max_length to 40000 chars so the cached slice skips past
+  # Project Gutenberg's ~2KB preamble and captures actual chapter
+  # content.  gutenberg_boilerplate filter catches any records whose
+  # captured text is still dominated by front matter (short books).
   - hf_dataset: manu/project_gutenberg
     hf_split: en
     text_field: text
     weight: 0.03
     max_samples: 20000
     min_length: 200
-    max_length: 4000
+    max_length: 40000
     name: gutenberg-en
+    filters: [gutenberg_boilerplate, duplicate]
 
 output_dir: data/embeddings_qwen_v2
 

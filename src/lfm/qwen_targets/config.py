@@ -45,6 +45,12 @@ class CorpusSourceConfig(LFMBaseConfig):
     min_length: int = 20
     max_length: int = 4000
     name: str = ""
+    # Named text-level filters applied during prefetch.  Each name
+    # resolves via :mod:`lfm.qwen_targets.filters`:
+    #   - "gutenberg_boilerplate"  → drops Project Gutenberg front-matter
+    #   - "license_boilerplate"    → drops software-license comment blocks
+    #   - "duplicate"              → drops exact-text duplicates (stateful)
+    filters: list[str] = []
 
 
 class ExtractorConfig(LFMBaseConfig):

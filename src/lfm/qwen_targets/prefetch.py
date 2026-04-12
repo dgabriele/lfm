@@ -23,8 +23,36 @@ from pathlib import Path
 
 from lfm.qwen_targets.config import CorpusSourceConfig
 from lfm.qwen_targets.corpora import HFStreamingCorpusSource
+from lfm.qwen_targets.filters import (
+    DuplicateFilter,
+    gutenberg_filter,
+    license_filter,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_filters(names: list[str]) -> list:
+    """Turn a list of filter names from config into callable predicates.
+
+    The duplicate filter is stateful, so we instantiate a fresh one per
+    source every call (not shared across sources — each source gets
+    its own duplicate-tracking set).
+    """
+    resolved: list = []
+    for name in names:
+        if name == "gutenberg_boilerplate":
+            resolved.append(gutenberg_filter)
+        elif name == "license_boilerplate":
+            resolved.append(license_filter)
+        elif name == "duplicate":
+            resolved.append(DuplicateFilter())
+        else:
+            raise ValueError(
+                f"Unknown text filter name: {name!r}. Known: "
+                "gutenberg_boilerplate, license_boilerplate, duplicate",
+            )
+    return resolved
 
 
 def cache_path_for(source: CorpusSourceConfig, prefetch_dir: Path) -> Path:
@@ -78,6 +106,12 @@ def prefetch_source(
         )
         return cache_path
 
+    text_filters = _resolve_filters(source.filters)
+    if text_filters:
+        logger.info(
+            "Source '%s': applying %d text filter(s): %s",
+            source.name, len(text_filters), source.filters,
+        )
     stream = HFStreamingCorpusSource(
         dataset_name=source.hf_dataset,
         config_name=source.hf_config,
@@ -87,6 +121,7 @@ def prefetch_source(
         max_samples=source.max_samples,
         min_length=source.min_length,
         max_length=source.max_length,
+        text_filters=text_filters,
         trust_remote_code=source.hf_trust_remote_code,
     )
 
