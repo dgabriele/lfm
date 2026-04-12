@@ -1053,12 +1053,13 @@ class DialogueGame(nn.Module):
         sub_idx_dev = sub_idx.to(device)
         per_sample_log_prob = torch.zeros(K, device=device)
         for t in turns:
+            S = t.hidden.size(1)  # Phase 2 seq length (trimmed)
             sub_hidden = t.hidden[sub_idx_dev]
-            logits = self.gen.output_head(sub_hidden)
+            logits = self.gen.output_head(sub_hidden)  # (K, S, V)
             log_p = F.log_softmax(logits, dim=-1)
-            tok_ids = t.tokens_cpu[sub_idx].to(device).clamp(min=0)
+            tok_ids = t.tokens_cpu[sub_idx, :S].to(device).clamp(min=0)
             gathered = log_p.gather(2, tok_ids.unsqueeze(-1)).squeeze(-1)
-            mask = t.gen_mask_cpu[sub_idx].to(device).float()
+            mask = t.mask[sub_idx_dev].float()  # already trimmed to S
             per_sample_log_prob = per_sample_log_prob + (gathered * mask).sum(dim=1)
             del logits, log_p
 
