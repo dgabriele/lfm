@@ -52,7 +52,7 @@ warmup_steps: 1000
 # Training — reduced batch for VRAM headroom
 batch_size: 90
 gradient_accumulation_steps: 1
-steps: 4000
+steps: 6000
 gru_lr: 0.00005
 receiver_lr: 0.0003
 num_distractors: 15
