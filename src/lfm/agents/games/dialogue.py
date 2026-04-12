@@ -123,6 +123,18 @@ class DialogueGameConfig(LFMBaseConfig):
     # bridges the agent's SPM vocab into Qwen's input-embedding space.
     llm_gumbel_tau: float = 1.0
 
+    # Qwen round-trip REINFORCE reward.  When > 0, a frozen Qwen reads
+    # the generated Neuroglot *as text*, extracts its hidden state, and
+    # compares to the target embedding via cosine.  The cosine serves
+    # as a reward signal for REINFORCE (policy gradient), pushing the
+    # agent to produce Neuroglot whose *surface form* encodes target
+    # information that Qwen can recover — not just the receiver.
+    # This closes the gap between "receiver can discriminate" and
+    # "Qwen can read it."  0.0 = disabled.
+    qwen_roundtrip_weight: float = 0.0
+    qwen_roundtrip_model: str = "Qwen/Qwen2.5-0.5B"
+    qwen_roundtrip_samples: int = 20
+
     # Independent turns: each turn sees only the embedding + turn position,
     # not previous turns.  Produces 4 independent views of the same input,
     # maximizing vocabulary/phrase diversity for LLM pretraining.
@@ -404,6 +416,37 @@ class DialogueGame(nn.Module):
                 spm_model=gen._tokenizer._sp,
                 spm_vocab_size=gen._full_vocab,
                 llm_model_name=config.llm_model_name,
+            )
+
+        # Qwen round-trip reader: frozen Qwen that reads generated
+        # Neuroglot as text and produces hidden states for REINFORCE.
+        # Only loaded when the weight is positive; otherwise None.
+        self._qwen_reader = None
+        self._roundtrip_sp = None
+        if config.qwen_roundtrip_weight > 0:
+            import sentencepiece as spm_lib
+            from lfm.qwen_targets.config import ExtractorConfig
+            from lfm.qwen_targets.extractor import HiddenStateExtractor
+            self._qwen_reader = HiddenStateExtractor(
+                ExtractorConfig(
+                    model_name=config.qwen_roundtrip_model,
+                    layer=-1,
+                    pooling="last_token",
+                    dtype="bfloat16",
+                    batch_size=config.qwen_roundtrip_samples,
+                ),
+                device=config.device,
+            )
+            self._roundtrip_sp = spm_lib.SentencePieceProcessor(
+                model_file=config.spm_path,
+            )
+            self._roundtrip_eos = gen.eos_id
+            self._roundtrip_vocab_size = self._roundtrip_sp.vocab_size()
+            logger.info(
+                "Qwen round-trip reader loaded: %s (weight=%.3f, K=%d)",
+                config.qwen_roundtrip_model,
+                config.qwen_roundtrip_weight,
+                config.qwen_roundtrip_samples,
             )
 
         # VRAM monitor (daemon process, saves every ~1 min)
@@ -943,6 +986,87 @@ class DialogueGame(nn.Module):
 
         return aux, vocab_entropy.detach(), llm_pressure.detach()
 
+    def _compute_qwen_roundtrip(
+        self,
+        turns: list[TurnOutput],
+        target_embs: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """REINFORCE round-trip: Neuroglot → Qwen → cosine with target.
+
+        Subsamples K documents from the batch, detokenizes them to IPA
+        text strings, feeds those strings through a frozen Qwen reader
+        (no grad), and uses cosine similarity to the target as a reward
+        signal for policy gradient.
+
+        The log-probabilities of the generated tokens (from Phase 2
+        hidden states) carry gradients through the decoder → z-gen →
+        agent.  The reward is detached.  This pushes the agent toward
+        Neuroglot whose *surface form* encodes target information that
+        Qwen's own text-processing pipeline can recover.
+
+        Returns:
+            loss: Weighted REINFORCE loss to add to the total.
+            reward_mean: Mean cosine reward (detached) for logging.
+        """
+        cfg = self.config
+        device = target_embs.device
+        B = target_embs.size(0)
+        K = min(cfg.qwen_roundtrip_samples, B)
+
+        sub_idx = torch.randperm(B, device="cpu")[:K]
+
+        # 1. Detokenize subsampled documents to romanized strings.
+        #    Romanization maps IPA → ASCII so Qwen's BPE tokenizer
+        #    produces familiar subword splits rather than byte-fallback
+        #    on rare Unicode IPA codepoints.
+        from lfm.translator.romanize import romanize_iso
+
+        sp = self._roundtrip_sp
+        eos = self._roundtrip_eos
+        vsize = self._roundtrip_vocab_size
+        docs: list[str] = []
+        for i in sub_idx:
+            parts: list[str] = []
+            for t in turns:
+                ids = [
+                    tok.item()
+                    for tok, m in zip(t.tokens_cpu[i], t.gen_mask_cpu[i])
+                    if m and tok.item() != eos and tok.item() < vsize
+                ]
+                ipa = sp.decode(ids).strip()
+                if ipa:
+                    parts.append(romanize_iso(ipa))
+            docs.append(" ".join(parts))
+
+        # 2. Qwen reads the Neuroglot (no grad) → hidden states
+        with torch.no_grad():
+            qwen_embs = self._qwen_reader.encode(docs).to(device)
+
+        # 3. Cosine reward
+        sub_targets = target_embs[sub_idx.to(device)]
+        reward = F.cosine_similarity(qwen_embs, sub_targets, dim=-1)
+        baseline = reward.mean()
+        advantage = (reward - baseline).detach()
+
+        # 4. Log-probabilities of generated tokens from Phase 2 hidden
+        #    states (carries gradients through the decoder → z-gen)
+        sub_idx_dev = sub_idx.to(device)
+        per_sample_log_prob = torch.zeros(K, device=device)
+        for t in turns:
+            sub_hidden = t.hidden[sub_idx_dev]
+            logits = self.gen.output_head(sub_hidden)
+            log_p = F.log_softmax(logits, dim=-1)
+            tok_ids = t.tokens_cpu[sub_idx].to(device).clamp(min=0)
+            gathered = log_p.gather(2, tok_ids.unsqueeze(-1)).squeeze(-1)
+            mask = t.gen_mask_cpu[sub_idx].to(device).float()
+            per_sample_log_prob = per_sample_log_prob + (gathered * mask).sum(dim=1)
+            del logits, log_p
+
+        # 5. REINFORCE: -(advantage * log_prob).mean()
+        reinforce_loss = -(advantage * per_sample_log_prob).mean()
+        loss = cfg.qwen_roundtrip_weight * reinforce_loss
+        return loss, reward.mean().detach()
+
     def _build_output(
         self,
         loss: Tensor,
@@ -953,6 +1077,7 @@ class DialogueGame(nn.Module):
         ce_loss: Tensor | None = None,
         vocab_entropy: Tensor | None = None,
         llm_pressure: Tensor | None = None,
+        qwen_roundtrip_reward: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Assemble output dict for trainer."""
         cfg = self.config
@@ -989,6 +1114,7 @@ class DialogueGame(nn.Module):
             "ce_loss": ce_loss if ce_loss is not None else torch.tensor(0.0),
             "vocab_entropy": vocab_entropy if vocab_entropy is not None else torch.tensor(0.0),
             "llm_pressure": llm_pressure if llm_pressure is not None else torch.tensor(0.0),
+            "qwen_roundtrip": qwen_roundtrip_reward if qwen_roundtrip_reward is not None else torch.tensor(0.0),
         }
 
     @contextmanager
@@ -1100,10 +1226,19 @@ class DialogueGame(nn.Module):
         aux, vocab_entropy, llm_pressure = self._compute_aux_losses(turns)
         loss = loss + aux
 
+        # Stage 4b: Qwen round-trip REINFORCE reward
+        qwen_roundtrip_reward = None
+        if self._qwen_reader is not None and cfg.qwen_roundtrip_weight > 0:
+            mon.stage = "qwen_roundtrip"
+            rt_loss, rt_reward = self._compute_qwen_roundtrip(turns, anchor)
+            loss = loss + rt_loss
+            qwen_roundtrip_reward = rt_reward
+
         # Stage 5: output
         return self._build_output(
             loss, logits, target_idx, turns,
             surface_loss=surface_loss, ce_loss=ce_loss,
             vocab_entropy=vocab_entropy,
             llm_pressure=llm_pressure,
+            qwen_roundtrip_reward=qwen_roundtrip_reward,
         )
