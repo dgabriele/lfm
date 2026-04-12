@@ -39,7 +39,7 @@ phase2_vram_budget_mb: 1500
 phase2_min_chunk: 4
 
 # Training
-batch_size: 115
+batch_size: 512
 gradient_accumulation_steps: 1
 steps: 6000
 gru_lr: 0.00005
