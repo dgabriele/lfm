@@ -358,6 +358,8 @@ class AgentTrainer:
                     extra += f"  vent={out['vocab_entropy'].item():.2f}"
                 if "llm_pressure" in out and out["llm_pressure"].item() != 0:
                     extra += f"  llm={out['llm_pressure'].item():.3f}"
+                if "qwen_roundtrip" in out and out["qwen_roundtrip"].item() != 0:
+                    extra += f"  rt_cos={out['qwen_roundtrip'].item():.4f}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
                 if torch.cuda.is_available():
