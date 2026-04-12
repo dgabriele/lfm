@@ -891,10 +891,20 @@ class DialogueGame(nn.Module):
         # Topographic similarity loss: push the receiver's message
         # encoding to preserve the pairwise geometry of the targets.
         topo_loss = torch.tensor(0.0, device=device)
-        if cfg.topo_weight > 0 and len(turn_msgs) > 0 and anchor is not None:
-            # Final aggregated message embedding per sample (with gradients)
-            weights = F.softmax(self.turn_agg_logits, dim=0)
-            msg_emb = sum(w * m for w, m in zip(weights, turn_msgs))
+        if cfg.topo_weight > 0 and anchor is not None:
+            # Surface-level message embedding: mean-pool Phase 2 hidden
+            # states BEFORE the receiver.  This prevents the receiver
+            # from undermining topology — the topo loss constrains the
+            # raw decoder output, and discrimination operates on the
+            # receiver's separate learned encoding.  The two losses are
+            # complementary rather than adversarial.
+            surface_embs: list[Tensor] = []
+            for t in turns:
+                masked = t.hidden * t.mask.unsqueeze(-1).float()
+                lengths = t.mask.float().sum(dim=1, keepdim=True).clamp(min=1)
+                surface_embs.append(masked.sum(dim=1) / lengths)
+            weights = F.softmax(self.turn_agg_logits[:len(turns)], dim=0)
+            msg_emb = sum(w * s for w, s in zip(weights, surface_embs))
             msg_emb = F.normalize(msg_emb, dim=-1)
 
             # Target similarity (detached — topology is a fixed target)
