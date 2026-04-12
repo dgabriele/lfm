@@ -130,14 +130,18 @@ class DialogueGameConfig(LFMBaseConfig):
     qwen_roundtrip_samples: int = 20
 
     # Topographic similarity loss (Chaabouni et al. NeurIPS 2019).
-    # Pushes the receiver's message encoding to preserve the pairwise
-    # cosine structure of the target embedding space.  Without this,
-    # the agent learns a discriminative codebook (arbitrary unique
-    # codes per target).  With it, similar targets produce similar
-    # Neuroglot — a semantically organized language.
-    # Operates over all B samples in the batch via differentiable
-    # Pearson correlation.  0.0 = disabled.  Typical range 0.1–1.0.
+    # Disabled when using contrastive scoring (topology is built-in).
     topo_weight: float = 0.0
+
+    # CLIP-style contrastive scoring.  When True, replaces the learned
+    # receiver (dialogue_encoder + surface_encoder + Receiver) with a
+    # single linear projection + InfoNCE loss over the full batch.
+    # Topology emerges from the loss itself (similar targets are hard
+    # negatives for each other), eliminating the need for a separate
+    # topo loss and removing the architectural tension where a learned
+    # receiver undermines topology.
+    contrastive_scoring: bool = False
+    contrastive_temperature: float = 0.07
 
     # Independent turns: each turn sees only the embedding + turn position,
     # not previous turns.  Produces 4 independent views of the same input,
@@ -372,21 +376,36 @@ class DialogueGame(nn.Module):
             self._hidden_dim, config.context_hidden_dim,
         )
 
-        # Hidden-state encoder (encodes one turn at a time)
-        self.dialogue_encoder = MessageEncoder(
-            self._hidden_dim, config.embedding_dim,
-            num_heads=config.encoder.num_heads,
-            num_layers=config.encoder.num_layers,
-        )
-
-        # Surface-token encoder (straight-through differentiable tokens)
-        self.surface_encoder = MessageEncoder(
-            self._hidden_dim, config.embedding_dim,
-            num_heads=config.encoder.num_heads,
-            num_layers=config.encoder.num_layers,
-        )
-
-        self.receiver = Receiver(config.embedding_dim)
+        if config.contrastive_scoring:
+            # CLIP-style: single linear projection from surface
+            # embedding to target space.  No learned receiver.
+            self.message_projector = nn.Linear(
+                self._hidden_dim, config.embedding_dim,
+            )
+            import math
+            self.log_temperature = nn.Parameter(
+                torch.tensor(math.log(1.0 / config.contrastive_temperature)),
+            )
+            # Dummy modules so checkpoint save/load doesn't crash on
+            # missing keys when loading old checkpoints into new code.
+            self.dialogue_encoder = None  # type: ignore[assignment]
+            self.surface_encoder = None  # type: ignore[assignment]
+            self.receiver = None  # type: ignore[assignment]
+        else:
+            # Original receiver-based scoring
+            self.message_projector = None
+            self.log_temperature = None
+            self.dialogue_encoder = MessageEncoder(
+                self._hidden_dim, config.embedding_dim,
+                num_heads=config.encoder.num_heads,
+                num_layers=config.encoder.num_layers,
+            )
+            self.surface_encoder = MessageEncoder(
+                self._hidden_dim, config.embedding_dim,
+                num_heads=config.encoder.num_heads,
+                num_layers=config.encoder.num_layers,
+            )
+            self.receiver = Receiver(config.embedding_dim)
 
         # Learned turn aggregation weights for progressive scoring
         self.turn_agg_logits = nn.Parameter(torch.zeros(config.num_turns))
@@ -508,16 +527,21 @@ class DialogueGame(nn.Module):
             "context_transformer": self.context_transformer.state_dict(),
             "turn_embeddings": self.turn_embeddings.data,
             "hidden_to_context": self.hidden_to_context.state_dict(),
-            "dialogue_encoder": self.dialogue_encoder.state_dict(),
-            "surface_encoder": self.surface_encoder.state_dict(),
-            "receiver": self.receiver.state_dict(),
             "turn_agg_logits": self.turn_agg_logits.data,
             "vocab_marginal_ema": self.vocab_marginal_ema.data,
             "num_turns": self.config.num_turns,
             "max_phrases": self.config.max_phrases,
             "z_generator": "diffusion",
+            "contrastive_scoring": self.config.contrastive_scoring,
             "version": 2,
         }
+        if self.config.contrastive_scoring:
+            state["message_projector"] = self.message_projector.state_dict()
+            state["log_temperature"] = self.log_temperature.data
+        else:
+            state["dialogue_encoder"] = self.dialogue_encoder.state_dict()
+            state["surface_encoder"] = self.surface_encoder.state_dict()
+            state["receiver"] = self.receiver.state_dict()
         # LLM-pressure projection is a learned parameter (not in the
         # frozen Qwen) and must be persisted so resumes don't throw
         # away the SPM→Qwen bridge.
@@ -537,10 +561,18 @@ class DialogueGame(nn.Module):
         else:
             self.turn_embeddings.data.copy_(saved)
         self.hidden_to_context.load_state_dict(ckpt["hidden_to_context"])
-        self.dialogue_encoder.load_state_dict(ckpt["dialogue_encoder"])
-        if "surface_encoder" in ckpt:
-            self.surface_encoder.load_state_dict(ckpt["surface_encoder"])
-        self.receiver.load_state_dict(ckpt["receiver"])
+        if self.config.contrastive_scoring:
+            if "message_projector" in ckpt:
+                self.message_projector.load_state_dict(ckpt["message_projector"])
+            if "log_temperature" in ckpt:
+                self.log_temperature.data.copy_(ckpt["log_temperature"])
+        else:
+            if "dialogue_encoder" in ckpt:
+                self.dialogue_encoder.load_state_dict(ckpt["dialogue_encoder"])
+            if "surface_encoder" in ckpt:
+                self.surface_encoder.load_state_dict(ckpt["surface_encoder"])
+            if "receiver" in ckpt:
+                self.receiver.load_state_dict(ckpt["receiver"])
         if "turn_agg_logits" in ckpt:
             self.turn_agg_logits.data.copy_(ckpt["turn_agg_logits"])
         if "vocab_marginal_ema" in ckpt:
@@ -575,11 +607,15 @@ class DialogueGame(nn.Module):
             {"params": list(self.context_transformer.parameters()), "lr": cfg.receiver_lr},
             {"params": [self.turn_embeddings], "lr": cfg.receiver_lr},
             {"params": list(self.hidden_to_context.parameters()), "lr": cfg.receiver_lr},
-            {"params": list(self.dialogue_encoder.parameters()), "lr": cfg.receiver_lr},
-            {"params": list(self.surface_encoder.parameters()), "lr": cfg.receiver_lr},
-            {"params": list(self.receiver.parameters()), "lr": cfg.receiver_lr},
             {"params": [self.turn_agg_logits], "lr": cfg.receiver_lr},
         ]
+        if cfg.contrastive_scoring:
+            groups.append({"params": list(self.message_projector.parameters()), "lr": cfg.receiver_lr})
+            groups.append({"params": [self.log_temperature], "lr": cfg.receiver_lr})
+        else:
+            groups.append({"params": list(self.dialogue_encoder.parameters()), "lr": cfg.receiver_lr})
+            groups.append({"params": list(self.surface_encoder.parameters()), "lr": cfg.receiver_lr})
+            groups.append({"params": list(self.receiver.parameters()), "lr": cfg.receiver_lr})
         # The LLM-pressure scorer holds a frozen LLM (no grad) plus a
         # learnable SPM→LLM projection.  Only the projection needs to
         # be in the optimizer; we give it the receiver LR because the
@@ -805,6 +841,46 @@ class DialogueGame(nn.Module):
 
         chunk = max(self.config.phase2_min_chunk, int(available / bytes_per_sample))
         return min(chunk, batch)
+
+    def _score_contrastive(
+        self,
+        turns: list[TurnOutput],
+        anchor: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """CLIP-style InfoNCE scoring over the full batch.
+
+        Mean-pools Phase 2 hidden states per turn, aggregates across
+        turns via learned weights, projects into the target embedding
+        space, and scores via temperature-scaled cosine against all
+        targets in the batch.  Similar targets are natural hard
+        negatives — topology emerges from the loss by construction.
+
+        Returns:
+            loss: InfoNCE cross-entropy loss.
+            logits: ``(B, B)`` cosine similarity matrix (for accuracy).
+        """
+        # 1. Surface embedding per turn: mean-pool Phase 2 hidden states
+        surface_embs: list[Tensor] = []
+        for t in turns:
+            masked = t.hidden * t.mask.unsqueeze(-1).float()
+            lengths = t.mask.float().sum(dim=1, keepdim=True).clamp(min=1)
+            surface_embs.append(masked.sum(dim=1) / lengths)
+
+        # 2. Aggregate across turns
+        weights = F.softmax(self.turn_agg_logits[:len(turns)], dim=0)
+        agg = sum(w * s for w, s in zip(weights, surface_embs))
+
+        # 3. Project to target space + normalize
+        msg = F.normalize(self.message_projector(agg), dim=-1)
+        tgt = F.normalize(anchor.detach(), dim=-1)
+
+        # 4. Temperature-scaled cosine similarity → InfoNCE
+        temperature = self.log_temperature.exp().clamp(min=0.01, max=100.0)
+        logits = msg @ tgt.t() / temperature  # (B, B)
+        labels = torch.arange(logits.size(0), device=logits.device)
+        loss = F.cross_entropy(logits, labels)
+
+        return loss, logits
 
     def _score_progressive(
         self,
@@ -1265,17 +1341,29 @@ class DialogueGame(nn.Module):
 
         # Stage 3: score with decoder offloaded
         mon.stage = "scoring"
-        with self._decoder_offloaded():
-            progressive_loss, logits, surface_loss, ce_loss, topo_loss = (
-                self._score_progressive(
-                    turns, candidates, teacher_probs, target_idx,
-                    anchor=anchor,
+        surface_loss = torch.tensor(0.0)
+        ce_loss = torch.tensor(0.0)
+        topo_loss = torch.tensor(0.0)
+
+        if cfg.contrastive_scoring:
+            with self._decoder_offloaded():
+                contrastive_loss, logits = self._score_contrastive(
+                    turns, anchor,
                 )
-            )
+            loss = contrastive_loss
+            target_idx = torch.arange(anchor.size(0), device=anchor.device)
+        else:
+            with self._decoder_offloaded():
+                progressive_loss, logits, surface_loss, ce_loss, topo_loss = (
+                    self._score_progressive(
+                        turns, candidates, teacher_probs, target_idx,
+                        anchor=anchor,
+                    )
+                )
+            loss = progressive_loss / cfg.num_turns
 
         # Stage 4: auxiliary losses
         mon.stage = "aux_losses"
-        loss = progressive_loss / cfg.num_turns
         aux, vocab_entropy, llm_pressure = self._compute_aux_losses(turns)
         loss = loss + aux
 

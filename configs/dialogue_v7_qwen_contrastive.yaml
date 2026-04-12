@@ -1,0 +1,55 @@
+# Dialogue game — CLIP-style contrastive scoring on Qwen-latent targets.
+#
+# Replaces the learned receiver with a single linear projection +
+# InfoNCE loss over the full batch.  Topology emerges from the loss
+# itself: similar targets are hard negatives for each other, forcing
+# similar messages for similar targets.  No separate topo loss needed.
+
+decoder_path: data/models/v7/vae_decoder.pt
+spm_path: data/models/v7/spm.model
+output_dir: data/dialogue_game_qwen_v2_contrastive
+embedding_store_dir: data/embeddings_qwen_v2_clean
+
+# Dialogue structure
+num_turns: 4
+context_hidden_dim: 512
+context_heads: 4
+
+# Diffusion z-generator
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_phrases: 3
+variable_phrases: true
+target_phrases: 2.0
+length_weight: 0.5
+z_diversity_weight: 0.3
+
+# CLIP-style contrastive scoring
+contrastive_scoring: true
+contrastive_temperature: 0.07
+
+# No separate topology or receiver losses needed
+per_turn_weight: 0.0
+ce_weight: 0.0
+topo_weight: 0.0
+
+# Phase 2 VRAM management (lighter without receiver — more headroom)
+phase2_vram_budget_mb: 1500
+phase2_min_chunk: 4
+
+# Training
+batch_size: 115
+gradient_accumulation_steps: 1
+steps: 6000
+gru_lr: 0.00005
+receiver_lr: 0.0003
+num_distractors: 15
+min_targets: 1
+max_targets: 1
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100
