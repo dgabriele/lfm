@@ -812,6 +812,7 @@ class DialogueGame(nn.Module):
         candidates: Tensor,
         teacher_probs: Tensor,
         target_idx: Tensor,
+        anchor: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Progressive + independent topology matching.
 
@@ -890,14 +891,14 @@ class DialogueGame(nn.Module):
         # Topographic similarity loss: push the receiver's message
         # encoding to preserve the pairwise geometry of the targets.
         topo_loss = torch.tensor(0.0, device=device)
-        if cfg.topo_weight > 0 and len(turn_msgs) > 0:
+        if cfg.topo_weight > 0 and len(turn_msgs) > 0 and anchor is not None:
             # Final aggregated message embedding per sample (with gradients)
             weights = F.softmax(self.turn_agg_logits, dim=0)
             msg_emb = sum(w * m for w, m in zip(weights, turn_msgs))
             msg_emb = F.normalize(msg_emb, dim=-1)
 
             # Target similarity (detached — topology is a fixed target)
-            tgt_norm = F.normalize(candidates[:batch], dim=-1)
+            tgt_norm = F.normalize(anchor.detach(), dim=-1)
             tgt_sim = tgt_norm @ tgt_norm.t()
 
             # Message similarity (with gradients)
@@ -1258,6 +1259,7 @@ class DialogueGame(nn.Module):
             progressive_loss, logits, surface_loss, ce_loss, topo_loss = (
                 self._score_progressive(
                     turns, candidates, teacher_probs, target_idx,
+                    anchor=anchor,
                 )
             )
 
