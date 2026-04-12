@@ -123,17 +123,21 @@ class DialogueGameConfig(LFMBaseConfig):
     # bridges the agent's SPM vocab into Qwen's input-embedding space.
     llm_gumbel_tau: float = 1.0
 
-    # Qwen round-trip REINFORCE reward.  When > 0, a frozen Qwen reads
-    # the generated Neuroglot *as text*, extracts its hidden state, and
-    # compares to the target embedding via cosine.  The cosine serves
-    # as a reward signal for REINFORCE (policy gradient), pushing the
-    # agent to produce Neuroglot whose *surface form* encodes target
-    # information that Qwen can recover — not just the receiver.
-    # This closes the gap between "receiver can discriminate" and
-    # "Qwen can read it."  0.0 = disabled.
+    # Qwen round-trip REINFORCE reward (experimental, did not produce
+    # signal — see commit history).  0.0 = disabled.
     qwen_roundtrip_weight: float = 0.0
     qwen_roundtrip_model: str = "Qwen/Qwen2.5-0.5B"
     qwen_roundtrip_samples: int = 20
+
+    # Topographic similarity loss (Chaabouni et al. NeurIPS 2019).
+    # Pushes the receiver's message encoding to preserve the pairwise
+    # cosine structure of the target embedding space.  Without this,
+    # the agent learns a discriminative codebook (arbitrary unique
+    # codes per target).  With it, similar targets produce similar
+    # Neuroglot — a semantically organized language.
+    # Operates over all B samples in the batch via differentiable
+    # Pearson correlation.  0.0 = disabled.  Typical range 0.1–1.0.
+    topo_weight: float = 0.0
 
     # Independent turns: each turn sees only the embedding + turn position,
     # not previous turns.  Produces 4 independent views of the same input,
@@ -883,10 +887,38 @@ class DialogueGame(nn.Module):
                 )
                 del surface_msg
 
+        # Topographic similarity loss: push the receiver's message
+        # encoding to preserve the pairwise geometry of the targets.
+        topo_loss = torch.tensor(0.0, device=device)
+        if cfg.topo_weight > 0 and len(turn_msgs) > 0:
+            # Final aggregated message embedding per sample (with gradients)
+            weights = F.softmax(self.turn_agg_logits, dim=0)
+            msg_emb = sum(w * m for w, m in zip(weights, turn_msgs))
+            msg_emb = F.normalize(msg_emb, dim=-1)
+
+            # Target similarity (detached — topology is a fixed target)
+            tgt_norm = F.normalize(candidates[:batch], dim=-1)
+            tgt_sim = tgt_norm @ tgt_norm.t()
+
+            # Message similarity (with gradients)
+            msg_sim = msg_emb @ msg_emb.t()
+
+            # Differentiable Pearson correlation on upper triangle
+            idx = torch.triu_indices(batch, batch, offset=1, device=device)
+            tgt_upper = tgt_sim[idx[0], idx[1]]
+            msg_upper = msg_sim[idx[0], idx[1]]
+            tgt_c = tgt_upper - tgt_upper.mean()
+            msg_c = msg_upper - msg_upper.mean()
+            num = (tgt_c * msg_c).sum()
+            den = (tgt_c.norm() * msg_c.norm()).clamp(min=1e-8)
+            pearson = num / den
+            topo_loss = -pearson  # maximize correlation
+
         total = (progressive_loss
                 + cfg.per_turn_weight * independent_loss
-                + cfg.ce_weight * ce_loss)
-        return total, logits, independent_loss.detach(), ce_loss.detach()
+                + cfg.ce_weight * ce_loss
+                + cfg.topo_weight * topo_loss)
+        return total, logits, independent_loss.detach(), ce_loss.detach(), topo_loss.detach()
 
     def _compute_aux_losses(
         self, turns: list[TurnOutput],
@@ -1085,6 +1117,7 @@ class DialogueGame(nn.Module):
         vocab_entropy: Tensor | None = None,
         llm_pressure: Tensor | None = None,
         qwen_roundtrip_reward: Tensor | None = None,
+        topo_loss: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Assemble output dict for trainer."""
         cfg = self.config
@@ -1122,6 +1155,7 @@ class DialogueGame(nn.Module):
             "vocab_entropy": vocab_entropy if vocab_entropy is not None else torch.tensor(0.0),
             "llm_pressure": llm_pressure if llm_pressure is not None else torch.tensor(0.0),
             "qwen_roundtrip": qwen_roundtrip_reward if qwen_roundtrip_reward is not None else torch.tensor(0.0),
+            "topo_loss": topo_loss if topo_loss is not None else torch.tensor(0.0),
         }
 
     @contextmanager
@@ -1221,7 +1255,7 @@ class DialogueGame(nn.Module):
         # Stage 3: score with decoder offloaded
         mon.stage = "scoring"
         with self._decoder_offloaded():
-            progressive_loss, logits, surface_loss, ce_loss = (
+            progressive_loss, logits, surface_loss, ce_loss, topo_loss = (
                 self._score_progressive(
                     turns, candidates, teacher_probs, target_idx,
                 )
@@ -1248,4 +1282,5 @@ class DialogueGame(nn.Module):
             vocab_entropy=vocab_entropy,
             llm_pressure=llm_pressure,
             qwen_roundtrip_reward=qwen_roundtrip_reward,
+            topo_loss=topo_loss,
         )
