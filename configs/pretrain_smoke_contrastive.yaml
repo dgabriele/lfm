@@ -1,0 +1,39 @@
+# Smoke fine-tune of Qwen 2.5 0.5B-Instruct on contrastive Neuroglot corpus.
+#
+# Purpose: determine whether fine-tuning can bridge the ρ=0.115 cold-read
+# bottleneck we measured. If loss converges and downstream ρ improves
+# significantly (>0.3), fine-tuning is the right path. If ρ stays flat,
+# VAE retraining is the next investment.
+#
+# Using LoRA on attention layers to fit in ~3-4 GB VRAM while still
+# allowing adaptation of Qwen's attention patterns to Neuroglot's
+# structure.
+
+model_name: Qwen/Qwen2.5-0.5B-Instruct
+corpus_path: data/translator/dialogue_corpus_contrastive_v1.txt
+english_corpus_path: data/translator/english_corpus_smoke.txt
+english_ratio: 0.3
+
+epochs: 2
+lr: 0.00002   # Lower LR for full fine-tune than LoRA (avoid catastrophic forgetting)
+batch_size: 2
+max_len: 256
+gradient_accumulation_steps: 8   # Effective batch 16
+use_amp: true
+warmup_fraction: 0.1
+max_grad_norm: 1.0
+checkpoint_fraction: 0.25
+output_dir: data/translator/pretrain_smoke_contrastive
+device: cuda
+seed: 42
+
+# Full fine-tune — necessary to actually teach Qwen a novel language
+# (LoRA updates only attention projections, not embeddings or FFN,
+# which is insufficient for learning an unseen token distribution).
+use_lora: false
+
+# EMA disabled for smoke
+use_ema: false
+
+# No chat format — just interleaved next-token prediction on mixed corpus
+use_chat_format: false
