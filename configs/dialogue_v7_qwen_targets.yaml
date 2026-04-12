@@ -1,0 +1,56 @@
+# Dialogue game — v7 decoder, Qwen-latent target embeddings.
+#
+# Identical hyperparameters to the known-working dialogue_v7_phase1.yaml
+# baseline (98.3% best accuracy on SBERT targets), but pointed at the
+# Qwen 2.5 0.5B hidden-state store (896-dim) instead of the SBERT
+# store (384-dim).
+#
+# embedding_dim is NOT set here — _auto_detect_embedding_dim() reads
+# it from the store's metadata.json at launch time.  Pointing this
+# config at a different store (384-dim SBERT, 896-dim Qwen, any
+# future dim) requires zero config changes.
+
+decoder_path: data/models/v7/vae_decoder.pt
+spm_path: data/models/v7/spm.model
+output_dir: data/dialogue_game_qwen_v2
+embedding_store_dir: data/embeddings_qwen_v2_clean
+
+# Dialogue structure
+num_turns: 4
+context_hidden_dim: 512
+context_heads: 4
+
+# Diffusion z-generator
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_phrases: 3
+variable_phrases: true
+target_phrases: 2.0
+length_weight: 0.5
+z_diversity_weight: 0.3
+
+# Loss
+per_turn_weight: 0.0
+ce_weight: 0.1
+independent_turns: false
+
+# Phase 2 VRAM management (local 3060 Ti 8 GB)
+phase2_vram_budget_mb: 1500
+phase2_min_chunk: 4
+
+# Training
+batch_size: 115
+gradient_accumulation_steps: 1
+steps: 4000
+gru_lr: 0.00005
+receiver_lr: 0.0003
+num_distractors: 15
+min_targets: 1
+max_targets: 1
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100
