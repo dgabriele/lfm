@@ -1052,6 +1052,7 @@ class DialogueGame(nn.Module):
         #    states (carries gradients through the decoder → z-gen)
         sub_idx_dev = sub_idx.to(device)
         per_sample_log_prob = torch.zeros(K, device=device)
+        total_tokens = torch.zeros(K, device=device)
         for t in turns:
             S = t.hidden.size(1)  # Phase 2 seq length (trimmed)
             sub_hidden = t.hidden[sub_idx_dev]
@@ -1061,7 +1062,12 @@ class DialogueGame(nn.Module):
             gathered = log_p.gather(2, tok_ids.unsqueeze(-1)).squeeze(-1)
             mask = t.mask[sub_idx_dev].float()  # already trimmed to S
             per_sample_log_prob = per_sample_log_prob + (gathered * mask).sum(dim=1)
+            total_tokens = total_tokens + mask.sum(dim=1)
             del logits, log_p
+
+        # Normalize by sequence length so the REINFORCE term doesn't
+        # scale with output length and swamp the discrimination loss.
+        per_sample_log_prob = per_sample_log_prob / total_tokens.clamp(min=1)
 
         # 5. REINFORCE: -(advantage * log_prob).mean()
         reinforce_loss = -(advantage * per_sample_log_prob).mean()
