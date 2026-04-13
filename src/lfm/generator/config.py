@@ -88,22 +88,14 @@ class GeneratorConfig(LFMBaseConfig):
     # Phonemes within a word are joined by this string; words are always
     # separated by spaces.
     #
-    # Default "-".  Empirical rationale (see scripts/diagnose_separator_mode.py):
-    #
-    #   * "|" gives perfect phoneme-token alignment but triggers Qwen's
-    #     code/table-mode attention (next-token mass shifts to pipe, 40%
-    #     code-token mass), defeating the architectural-leverage argument
-    #     for a language-shaped alphabet.
-    #   * "-" preserves language-mode processing (next-token mass stays in
-    #     the prose regime, 0% code-token mass) at the cost of ~24% of
-    #     phonemes fragmenting (those where Qwen has a "-X" merge).
-    #     Fragmentation is still deterministic per phoneme, so Qwen can
-    #     learn the mapping during FT.
-    #
-    # The language-mode cost is strictly worse than the fragmentation cost:
-    # deterministic fragmentation can be learned; mode shift breaks the
-    # whole premise of using Qwen's language pathways for interpretation.
-    phoneme_word_boundary: str = "-"
+    # Default "" (pure concatenation).  Used with the concat-gated 29-phoneme
+    # alphabet (scripts/design_phoneme_alphabet_multi.py with SEPARATOR=""),
+    # which guarantees ~95% mean phoneme preservation under direct adjacency
+    # without any delimiter.  A Neuroglot "word" looks like a natural word
+    # (``arkarkark``) rather than a hyphenated compound, which keeps Qwen's
+    # English hyphen-token embedding untouched during fine-tuning — important
+    # because English uses hyphens meaningfully ("state-of-the-art").
+    phoneme_word_boundary: str = ""
     phoneme_word_size: int = 3
     """How many phonemes per Neuroglot 'word' in the decoded surface form."""
 

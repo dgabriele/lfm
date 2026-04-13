@@ -77,7 +77,7 @@ PER_FIRST_CHAR_CAP = 6
 # language-mode processing while pipes shift Qwen into code-mode.  The
 # chain test must exercise this exact format, because merge failures like
 # "-v" → single token only surface under hyphen-joined chains.
-SEPARATOR = "-"
+SEPARATOR = ""
 # Per-phoneme chain stability threshold: fraction of random-chain probes
 # where the phoneme preserves its own token identity in Qwen's tokenization.
 CHAIN_STABILITY_THRESHOLD = 0.80
