@@ -111,6 +111,7 @@ class VastAIProvider(CloudProvider):
         region: str,
         ssh_key_name: str,
         name: str | None = None,
+        image: str = "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
     ) -> Instance:
         """Launch a Vast.ai instance.
 
@@ -155,7 +156,7 @@ class VastAIProvider(CloudProvider):
 
         # Create instance
         data = self._put(f"/asks/{offer_id}/", {
-            "image": "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
+            "image": image,
             "label": name,
             "disk": 50,
             "runtype": "ssh_direct",

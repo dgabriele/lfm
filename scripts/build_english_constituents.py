@@ -42,10 +42,37 @@ MIN_ALPHA_FRAC = 0.75
 # bare punctuation they wrap.
 _WIKI_AT = re.compile(r"@([\-.,])@")
 _MULTI_SPACE = re.compile(r"\s+")
+_HTML_TAG = re.compile(r"<[^>]+>")
+_BRACKET_NOISE = re.compile(r"\[[^\[\]]*\]")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_STRAY = re.compile(r"[_\\{}]")
+_UNKNOWN_TOK = re.compile(r"\bunknown\b", re.IGNORECASE)
+_NON_LATIN = re.compile(r"[^\x00-\x7F\u00A0-\u024F]")
+_CHAR_MAP = {
+    "\u2013": "-", "\u2014": "-", "\u2212": "-",
+    "\u2018": "'", "\u2019": "'", "\u02bc": "'",
+    "\u201c": '"', "\u201d": '"',
+}
 
 
 def clean_wikitext(s: str) -> str:
+    """Apply a full normalization pass.  Returns '' if the line should be
+    dropped entirely (e.g. contains the parser's 'unknown' placeholder).
+    """
+    import html
+    s = _HTML_TAG.sub("", s)
+    s = html.unescape(s)
+    s = _BRACKET_NOISE.sub("", s)
     s = _WIKI_AT.sub(r"\1", s)
+    for src, tgt in _CHAR_MAP.items():
+        if src in s:
+            s = s.replace(src, tgt)
+    s = _CONTROL.sub(" ", s)
+    s = _STRAY.sub(" ", s)
+    if _UNKNOWN_TOK.search(s):
+        return ""
+    if _NON_LATIN.search(s):
+        return ""
     s = _MULTI_SPACE.sub(" ", s)
     return s.strip()
 

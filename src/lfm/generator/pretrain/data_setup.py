@@ -10,7 +10,11 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, random_split
 
-from lfm.data.corpus import MultilingualCorpusDataset
+from lfm.data.corpus import (
+    MultilingualCorpusDataset,
+    pad_collate,
+    pad_collate_indexed,
+)
 
 from .checkpoint import _file_hash
 from .config import VAEPretrainConfig
@@ -423,16 +427,16 @@ def _load_and_preprocess_phoneme_h5(
         )
         train_loader = DataLoader(
             train_dataset, batch_size=cfg.batch_size,
-            sampler=_sampler, drop_last=True,
+            sampler=_sampler, drop_last=True, collate_fn=pad_collate,
         )
     else:
         train_loader = DataLoader(
             train_dataset, batch_size=cfg.batch_size,
-            shuffle=True, drop_last=True,
+            shuffle=True, drop_last=True, collate_fn=pad_collate,
         )
     val_loader = DataLoader(
         val_dataset, batch_size=cfg.batch_size,
-        shuffle=False, drop_last=False,
+        shuffle=False, drop_last=False, collate_fn=pad_collate,
     )
 
     return PreprocessedData(
@@ -666,6 +670,7 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
             batch_size=cfg.batch_size,
             shuffle=True,
             drop_last=True,  # InfoNCE needs consistent batch sizes
+            collate_fn=pad_collate_indexed,
         )
     else:
         _boost_thresh = getattr(cfg, "length_boost_threshold", 0)
@@ -683,6 +688,7 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
                 batch_size=cfg.batch_size,
                 sampler=_sampler,
                 drop_last=True,
+                collate_fn=pad_collate,
             )
         else:
             train_loader = DataLoader(
@@ -690,6 +696,7 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
                 batch_size=cfg.batch_size,
                 shuffle=True,
                 drop_last=True,
+                collate_fn=pad_collate,
             )
 
     interleaved_loader = None
@@ -734,6 +741,7 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
         batch_size=cfg.batch_size,
         shuffle=False,
         drop_last=False,
+        collate_fn=pad_collate,
     )
 
     return PreprocessedData(

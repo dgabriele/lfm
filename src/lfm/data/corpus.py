@@ -13,6 +13,39 @@ from torch.utils.data import Dataset
 from lfm.data.config import DataConfig
 
 
+def pad_collate(
+    batch: list[tuple[Tensor, int]],
+) -> tuple[Tensor, Tensor]:
+    """Pad a batch of variable-length ``(tokens, length)`` pairs.
+
+    Pads each sequence on the right with 0 to the batch's max length and
+    stacks into a ``(B, max_len)`` ``int64`` tensor (decoder indexing
+    requires long).  Lengths are returned as a ``(B,)`` long tensor.
+    """
+    max_len = max(length for _, length in batch)
+    padded = torch.zeros(len(batch), max_len, dtype=torch.long)
+    lengths = torch.empty(len(batch), dtype=torch.long)
+    for i, (tokens, length) in enumerate(batch):
+        padded[i, :length] = tokens[:length].to(torch.long)
+        lengths[i] = length
+    return padded, lengths
+
+
+def pad_collate_indexed(
+    batch: list[tuple[Tensor, int, int]],
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Same as :func:`pad_collate` but also returns the original index."""
+    max_len = max(length for _, length, _ in batch)
+    padded = torch.zeros(len(batch), max_len, dtype=torch.long)
+    lengths = torch.empty(len(batch), dtype=torch.long)
+    indices = torch.empty(len(batch), dtype=torch.long)
+    for i, (tokens, length, orig_idx) in enumerate(batch):
+        padded[i, :length] = tokens[:length].to(torch.long)
+        lengths[i] = length
+        indices[i] = orig_idx
+    return padded, lengths, indices
+
+
 class TextCorpusDataset(Dataset[tuple[Tensor, int, str, int]]):
     """Pre-tokenized text with metadata for collation.
 
@@ -59,15 +92,15 @@ class MultilingualCorpusDataset(Dataset[tuple[Tensor, int]]):
         word_boundary_ids: set[int] | None = None,
     ) -> None:
         self.max_seq_len = max_seq_len
+        # Store variable-length int32 tensors.  Padding to max-in-batch is
+        # done by ``pad_collate`` on the DataLoader — pre-padding here
+        # would allocate N × max_seq_len × 8 bytes (tens of GB for large
+        # corpora).  int32 is sufficient for vocabularies ≤ 2**31.
         self.data: list[tuple[Tensor, int]] = []
         for ids in token_ids:
             if len(ids) >= max_seq_len:
-                # Truncate at last word boundary before the limit.
-                # Word boundaries are tokens whose sentencepiece piece
-                # starts with ▁ (space prefix).
                 trunc = ids[: max_seq_len - 1]
                 if word_boundary_ids is not None:
-                    # Find last word-boundary token position
                     for j in range(len(trunc) - 1, -1, -1):
                         if trunc[j] in word_boundary_ids:
                             trunc = trunc[:j]
@@ -75,9 +108,8 @@ class MultilingualCorpusDataset(Dataset[tuple[Tensor, int]]):
                 ids = trunc
             ids_with_eos = ids + [eos_id]
             length = len(ids_with_eos)
-            padded = ids_with_eos + [0] * (max_seq_len - length)
             self.data.append(
-                (torch.tensor(padded, dtype=torch.long), length)
+                (torch.tensor(ids_with_eos, dtype=torch.int32), length)
             )
 
     def __len__(self) -> int:
