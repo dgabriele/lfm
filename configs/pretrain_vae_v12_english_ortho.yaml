@@ -55,7 +55,7 @@ use_vq: false
 # 3090 around step 300.  Per-step batch cut 25% (240 vs 320) to keep
 # headroom for occasional long (length-boosted) batches, with grad_accum=2
 # giving a larger effective batch (480) for stable updates.
-batch_size: 240
+batch_size: 200
 gradient_accumulation_steps: 2
 use_amp: true
 lr: 0.0005

@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from lfm.embeddings.store import EmbeddingStore
+from lfm.utils.oom import shrink_on_oom
 
 logger = logging.getLogger(__name__)
 
@@ -256,36 +257,16 @@ class AgentTrainer:
                 nn.utils.clip_grad_norm_(self._all_params, cfg.max_grad_norm)
                 self.optimizer.step()
             except RuntimeError as e:
-                if "out of memory" not in str(e):
-                    raise
-                # Free Python references to any partial forward state, then
-                # release cached blocks.  This alone isn't enough when the
-                # allocator has fragmented — expandable_segments helps at
-                # launch time but won't save us mid-run.
+                # Free Python references to any partial forward state so
+                # the OOM handler can reclaim their buffers.
                 if "out" in locals():
                     del out
                 if "loss" in locals():
                     del loss
-                self.optimizer.zero_grad(set_to_none=True)
-                torch.cuda.empty_cache()
-                # Bail out rather than loop forever once we hit the floor.
-                # Dynamic shrinkage only helps if the problem is batch size,
-                # not fragmentation — if it's fragmentation, reducing batch
-                # won't help and we should surface the failure clearly.
-                min_bs = 4
-                if self._batch_size <= min_bs:
-                    raise RuntimeError(
-                        f"OOM at step {step} even at batch_size={min_bs}. "
-                        "This usually indicates allocator fragmentation; "
-                        "set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-                        "and/or reduce max sequence length."
-                    ) from e
-                new_bs = max(min_bs, int(self._batch_size * 0.9))
-                logger.warning(
-                    "OOM at step %d — reducing batch_size %d → %d",
-                    step, self._batch_size, new_bs,
+                self._batch_size = shrink_on_oom(
+                    e, self._batch_size,
+                    label=f"at step {step}", optimizer=self.optimizer,
                 )
-                self._batch_size = new_bs
                 continue
             # Release cached allocator blocks to prevent reserved VRAM
             # from growing unboundedly over long training runs.

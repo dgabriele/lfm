@@ -28,6 +28,7 @@ from .validation import (
     run_contrastive_alignment_diagnostic,
     run_validation,
 )
+from lfm.utils.oom import shrink_on_oom
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,14 @@ class VAEPretrainer:
         z_stats_initialized = False
         z_stats_momentum = 0.01
 
+        # Dynamic per-step batch cap.  Starts at the configured batch
+        # size; :func:`shrink_on_oom` reduces it on CUDA OOM so rare
+        # long-sequence batches (length-boosted sampling) don't kill
+        # the run.  Incoming batches are sliced to this cap before
+        # forward, so the DataLoader can keep its original batch size
+        # and only the problematic tail is trimmed.
+        _batch_cap = cfg.batch_size
+
         for epoch in range(start_epoch, cfg.num_epochs):
             # -- Word dropout annealing --
             if cfg.word_dropout > 0 and cfg.word_dropout_anneal_epochs > 0:
@@ -328,92 +337,114 @@ class VAEPretrainer:
                     batch_tokens, batch_lengths = batch_data
                     batch_tokens = batch_tokens.to(device)
                     batch_lengths = torch.as_tensor(batch_lengths, device=device)
+
+                # Apply dynamic per-step cap (may have shrunk on past OOM).
+                if batch_tokens.size(0) > _batch_cap:
+                    batch_tokens = batch_tokens[:_batch_cap]
+                    batch_lengths = batch_lengths[:_batch_cap]
+                    if batch_indices is not None:
+                        batch_indices = batch_indices[:_batch_cap]
+                    if enc_tokens_override is not None:
+                        enc_tokens_override = enc_tokens_override[:_batch_cap]
+                        enc_lengths_override = enc_lengths_override[:_batch_cap]
                 b = batch_tokens.size(0)
 
-                with torch.amp.autocast(
-                    device_type=device.type, enabled=cfg.use_amp,
-                ):
-                    _do_kl = cfg.kl_weight > 0 or cfg.kl_beta > 0
-                    (ce_loss, kl_loss, kl_per_dim_train,
-                     z_batch, dec_hidden, mu_batch, logvar_batch,
-                     vq_loss_batch, bow_loss) = (
-                        _vae_forward(
-                            batch_tokens,
-                            batch_lengths,
-                            bos_id=bos_id,
-                            full_vocab=full_vocab,
-                            kl_free_bits=cfg.kl_free_bits,
-                            compute_kl=_do_kl,
-                            scheduled_sampling_p=ss_p,
-                            _word_dropout_p=wd_p,
-                            _phonetic_sim=phonetic_sim_matrix,
-                            _phonetic_smoothing=cfg.phonetic_label_smoothing,
-                            encoder_tokens=enc_tokens_override,
-                            encoder_lengths=enc_lengths_override,
-                            **modules,
+                try:
+                    with torch.amp.autocast(
+                        device_type=device.type, enabled=cfg.use_amp,
+                    ):
+                        _do_kl = cfg.kl_weight > 0 or cfg.kl_beta > 0
+                        (ce_loss, kl_loss, kl_per_dim_train,
+                         z_batch, dec_hidden, mu_batch, logvar_batch,
+                         vq_loss_batch, bow_loss) = (
+                            _vae_forward(
+                                batch_tokens,
+                                batch_lengths,
+                                bos_id=bos_id,
+                                full_vocab=full_vocab,
+                                kl_free_bits=cfg.kl_free_bits,
+                                compute_kl=_do_kl,
+                                scheduled_sampling_p=ss_p,
+                                _word_dropout_p=wd_p,
+                                _phonetic_sim=phonetic_sim_matrix,
+                                _phonetic_smoothing=cfg.phonetic_label_smoothing,
+                                encoder_tokens=enc_tokens_override,
+                                encoder_lengths=enc_lengths_override,
+                                **modules,
+                            )
                         )
-                    )
 
-                    # Track z distribution for latent calibration
-                    with torch.no_grad():
-                        batch_z_mean = z_batch.mean(dim=0)
-                        batch_z_std = z_batch.std(dim=0).clamp(min=1e-6)
-                        if not z_stats_initialized:
-                            z_running_mean.copy_(batch_z_mean)
-                            z_running_std.copy_(batch_z_std)
-                            z_stats_initialized = True
+                        # Track z distribution for latent calibration
+                        with torch.no_grad():
+                            batch_z_mean = z_batch.mean(dim=0)
+                            batch_z_std = z_batch.std(dim=0).clamp(min=1e-6)
+                            if not z_stats_initialized:
+                                z_running_mean.copy_(batch_z_mean)
+                                z_running_std.copy_(batch_z_std)
+                                z_stats_initialized = True
+                            else:
+                                z_running_mean.lerp_(batch_z_mean, z_stats_momentum)
+                                z_running_std.lerp_(batch_z_std, z_stats_momentum)
+
+                        # KL: cyclical annealing
+                        if _do_kl:
+                            cycle_pos = global_step % max(cfg.kl_warmup_steps, 1)
+                            kl_scale = (
+                                min(cycle_pos / max(cfg.kl_warmup_steps, 1), 1.0)
+                                * cfg.kl_weight
+                            )
                         else:
-                            z_running_mean.lerp_(batch_z_mean, z_stats_momentum)
-                            z_running_std.lerp_(batch_z_std, z_stats_momentum)
+                            kl_scale = 0.0
 
-                    # KL: cyclical annealing
-                    if _do_kl:
-                        cycle_pos = global_step % max(cfg.kl_warmup_steps, 1)
-                        kl_scale = (
-                            min(cycle_pos / max(cfg.kl_warmup_steps, 1), 1.0)
-                            * cfg.kl_weight
+                        z_var_loss = torch.tensor(0.0, device=device)
+                        if cfg.z_var_weight > 0 and b >= 4:
+                            z_var = z_batch.var(dim=0)
+                            z_var_loss = (z_var - cfg.z_var_target).pow(2).mean()
+
+                        dip_loss = torch.tensor(0.0, device=device)
+                        if cfg.dip_weight > 0 and b >= 4:
+                            dip_loss = _dip_covariance_loss(z_batch)
+
+                        cl_loss = torch.tensor(0.0, device=device)
+                        if _use_contrastive and batch_indices is not None:
+                            batch_embs = corpus_embeddings[batch_indices].to(device)
+                            cl_loss = _info_nce_loss(
+                                z_batch, batch_embs, cfg.contrastive_temperature,
+                                projection=contrastive_proj,
+                            )
+
+                        kl_beta_loss = torch.tensor(0.0, device=device)
+                        if cfg.kl_beta > 0:
+                            raw_kl = 0.5 * (mu_batch.pow(2) + logvar_batch.exp() - 1 - logvar_batch)
+                            kl_beta_loss = raw_kl.sum(dim=-1).mean()
+
+                        vq_loss = (
+                            vq_loss_batch if vq_loss_batch is not None
+                            else torch.tensor(0.0, device=device)
                         )
-                    else:
-                        kl_scale = 0.0
 
-                    z_var_loss = torch.tensor(0.0, device=device)
-                    if cfg.z_var_weight > 0 and b >= 4:
-                        z_var = z_batch.var(dim=0)
-                        z_var_loss = (z_var - cfg.z_var_target).pow(2).mean()
+                        loss = (
+                            ce_loss + kl_scale * kl_loss
+                            + vq_loss
+                            + cfg.z_var_weight * z_var_loss
+                            + cfg.dip_weight * dip_loss
+                            + cfg.contrastive_weight * cl_loss
+                            + cfg.kl_beta * kl_beta_loss
+                            + cfg.bow_weight * bow_loss
+                        ) / accum
 
-                    dip_loss = torch.tensor(0.0, device=device)
-                    if cfg.dip_weight > 0 and b >= 4:
-                        dip_loss = _dip_covariance_loss(z_batch)
-
-                    cl_loss = torch.tensor(0.0, device=device)
-                    if _use_contrastive and batch_indices is not None:
-                        batch_embs = corpus_embeddings[batch_indices].to(device)
-                        cl_loss = _info_nce_loss(
-                            z_batch, batch_embs, cfg.contrastive_temperature,
-                            projection=contrastive_proj,
-                        )
-
-                    kl_beta_loss = torch.tensor(0.0, device=device)
-                    if cfg.kl_beta > 0:
-                        raw_kl = 0.5 * (mu_batch.pow(2) + logvar_batch.exp() - 1 - logvar_batch)
-                        kl_beta_loss = raw_kl.sum(dim=-1).mean()
-
-                    vq_loss = (
-                        vq_loss_batch if vq_loss_batch is not None
-                        else torch.tensor(0.0, device=device)
+                    scaler.scale(loss).backward()
+                except RuntimeError as e:
+                    # OOM recovery: shrink the per-step batch cap so
+                    # subsequent batches are sliced down.  ``shrink_on_oom``
+                    # clears the CUDA cache and zero-grads the optimizer.
+                    # On repeated OOM we eventually hit the floor and
+                    # surface the error.
+                    _batch_cap = shrink_on_oom(
+                        e, _batch_cap,
+                        label=f"step {global_step}", optimizer=optimizer,
                     )
-
-                    loss = (
-                        ce_loss + kl_scale * kl_loss
-                        + vq_loss
-                        + cfg.z_var_weight * z_var_loss
-                        + cfg.dip_weight * dip_loss
-                        + cfg.contrastive_weight * cl_loss
-                        + cfg.kl_beta * kl_beta_loss
-                        + cfg.bow_weight * bow_loss
-                    ) / accum
-
-                scaler.scale(loss).backward()
+                    continue
 
                 # -- Adversarial step --
                 adv_loss_val = 0.0
