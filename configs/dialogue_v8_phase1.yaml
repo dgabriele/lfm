@@ -1,0 +1,59 @@
+# Dialogue game — v8 phoneme decoder (29-phoneme Latin alphabet, no-sep).
+#
+# Structurally mirrors configs/dialogue_v7_phase1.yaml.  The only swaps
+# are the decoder/tokenizer paths and the phoneme alphabet metadata.
+# Architecture, training schedule, and loss weights are unchanged so we
+# can A/B compare the two decoders' downstream behavior cleanly.
+
+# Decoder + tokenizer (post-pretrain artifacts).  spm_path here is the
+# phoneme alphabet JSON (the corpus / dialogue / agent code accepts both
+# .model and .json via the VAE's tokenizer abstraction).
+decoder_path: data/models/v8/vae_decoder.pt
+spm_path: data/phoneme_alphabet_multi.json
+output_dir: data/dialogue_game_v8
+embedding_store_dir: data/embeddings
+
+# Generator backend selector — routes through the registry to
+# PhonemeVAEGenerator instead of the default MultilingualVAEGenerator.
+# (Read by FacultyConfig → GeneratorConfig.)
+generator_name: phoneme_vae
+
+# Dialogue structure (same as v7)
+num_turns: 4
+context_hidden_dim: 512
+context_heads: 4
+
+# Diffusion z-generator (same as v7)
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_phrases: 3
+variable_phrases: true
+target_phrases: 2.0
+length_weight: 0.5
+z_diversity_weight: 0.3
+
+# Loss
+per_turn_weight: 0.0
+ce_weight: 0.1
+independent_turns: false
+
+# Phase 2 VRAM management
+phase2_vram_budget_mb: 1500
+phase2_min_chunk: 4
+
+# Training
+batch_size: 115
+gradient_accumulation_steps: 1
+steps: 4000
+gru_lr: 0.00005
+receiver_lr: 0.0003
+num_distractors: 15
+min_targets: 1
+max_targets: 1
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100

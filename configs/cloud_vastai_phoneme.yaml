@@ -21,6 +21,10 @@ cloud:
     - data/datasets/constituents-12lang-phonemes/samples.h5
     - data/datasets/constituents-12lang-phonemes/mapping.json
     - data/datasets/constituents-12lang-phonemes/manifest.yaml
+    # Resume from step-~10000 checkpoint (rescued from the failed v3 run).
+    # Trainer auto-detects vae_resume.pt in output_path's parent dir.
+    - data/models/phoneme_v1/vae_resume.pt
+    - data/models/phoneme_v1/training_history.json
 
   remote_workdir: /workspace/lfm
   remote_output_dir: /workspace/lfm/data/models/phoneme_v1

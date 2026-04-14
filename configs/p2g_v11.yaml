@@ -1,0 +1,24 @@
+# p2g v11 — bigger model, larger data, more epochs, label smoothing.
+# Input: all CMU pronunciations of every word seen ≥1 time in corpus.
+
+train_h5: data/datasets/p2g_v11/train.h5
+val_h5:   data/datasets/p2g_v11/val.h5
+output_dir: data/models/p2g_v11
+
+encoder_layers: 5         # v10: 3
+decoder_layers: 5         # v10: 3
+decoder_dim: 384          # v10: 256
+decoder_heads: 6
+max_ipa_len: 24
+max_spelling_len: 24
+dropout: 0.1
+
+batch_size: 256
+lr: 0.0005
+lr_min: 0.00005
+num_epochs: 80            # v10: 40
+weight_decay: 0.01
+label_smoothing: 0.05
+sample_every_epochs: 10
+seed: 42
+device: cuda

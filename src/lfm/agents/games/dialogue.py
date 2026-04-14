@@ -181,19 +181,30 @@ class DialogueGameConfig(LFMBaseConfig):
     device: str = "cuda"
     seed: int = 42
 
+    # Generator backend selector — registry name (e.g. "multilingual_vae"
+    # for v7 IPA decoder, "phoneme_vae" for v8/v9 phoneme-alphabet decoders).
+    generator_name: str = "multilingual_vae"
+    # Override default vocab_size when using a phoneme-alphabet generator
+    # (v8=30, v9=5001, v9.5=30819).  None → use GeneratorConfig default (8000).
+    generator_vocab_size: int | None = None
+
     def build_faculty_config(self) -> FacultyConfig:
         """Construct the LanguageFaculty config."""
+        gen_kwargs = dict(
+            name=self.generator_name,
+            pretrained_decoder_path=self.decoder_path,
+            spm_model_path=self.spm_path,
+            freeze_decoder=True,
+            max_output_len=self.max_output_len,
+            num_statements=1,
+            vq_codebook_path=self.vq_codebook_path,
+            num_memory_tokens=self.num_memory_tokens,
+        )
+        if self.generator_vocab_size is not None:
+            gen_kwargs["vocab_size"] = self.generator_vocab_size
         return FacultyConfig(
             dim=self.embedding_dim,
-            generator=GeneratorConfig(
-                pretrained_decoder_path=self.decoder_path,
-                spm_model_path=self.spm_path,
-                freeze_decoder=True,
-                max_output_len=self.max_output_len,
-                num_statements=1,
-                vq_codebook_path=self.vq_codebook_path,
-                num_memory_tokens=self.num_memory_tokens,
-            ),
+            generator=GeneratorConfig(**gen_kwargs),
         )
 
 
@@ -460,11 +471,12 @@ class DialogueGame(nn.Module):
                 ),
                 device=config.device,
             )
-            self._roundtrip_sp = spm_lib.SentencePieceProcessor(
-                model_file=config.spm_path,
-            )
+            # Tokenizer is owned by the VAE generator (gen) — see
+            # render_surface().  We no longer need a separate SPM handle
+            # here; supports v7 (SPM) and v8 (phoneme) uniformly.
+            self._roundtrip_sp = None
             self._roundtrip_eos = gen.eos_id
-            self._roundtrip_vocab_size = self._roundtrip_sp.vocab_size()
+            self._roundtrip_vocab_size = gen.config.vocab_size
             logger.info(
                 "Qwen round-trip reader loaded: %s (weight=%.3f, K=%d)",
                 config.qwen_roundtrip_model,
@@ -1154,23 +1166,20 @@ class DialogueGame(nn.Module):
         #    Romanization maps IPA → ASCII so Qwen's BPE tokenizer
         #    produces familiar subword splits rather than byte-fallback
         #    on rare Unicode IPA codepoints.
-        from lfm.translator.romanize import romanize_iso
-
-        sp = self._roundtrip_sp
-        eos = self._roundtrip_eos
-        vsize = self._roundtrip_vocab_size
+        # VAE-agnostic surface render.  v7 IPA decoder needs romanization
+        # for Qwen consumption (output_mode="romanized_iso"); v8 phoneme
+        # decoder ignores output_mode (its surface is already final).
         docs: list[str] = []
         for i in sub_idx:
             parts: list[str] = []
             for t in turns:
-                ids = [
-                    tok.item()
-                    for tok, m in zip(t.tokens_cpu[i], t.gen_mask_cpu[i])
-                    if m and tok.item() != eos and tok.item() < vsize
-                ]
-                ipa = sp.decode(ids).strip()
-                if ipa:
-                    parts.append(romanize_iso(ipa))
+                row_tokens = t.tokens_cpu[i].unsqueeze(0)
+                row_mask = t.gen_mask_cpu[i].unsqueeze(0)
+                surface = self.gen.render_surface(
+                    row_tokens, mask=row_mask, output_mode="romanized_iso",
+                )[0]
+                if surface:
+                    parts.append(surface)
             docs.append(" ".join(parts))
 
         # 2. Qwen reads the Neuroglot (no grad) → hidden states

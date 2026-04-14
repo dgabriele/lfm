@@ -1,0 +1,38 @@
+# v10 p2g VAE — word-level IPA → English spelling, non-autoregressive.
+#
+# Purpose: a z-bottlenecked decoder whose KL-smoothed manifold lets
+# pseudoword IPA decode to nearby real-word spellings (orthography, not
+# orthagrufi).  Word-level keeps the decode non-AR and the output short.
+
+train_h5: data/datasets/p2g_v10/train.h5
+val_h5:   data/datasets/p2g_v10/val.h5
+output_dir: data/models/p2g_v10
+
+# Architecture
+latent_dim: 32
+encoder_dim: 256
+encoder_layers: 3
+encoder_heads: 4
+decoder_dim: 256
+decoder_layers: 3
+decoder_heads: 4
+max_ipa_len: 24
+max_spelling_len: 24
+dropout: 0.1
+
+# Loss schedule
+kl_weight_max: 0.01
+kl_warmup_steps: 2000
+kl_free_bits: 0.05
+length_weight: 0.5
+
+# Training
+batch_size: 256
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 40
+weight_decay: 0.01
+log_every: 50
+sample_every_epochs: 1
+seed: 42
+device: cuda

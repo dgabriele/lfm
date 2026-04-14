@@ -185,7 +185,8 @@ def _parse_language_worker(
 
     labels = EXTRACT_LABELS
     results: list[tuple[str, str, str, int]] = []
-    batch_size = 64
+    import os
+    batch_size = int(os.environ.get("LFM_PARSER_BATCH_SIZE", "64"))
     processed = 0
 
     for i in range(0, len(texts), batch_size):
@@ -208,7 +209,8 @@ def _parse_language_worker(
             )
 
         processed += len(batch)
-        if processed % 500 == 0:
+        # Log every ~5K sentences (was: %500, didn't align with batch=256).
+        if processed // 5000 != (processed - len(batch)) // 5000:
             import sys
 
             sys.stderr.write(

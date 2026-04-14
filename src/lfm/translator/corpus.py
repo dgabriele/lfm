@@ -93,7 +93,12 @@ class BaseCorpusGenerator(abc.ABC):
         vocab_size: int,
         eos_id: int,
     ) -> list[str]:
-        """Decode a batch of token tensors to formatted IPA strings.
+        """Legacy SPM-direct decode path.  Kept for backward compat.
+
+        For new code (and both v7/v8 VAEs uniformly), prefer
+        :meth:`decode_tokens_to_surface`, which routes through the VAE's
+        ``render_surface`` method and handles alphabet-specific
+        formatting in the VAE class where it belongs.
 
         Args:
             tokens: ``(B, S)`` token IDs.
@@ -115,6 +120,33 @@ class BaseCorpusGenerator(abc.ABC):
             ipa = sp.decode(ids).strip()
             results.append(format_ipa(ipa, mode) if ipa else "")
         return results
+
+    def decode_tokens_to_surface(
+        self,
+        tokens: Tensor,
+        mask: Tensor,
+        game,
+    ) -> list[str]:
+        """VAE-agnostic decode: route through the game's VAE.
+
+        Works identically for v7 (IPA/SPM) and v8 (phoneme Latin)
+        decoders.  Alphabet-specific formatting happens inside
+        ``game.gen.render_surface``; this method just passes through
+        the corpus-level ``output_mode`` config.
+
+        Args:
+            tokens: ``(B, S)`` token IDs.
+            mask: ``(B, S)`` boolean mask (True = valid).
+            game: The agent game containing ``game.gen`` (a
+                ``BaseVAEGenerator`` subclass).
+
+        Returns:
+            List of ``B`` surface strings, one per batch row.
+        """
+        mode = getattr(self.config, "output_mode", None)
+        return game.gen.render_surface(
+            tokens, mask=mask, output_mode=mode,
+        )
 
     def _cleanup_gpu(self) -> None:
         """Free GPU memory after generation."""
@@ -213,8 +245,10 @@ class ExpressionCorpusGenerator(BaseCorpusGenerator):
                             z_seq, z_weights,
                         )
 
-                        lines = self.decode_tokens_to_ipa(
-                            tokens, mask, sp, vocab_size, eos_id,
+                        # VAE-agnostic surface render (works for v7 IPA
+                        # and v8 phoneme uniformly).
+                        lines = self.decode_tokens_to_surface(
+                            tokens, mask, game,
                         )
                         for line in lines:
                             if not line:

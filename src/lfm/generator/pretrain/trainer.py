@@ -557,8 +557,8 @@ class VAEPretrainer:
                         )
                     extra_str = (" " + " ".join(extra_parts)) if extra_parts else ""
                     logger.info(
-                        "  [%d/%d] step=%d CE=%.3f %.0f tok/s %.0fMB%s",
-                        i + 1, num_batches, global_step, ce_loss.item(),
+                        "  ep%d batch=%d/%d step=%d CE=%.3f %.0f tok/s %.0fMB%s",
+                        epoch, i + 1, num_batches, global_step, ce_loss.item(),
                         tokens_per_sec, mem_mb, extra_str,
                     )
                     if cfg.use_vq:

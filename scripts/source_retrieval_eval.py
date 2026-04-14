@@ -40,26 +40,42 @@ import logging
 import sys
 
 import numpy as np
-import sentencepiece as spm_lib
 import torch
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 
-def load_dialogue_game(checkpoint_path, decoder_path, spm_path, embedding_store, device):
+def load_dialogue_game(
+    checkpoint_path,
+    decoder_path,
+    spm_path,
+    embedding_store,
+    device,
+    generator_name="multilingual_vae",
+    generator_vocab_size=None,
+):
     from lfm.agents.games.dialogue import DialogueGame, DialogueGameConfig
+    from lfm.embeddings.store import EmbeddingStore
     from lfm.faculty.model import LanguageFaculty
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    # Auto-detect embedding_dim from the store (Qwen=896, SBERT=384, etc.)
+    probe = EmbeddingStore(embedding_store)
+    probe.load()
+    embedding_dim = probe.embedding_dim
+    del probe
     game_cfg = DialogueGameConfig(
         decoder_path=decoder_path,
         spm_path=spm_path,
         embedding_store_dir=embedding_store,
+        embedding_dim=embedding_dim,
         max_phrases=ckpt.get("max_phrases", 3),
         num_turns=ckpt.get("num_turns", 4),
         device=str(device),
         llm_loss_weight=0.0,
+        generator_name=generator_name,
+        generator_vocab_size=generator_vocab_size,
     )
     faculty = LanguageFaculty(game_cfg.build_faculty_config()).to(device)
     game = DialogueGame(game_cfg, faculty).to(device)
@@ -68,9 +84,8 @@ def load_dialogue_game(checkpoint_path, decoder_path, spm_path, embedding_store,
     return game
 
 
-def generate_documents(game, embeddings, sp, vocab_size, eos_id):
+def generate_documents(game, embeddings, vocab_size, eos_id):
     from lfm.agents.decode import rerun_decoder_multiphrase_no_grad
-    from lfm.translator.romanize import romanize_iso
 
     batch = embeddings.size(0)
     num_turns = game.config.num_turns
@@ -95,15 +110,15 @@ def generate_documents(game, embeddings, sp, vocab_size, eos_id):
         summary = game._summarize_turn(hidden, trimmed_mask)
         context_summaries.append(summary)
 
-        for j in range(batch):
-            ids = [
-                t.item() for t, m in zip(tokens[j], gen_mask[j])
-                if m and t.item() != eos_id and t.item() < vocab_size
-            ]
-            ipa = sp.decode(ids).strip()
-            rom = romanize_iso(ipa).strip() if ipa else ""
-            if rom:
-                documents[j].append(rom)
+        # VAE-agnostic surface rendering — handles v7 (IPA → romanized)
+        # and v8/v9 (phoneme alphabet → space/concat) the same way.
+        rendered = game.gen.render_surface(
+            tokens, mask=gen_mask, eos_id=eos_id, output_mode="romanized",
+        )
+        for j, text in enumerate(rendered):
+            text = text.strip()
+            if text:
+                documents[j].append(text)
         del hidden, tokens, gen_mask, bounds, z_seq, z_weights
     return documents
 
@@ -151,8 +166,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--decoder-path", default="data/models/v7/vae_decoder.pt")
-    parser.add_argument("--spm-path", default="data/models/v7/spm.model")
+    parser.add_argument("--spm-path", default="data/models/v7/spm.model",
+                        help="SentencePiece .model (v7) or phoneme alphabet .json (v8/v9)")
     parser.add_argument("--embedding-store", default="data/embeddings")
+    parser.add_argument("--generator-name", default="multilingual_vae",
+                        choices=["multilingual_vae", "phoneme_vae"],
+                        help="VAE generator backend; phoneme_vae for v8/v9 decoders")
+    parser.add_argument("--generator-vocab-size", type=int, default=None,
+                        help="Override vocab_size (v8=30, v9=5001, v9.5=30819)")
     parser.add_argument("--qwen-model", default="Qwen/Qwen2.5-0.5B-Instruct")
     parser.add_argument("--sbert-model", default="sentence-transformers/all-MiniLM-L6-v2")
     parser.add_argument("--num-samples", type=int, default=20)
@@ -196,15 +217,16 @@ def main():
     game = load_dialogue_game(
         args.checkpoint, args.decoder_path, args.spm_path,
         args.embedding_store, device,
+        generator_name=args.generator_name,
+        generator_vocab_size=args.generator_vocab_size,
     )
-    sp = spm_lib.SentencePieceProcessor()
-    sp.Load(args.spm_path)
-    vocab_size = sp.GetPieceSize()
+    # vocab_size + EOS from the generator (VAE-backend-agnostic).
+    vocab_size = game.gen._vocab_size  # noqa: SLF001
     eos_id = game.gen.eos_id
 
     logger.info("Generating Neuroglot documents...")
     with torch.no_grad():
-        doc_turns = generate_documents(game, embeddings, sp, vocab_size, eos_id)
+        doc_turns = generate_documents(game, embeddings, vocab_size, eos_id)
     docs = [join_turns(d) for d in doc_turns]
 
     del game

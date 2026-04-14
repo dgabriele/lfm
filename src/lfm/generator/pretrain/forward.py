@@ -7,6 +7,61 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 
+def _unlikelihood_ngram_loss(
+    logits: Tensor,
+    targets: Tensor,
+    mask: Tensor,
+    window: int = 4,
+) -> Tensor:
+    """Welleck-style unlikelihood loss for unigram reduplication.
+
+    For each decoder position ``t``, penalize assigning high probability
+    to any token that appeared in the previous ``window`` target
+    positions — unless that token IS the true next target (in which case
+    the repetition is legitimate and penalizing it would be wrong).
+
+    Directly targets the ``nd nd nd`` degenerate-tail failure mode: a
+    decoder that wants to repeat its last token gets pushed away from
+    that choice, while EOS (a unique terminator that doesn't match any
+    recent content token) is unaffected.
+
+    Args:
+        logits: ``(B, S, V)`` decoder logits.
+        targets: ``(B, S)`` ground-truth token ids.
+        mask: ``(B, S)`` boolean mask of valid positions.
+        window: How many previous positions to treat as "recent".
+
+    Returns:
+        Scalar unlikelihood loss averaged over (position × offset) pairs
+        that are both masked-valid and non-self-repeating in the target.
+    """
+    B, S, V = logits.shape
+    # logsumexp per position: avoids materializing full (B, S, V) log_probs
+    # tensor (which for v9.5 with V=30K is a ~2.6 GB float32 plus gradient
+    # duplicate — blows past 24GB VRAM).  Compute log P(token) on-demand
+    # via gather(logits) - logsumexp(logits).
+    lse = torch.logsumexp(logits, dim=-1)              # (B, S)
+    total = logits.new_tensor(0.0)
+    denom = logits.new_tensor(0.0)
+    for offset in range(1, window + 1):
+        if offset >= S:
+            break
+        prev_tok = targets[:, :-offset]                # (B, S-offset)
+        logit_prev = logits[:, offset:, :].gather(
+            -1, prev_tok.unsqueeze(-1),
+        ).squeeze(-1)                                  # (B, S-offset)
+        logp_prev = logit_prev - lse[:, offset:]       # (B, S-offset)
+        prob_prev = logp_prev.exp().clamp(max=0.999999)
+        ul = -(1.0 - prob_prev).log()                  # (B, S-offset)
+        true_tgt = targets[:, offset:]                 # (B, S-offset)
+        applicable = (
+            mask[:, offset:].float() * (prev_tok != true_tgt).float()
+        )
+        total = total + (ul * applicable).sum()
+        denom = denom + applicable.sum()
+    return total / denom.clamp(min=1.0)
+
+
 def _info_nce_loss(
     z: Tensor,
     embeddings: Tensor,
@@ -295,6 +350,20 @@ def _vae_forward(
         ce = F.cross_entropy(flat_logits, flat_targets, reduction="none").reshape(b, seq_len)
 
     ce_loss = (ce * src_mask.float()).sum() / src_mask.float().sum().clamp(min=1)
+
+    # Unlikelihood regularization against unigram reduplication (Welleck 2020).
+    # Cheap teacher-forced loss that suppresses the decoder's tendency to
+    # fall into `tok tok tok ...` local attractors when content is
+    # exhausted.  Additive to CE, weight-controlled; EOS is automatically
+    # safe since it's a unique terminator that doesn't appear in recent
+    # content windows.
+    _ul_weight = getattr(_cfg, "unlikelihood_weight", 0.0) if _cfg is not None else 0.0
+    if _ul_weight > 0:
+        _ul_window = getattr(_cfg, "unlikelihood_window", 4)
+        ul_loss = _unlikelihood_ngram_loss(
+            logits, batch_tokens, src_mask, window=_ul_window,
+        )
+        ce_loss = ce_loss + _ul_weight * ul_loss
 
     # Bag-of-words loss: order-invariant token presence check.
     # Mean of per-position log-softmax gives a pooled prediction over

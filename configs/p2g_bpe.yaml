@@ -1,0 +1,25 @@
+# BPE-output p2g — IPA → Qwen-BPE sub-word sequence.
+# Same architecture/budget as char seq2seq for fair comparison.
+
+train_h5: data/datasets/p2g_bpe/train.h5
+val_h5:   data/datasets/p2g_bpe/val.h5
+bpe_vocab_path: data/datasets/p2g_bpe/bpe_vocab.json
+output_dir: data/models/p2g_bpe
+
+encoder_layers: 3
+decoder_layers: 3
+d_model: 256
+nhead: 4
+max_ipa_len: 24
+max_bpe_len: 8         # p99=4 BPE units per word; 8 is safe
+dropout: 0.1
+
+batch_size: 256
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 40
+weight_decay: 0.01
+label_smoothing: 0.1     # mitigate sparse-class problem in 13K-vocab softmax
+sample_every_epochs: 5
+seed: 42
+device: cuda

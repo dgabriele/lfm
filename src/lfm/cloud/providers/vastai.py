@@ -71,17 +71,30 @@ class VastAIProvider(CloudProvider):
 
     def _find_offer(
         self, gpu_name: str, min_gpu_ram: int = 0,
+        min_reliability: float = 0.95,
+        min_download_mbps: float = 300.0,
     ) -> dict | None:
-        """Search for the cheapest available offer matching criteria."""
+        """Search for the cheapest offer meeting reliability + bandwidth
+        thresholds.
+
+        The cheapest-by-default offers on Vast.ai often come from hosts
+        with GPU-passthrough bugs or tiny uplinks that stall multi-GB
+        docker pulls before SSH is reachable.  We require ``reliability2
+        ≥ min_reliability`` (Vast.ai's 0-1 stability score) and
+        ``inet_down ≥ min_download_mbps`` so the image actually pulls
+        in-budget, then pick the cheapest among qualifying offers.
+        """
         query = {
             "verified": {"eq": True},
             "rentable": {"eq": True},
             "rented": {"eq": False},
             "num_gpus": {"eq": 1},
             "gpu_name": {"eq": gpu_name},
+            "reliability2": {"gte": min_reliability},
+            "inet_down": {"gte": min_download_mbps},
             "type": "on-demand",
             "order": [["dph_total", "asc"]],
-            "limit": 10,
+            "limit": 20,
         }
         if min_gpu_ram > 0:
             query["gpu_ram"] = {"gte": min_gpu_ram * 1024}  # MB
@@ -202,6 +215,21 @@ class VastAIProvider(CloudProvider):
     def terminate(self, instance_id: str) -> None:
         logger.info("Destroying instance %s", instance_id)
         self._delete(f"/instances/{instance_id}/")
+
+    def stop(self, instance_id: str) -> None:
+        """Pause the instance (keeps storage, halts GPU billing).
+
+        Non-destructive: the container and its mounted volumes remain on
+        the host.  Call ``start`` to resume.  Prefer this over
+        ``terminate`` whenever the user may want to resume work later.
+        """
+        logger.info("Stopping instance %s (non-destructive)", instance_id)
+        self._put(f"/instances/{instance_id}/", {"state": "stopped"})
+
+    def start(self, instance_id: str) -> None:
+        """Resume a previously stopped instance."""
+        logger.info("Starting instance %s", instance_id)
+        self._put(f"/instances/{instance_id}/", {"state": "running"})
 
     def list_instances(self) -> list[Instance]:
         data = self._get("/instances/")

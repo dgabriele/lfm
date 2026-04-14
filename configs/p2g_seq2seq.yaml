@@ -1,0 +1,24 @@
+# Deterministic seq2seq baseline — head-to-head with p2g_v10.yaml VAE.
+# Same training budget (40 epochs, bs 256) and similar capacity (d_model 256,
+# 3+3 layers).  Differences: full cross-attention, no z-bottleneck, no KL.
+
+train_h5: data/datasets/p2g_v10/train.h5
+val_h5:   data/datasets/p2g_v10/val.h5
+output_dir: data/models/p2g_seq2seq
+
+encoder_layers: 3
+decoder_layers: 3
+decoder_dim: 256
+decoder_heads: 4
+max_ipa_len: 24
+max_spelling_len: 24
+dropout: 0.1
+
+batch_size: 256
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 40
+weight_decay: 0.01
+sample_every_epochs: 5
+seed: 42
+device: cuda

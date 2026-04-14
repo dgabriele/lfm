@@ -382,36 +382,37 @@ class AgentTrainer:
                     hard_ratio * 100,
                 )
 
-                # Print IPA samples every checkpoint
+                # Print surface samples every checkpoint.  VAE-agnostic:
+                # game.gen.render_surface picks the right alphabet for v7
+                # (IPA, hyphenated) or v8 (phoneme, native).
                 if "_tokens" in out and step % cfg.checkpoint_every == 0:
                     try:
-                        sp = game.gen._tokenizer._sp if hasattr(game.gen, '_tokenizer') else None
-                        if sp is None:
-                            import sentencepiece as _spm
-                            sp = _spm.SentencePieceProcessor(model_file=cfg.spm_path)
-                        vocab_size = sp.vocab_size()
-                        eos_id = vocab_size + 1
-
-                        from lfm.translator.romanize import syllable_hyphenate
-
                         if "_dialogue_tokens" in out:
-                            # Dialogue game: print one full monologue
                             logger.info("  --- monologue (sample 0) ---")
                             for turn_i, (toks, mask) in enumerate(
                                 zip(out["_dialogue_tokens"], out["_dialogue_masks"]),
                             ):
-                                ids = [t.item() for t, m in zip(toks[0], mask[0])
-                                       if m and t.item() != eos_id and t.item() < vocab_size]
-                                ipa = syllable_hyphenate(sp.decode(ids))
-                                logger.info("  [T%d] %s  (%d tok)", turn_i, ipa[:120], len(ids))
+                                surface = game.gen.render_surface(
+                                    toks[0:1], mask=mask[0:1],
+                                    output_mode="hyphenated_ipa",
+                                )[0]
+                                logger.info(
+                                    "  [T%d] %s  (%d tok)",
+                                    turn_i, surface[:120], int(mask[0].sum().item()),
+                                )
                         else:
                             toks = out["_tokens"]
                             mask = out["_gen_mask"]
-                            for j in range(min(5, toks.size(0))):
-                                ids = [t.item() for t, m in zip(toks[j], mask[j])
-                                       if m and t.item() != eos_id and t.item() < vocab_size]
-                                ipa = syllable_hyphenate(sp.decode(ids))
-                                logger.info("  sample[%d]: %s  (%d tok)", j, ipa[:100], len(ids))
+                            n = min(5, toks.size(0))
+                            surfaces = game.gen.render_surface(
+                                toks[:n], mask=mask[:n],
+                                output_mode="hyphenated_ipa",
+                            )
+                            for j, surface in enumerate(surfaces):
+                                logger.info(
+                                    "  sample[%d]: %s  (%d tok)",
+                                    j, surface[:100], int(mask[j].sum().item()),
+                                )
                     except Exception:
                         pass
 

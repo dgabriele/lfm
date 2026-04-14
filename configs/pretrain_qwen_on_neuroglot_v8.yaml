@@ -1,0 +1,23 @@
+# Self-supervised Qwen pretraining on v8 Neuroglot corpus.
+#
+# Mirrors configs/pretrain_dialogue_v7.yaml; only the corpus path
+# changes.  Qwen learns the v8 phoneme-based Neuroglot via next-token
+# prediction; downstream the model is fine-tuned (or evaluated zero-shot)
+# to interpret Neuroglot expressions in English.
+
+model_name: Qwen/Qwen2.5-0.5B
+corpus_path: data/translator/dialogue_corpus_v8.txt
+output_dir: data/translator_dialogue_v8
+
+epochs: 3
+lr: 5e-5
+batch_size: 1
+max_len: 512
+gradient_accumulation_steps: 128
+use_amp: true
+warmup_fraction: 0.1
+max_grad_norm: 1.0
+checkpoint_fraction: 0.1
+
+device: cuda
+seed: 42

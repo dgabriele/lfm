@@ -24,6 +24,7 @@ from lfm.faculty.config import FacultyConfig
 # fire before we call ``create()``.
 _CONCRETE_MODULES: list[str] = [
     "lfm.generator.multilingual_vae",
+    "lfm.generator.phoneme_vae",
     "lfm.data.loaders.leipzig",
 ]
 

@@ -1,0 +1,64 @@
+# Dialogue game on v8 phoneme decoder with CLIP-style contrastive scoring.
+#
+# Combines:
+#   - v8 decoder paths (PhonemeVAEGenerator backend, 29-phoneme alphabet)
+#     from configs/dialogue_v8_phase1.yaml
+#   - Contrastive InfoNCE scoring on Qwen-latent targets (no learned receiver)
+#     from configs/dialogue_v7_qwen_contrastive.yaml
+#
+# Topology emerges from the contrastive loss itself (similar Qwen-latent
+# targets become hard negatives → similar messages for similar targets).
+# A/B comparable to dialogue_v7_qwen_contrastive on training dynamics + acc.
+
+decoder_path: data/models/v8/vae_decoder.pt
+spm_path: data/phoneme_alphabet_multi.json
+output_dir: data/dialogue_game_v8_qwen_contrastive
+embedding_store_dir: data/embeddings_qwen_v2_clean
+
+# Route through the registry to PhonemeVAEGenerator
+generator_name: phoneme_vae
+
+# Dialogue structure
+num_turns: 4
+context_hidden_dim: 512
+context_heads: 4
+
+# Diffusion z-generator
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_phrases: 3
+variable_phrases: true
+target_phrases: 2.0
+length_weight: 0.5
+z_diversity_weight: 0.3
+
+# CLIP-style contrastive scoring (replaces learned receiver)
+contrastive_scoring: true
+contrastive_temperature: 0.07
+
+# Other losses off — contrastive is the only signal
+per_turn_weight: 0.0
+ce_weight: 0.0
+topo_weight: 0.0
+independent_turns: false
+
+# Phase 2 VRAM management (light without receiver)
+phase2_vram_budget_mb: 1500
+phase2_min_chunk: 4
+
+# Training
+batch_size: 256
+gradient_accumulation_steps: 1
+steps: 6000
+gru_lr: 0.00005
+receiver_lr: 0.0003
+num_distractors: 15
+min_targets: 1
+max_targets: 1
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100

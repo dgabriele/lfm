@@ -186,6 +186,81 @@ class BaseVAEGenerator(GeneratorModule):
         """
         ...
 
+    def render_surface(
+        self,
+        token_ids: Tensor,
+        mask: Tensor | None = None,
+        eos_id: int | None = None,
+        output_mode: str | None = None,
+    ) -> list[str]:
+        """Decode batch of token sequences to final surface strings.
+
+        The "surface" is what downstream consumers (corpus generators,
+        LLM fine-tuning) see.  This method handles mask filtering, EOS
+        truncation, and BOS/PAD removal in a VAE-agnostic way, then
+        delegates alphabet-specific formatting to
+        :meth:`decode_to_text`.  Subclasses should override this only
+        if they need extra alphabet-specific post-formatting beyond
+        what their ``decode_to_text`` already produces (e.g. the
+        multilingual IPA variant applies syllable hyphenation).
+
+        Args:
+            token_ids: ``(B, S)`` integer tensor.
+            mask: Optional ``(B, S)`` boolean mask (True = valid).  If
+                provided, masked-out positions are dropped before decode.
+            eos_id: Optional EOS token id.  If provided, each row is
+                truncated at its first occurrence of this id.  Defaults
+                to ``self.eos_id``.
+
+        Returns:
+            output_mode: Optional hint to the subclass for alphabet-specific
+                post-formatting (e.g. ``"hyphenated_ipa"`` for the IPA
+                variant).  Ignored by subclasses whose surface has no
+                secondary formatting options (e.g. the phoneme variant).
+
+        Returns:
+            List of ``B`` surface strings, one per batch row.
+        """
+        if eos_id is None:
+            eos_id = getattr(self, "eos_id", None)
+        bos_id = getattr(self, "bos_id", None)
+
+        ids_list = token_ids.detach().cpu().tolist()
+        if mask is not None:
+            mask_list = mask.detach().cpu().tolist()
+        else:
+            mask_list = [[True] * len(row) for row in ids_list]
+
+        cleaned: list[list[int]] = []
+        for row_ids, row_mask in zip(ids_list, mask_list):
+            clean: list[int] = []
+            for tid, m in zip(row_ids, row_mask):
+                if not m:
+                    continue
+                if eos_id is not None and tid == eos_id:
+                    break
+                if bos_id is not None and tid == bos_id:
+                    continue
+                clean.append(int(tid))
+            cleaned.append(clean)
+
+        # Pass through the subclass's tokenizer.  We re-pad to a regular
+        # tensor so downstream decode_to_text can accept a tensor input,
+        # matching its existing contract.
+        if not cleaned:
+            return []
+        max_len = max(len(r) for r in cleaned)
+        pad_val = 0  # any valid vocab id — tokenizer filters BOS/EOS/pad
+        padded = torch.tensor(
+            [r + [pad_val] * (max_len - len(r)) for r in cleaned],
+            dtype=token_ids.dtype, device=token_ids.device,
+        )
+        texts = self.decode_to_text(padded)
+        # Truncate padded tail from each string if decode_to_text didn't
+        # already strip it — tokenizers vary; by convention they should
+        # ignore pad tokens, but we do a final strip() for safety.
+        return [t.strip() for t in texts]
+
     # ------------------------------------------------------------------
     # Latent space calibration
     # ------------------------------------------------------------------
@@ -239,6 +314,27 @@ class BaseVAEGenerator(GeneratorModule):
         z_norm = z_centered.norm(dim=-1, keepdim=True).clamp(min=1e-6)
         z_scaled = z_centered * (target_norm / z_norm)
         return z_scaled + self._z_mean
+
+    def calibrate_z_per_dim(self, z: Tensor) -> Tensor:
+        """Per-dimension calibration: match z's marginal mean AND std per dim.
+
+        Stronger than :meth:`calibrate_z` — not only gets the magnitude
+        right but also the per-dim marginal distribution.  Useful when
+        the norm-only path leaves the decoder off-distribution (e.g. the
+        repetitive-tail failure mode where the decoder runs out of
+        content and degenerates to a local attractor instead of emitting
+        EOS).
+
+        Batch-level operation: requires batch size ≥ 2 for a meaningful
+        observed std.  Single-sample inference falls back to norm
+        calibration.
+        """
+        if z.size(0) < 2:
+            return self.calibrate_z(z)
+        obs_mean = z.mean(dim=0, keepdim=True)
+        obs_std = z.std(dim=0, keepdim=True).clamp(min=1e-6)
+        z_standardized = (z - obs_mean) / obs_std
+        return z_standardized * self._z_std + self._z_mean
 
     # ------------------------------------------------------------------
     # Lazy initialization
@@ -510,7 +606,13 @@ class BaseVAEGenerator(GeneratorModule):
         if self._vq_codebook is not None:
             z = self._quantize_z(z)
         elif self._z_stats_initialized:
-            z = self.calibrate_z(z)
+            mode = getattr(self.config, "z_calibration", "norm")
+            if mode == "per_dim":
+                z = self.calibrate_z_per_dim(z)
+            elif mode == "none":
+                pass
+            else:  # "norm" (default)
+                z = self.calibrate_z(z)
 
         memory = self.latent_to_decoder(z).reshape(
             z.size(0), self._num_memory_tokens, -1,

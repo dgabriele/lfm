@@ -1,0 +1,99 @@
+# ==========================================================================
+# v9.5 VAE decoder pretraining — English constituents (NEW run).
+#
+# Key upgrades over earlier v9.5 sentence-level run:
+#   - Corpus: English constituent-decomposed text (11.66M constituents from
+#     wikitext-style diverse English paragraphs), matching v8's v8 scale.
+#   - Unlikelihood n-gram loss: penalizes unigram reduplication directly
+#     in the teacher-forced objective (Welleck et al., 2020).  Targets
+#     the `nd nd nd...` degenerate-tail failure mode observed on v8.
+#   - Scheduled sampling: after epoch 2, feeds the decoder its own
+#     predictions with small probability, training the decoder to
+#     recover from drift rather than degenerate.
+# ==========================================================================
+
+dataset_path: /workspace/lfm/data/datasets/english-v9-5
+corpus_loader: phoneme_h5
+corpus_loader_config:
+  h5_path: /workspace/lfm/data/datasets/english-v9-5/samples.h5
+
+spm_model_path: /workspace/lfm/data/phoneme_alphabet_v9_5.json
+spm_vocab_size: 30819
+syllable_aligned_bpe: false
+
+# Architecture (mirrors v7/v8 — 16M-param decoder; larger embedding table)
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 0  # auto-scale from corpus; keep full length so decoder learns natural EOS
+encoder_pooling: mean
+
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+kl_beta: 0.0
+
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+use_vq: false
+
+batch_size: 64            # 128 still OOM'd at 22GB — large V=30K makes logits grads expensive
+gradient_accumulation_steps: 4   # effective batch still 256
+use_amp: true
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 3
+
+z_var_weight: 0.01
+z_var_target: 0.03
+z_var_floor: 0.01
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 0
+dip_weight: 0.1
+bow_weight: 0.0
+
+length_boost_threshold: 30
+length_boost_factor: 5.0
+
+# Anti-reduplication regularization (NEW)
+unlikelihood_weight: 0.15     # Welleck unlikelihood for unigram repeats
+unlikelihood_window: 4
+
+# Scheduled sampling: trains decoder to recover from its own drift.
+# Kept modest to avoid destabilizing early optimization.
+scheduled_sampling_target: 0.15
+scheduled_sampling_start_epoch: 1
+scheduled_sampling_warmup_epochs: 2
+
+diagnostic_every: 2000
+checkpoint_every_steps: 2000
+val_fraction: 0.02
+seed: 42
+device: cuda
+output_path: /workspace/lfm/data/models/v9_5/vae_decoder.pt
+
+topo_weight: 0.0
+topo_sample_pairs: 32
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true
+constituent_context: false

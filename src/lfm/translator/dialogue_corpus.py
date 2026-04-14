@@ -156,9 +156,12 @@ class DialogueCorpusGenerator(BaseCorpusGenerator):
             summary = game._summarize_turn(hidden, trimmed_mask)
             context_summaries.append(summary)
 
-            # Decode tokens to IPA
-            ipa_strings = self.decode_tokens_to_ipa(
-                tokens, gen_mask, sp, vocab_size, eos_id,
+            # Decode tokens to surface (VAE-agnostic: works for v7 IPA and
+            # v8 phoneme decoders identically).  sp/vocab_size/eos_id args
+            # are only used by the legacy SPM path; the game's VAE handles
+            # the rest.
+            ipa_strings = self.decode_tokens_to_surface(
+                tokens, gen_mask, game,
             )
 
             for i, ipa in enumerate(ipa_strings):

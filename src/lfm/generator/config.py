@@ -84,6 +84,17 @@ class GeneratorConfig(LFMBaseConfig):
     spm_model_path: str | None = None
     freeze_decoder: bool = True
 
+    # z-calibration mode applied before the frozen decoder at inference.
+    # - "norm"    (default): batch-centered + rescale to target L2 norm,
+    #             shift to stored z_mean.  Preserves per-sample direction.
+    # - "per_dim": per-dimension z-score using the batch stats, then
+    #             scale/shift to match the pretrained z_mean/z_std.
+    #             Stronger calibration — forces each dim's marginal to
+    #             match training.  Good diagnostic when "norm" calibration
+    #             leaves the decoder drifting (e.g. repetitive tail).
+    # - "none":   no calibration (legacy / VQ / ablation path).
+    z_calibration: str = "norm"
+
     # Phoneme-VAE surface formatting.  Applies only to PhonemeVAEGenerator.
     # Phonemes within a word are joined by this string; words are always
     # separated by spaces.

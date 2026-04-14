@@ -13,7 +13,7 @@ corpus_loader_config:
 
 # --- Phoneme alphabet (repurposes spm_model_path slot) ---
 spm_model_path: /workspace/lfm/data/phoneme_alphabet_multi.json
-spm_vocab_size: 51   # 50 phonemes + 1 <ws> marker
+spm_vocab_size: 30   # 29 phonemes + 1 <ws> marker (no-sep alphabet v3)
 syllable_aligned_bpe: false
 
 # --- Model architecture (mirrors v7) ---

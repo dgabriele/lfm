@@ -39,19 +39,36 @@ class PhonemeTokenizer:
         self,
         alphabet_path: str | Path,
         word_boundary: str = "",
+        render_mode: str | None = None,
     ) -> None:
         with open(alphabet_path, encoding="utf-8") as f:
             alphabet = json.load(f)
         self.phonemes: list[str] = alphabet["phonemes"]
         self.num_phonemes: int = len(self.phonemes)
         # Reserve one id past the phoneme range for the word-boundary marker.
-        # vocab_size includes this reserved id, so decoder embedding/output
-        # layers are sized correctly.
-        self.word_boundary_id: int = self.num_phonemes  # id=50 for 50-phoneme alphabet
+        self.word_boundary_id: int = self.num_phonemes
         self.vocab_size: int = self.num_phonemes + 1
         # Within-word joiner for display (empty = concatenated words).
-        # Between words we always emit a literal space, regardless of this.
         self.word_boundary = word_boundary
+
+        # Per-token is_word_start flag (v9.5+).  None for older alphabets.
+        self.is_word_start: list[bool] | None = alphabet.get("is_word_start")
+
+        # Rendering mode determines surface format:
+        #   "phonemes_concat_words_space" (v8): phonemes within a word are
+        #     joined by self.word_boundary; words separated by spaces.
+        #   "qwen_subword_concat" (v9): each phoneme is a Ġ-prefixed Qwen
+        #     BPE token rendered bare; render = space-join all (every emit
+        #     starts a new word).
+        #   "qwen_subword_with_morphology" (v9.5): each phoneme has an
+        #     is_word_start flag.  Render: prepend ' ' if is_word_start
+        #     else concat directly.  Enables productive morphology
+        #     ([Ġtaste][ily] → "tastily").
+        self.render_mode: str = (
+            render_mode
+            or alphabet.get("render_mode")
+            or "phonemes_concat_words_space"
+        )
 
         self._phoneme_to_id: dict[str, int] = {
             p: i for i, p in enumerate(self.phonemes)
@@ -112,6 +129,26 @@ class PhonemeTokenizer:
             valid = [i for i in row if 0 <= i < self.vocab_size]
             if not valid:
                 out.append("")
+                continue
+
+            if (
+                self.render_mode == "qwen_subword_with_morphology"
+                and self.is_word_start is not None
+            ):
+                # v9.5: each emission either starts a new word (prepend
+                # space) or continues the previous word (no space).
+                # word_boundary tokens force an extra space (sentence break).
+                parts: list[str] = []
+                for i in valid:
+                    if i == self.word_boundary_id:
+                        parts.append(" ")
+                        continue
+                    ph = self.phonemes[i]
+                    if self.is_word_start[i] and parts:
+                        parts.append(" " + ph)
+                    else:
+                        parts.append(ph)
+                out.append("".join(parts).strip())
                 continue
 
             has_boundaries = any(i == self.word_boundary_id for i in valid)

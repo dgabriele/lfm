@@ -148,6 +148,15 @@ class VAEPretrainConfig(LFMBaseConfig):
     # correlation between dimensions without pushing mean toward zero.
     dip_weight: float = 0.1
 
+    # Unlikelihood regularization against reduplication (Welleck et al., 2020).
+    # At each decoder position, penalizes high probability for any token
+    # that appeared in the previous `unlikelihood_window` target positions
+    # unless that token IS the true next target.  Directly suppresses the
+    # degenerate-tail failure mode (decoder falling into `tok tok tok ...`
+    # local attractors) while leaving EOS emission intact.
+    unlikelihood_weight: float = 0.0   # enable at 0.1–0.2
+    unlikelihood_window: int = 4
+
     # Cosine LR decay: minimum LR at end of training.
     lr_min: float = 1e-4
 

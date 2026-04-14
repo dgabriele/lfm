@@ -1,0 +1,30 @@
+# Generate Neuroglot corpus from a trained v8 dialogue game.
+#
+# Mirrors the v7 dialogue corpus generator, but the surface comes from
+# the v8 phoneme decoder.  The corpus generator routes through
+# game.gen.render_surface, so output_mode="raw" preserves the phoneme
+# tokenizer's native surface format (no IPA-specific re-formatting).
+
+dialogue_checkpoint: data/dialogue_game_v8/best.pt
+decoder_path: data/models/v8/vae_decoder.pt
+spm_path: data/phoneme_alphabet_multi.json   # phoneme alphabet, not SPM
+embedding_store_dir: data/embeddings
+
+# v8 surface is already in the final form coming out of the tokenizer
+# (concatenated phonemes within words, spaces between words).  Setting
+# output_mode="raw" makes MultilingualVAEGenerator a no-op too, so this
+# config can be reused for either decoder.
+output_mode: raw
+
+language_tag: Neuroglot
+paragraph_format: false  # keep [T0] [T1] turn markers
+num_passes: 3
+batch_size: 256
+output_path: data/translator/dialogue_corpus_v8.txt
+
+# Auto-tokenize the corpus into HDF5 for downstream Qwen FT.
+tokenize_model: Qwen/Qwen2.5-0.5B
+tokenize_max_len: 512
+
+device: cuda
+seed: 42
