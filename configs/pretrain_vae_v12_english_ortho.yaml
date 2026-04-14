@@ -52,10 +52,10 @@ phonetic_label_smoothing: 0.0
 use_vq: false
 
 # Training — reduced from batch=320/grad_accum=1 after v12 OOM on 24GB
-# 3090 around step 300.  Effective batch is still 320 (160 × 2), but peak
-# GPU memory per step is halved, giving headroom for occasional long
-# (length-boosted) batches that pushed VRAM past 22GB.
-batch_size: 160
+# 3090 around step 300.  Per-step batch cut 25% (240 vs 320) to keep
+# headroom for occasional long (length-boosted) batches, with grad_accum=2
+# giving a larger effective batch (480) for stable updates.
+batch_size: 240
 gradient_accumulation_steps: 2
 use_amp: true
 lr: 0.0005
