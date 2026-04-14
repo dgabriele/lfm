@@ -51,9 +51,12 @@ phonetic_init_scale: 0.5
 phonetic_label_smoothing: 0.0
 use_vq: false
 
-# Training — same as v7_english (batch=320 + grad_accum=1 worked well)
-batch_size: 320
-gradient_accumulation_steps: 1
+# Training — reduced from batch=320/grad_accum=1 after v12 OOM on 24GB
+# 3090 around step 300.  Effective batch is still 320 (160 × 2), but peak
+# GPU memory per step is halved, giving headroom for occasional long
+# (length-boosted) batches that pushed VRAM past 22GB.
+batch_size: 160
+gradient_accumulation_steps: 2
 use_amp: true
 lr: 0.0005
 lr_min: 0.0001
