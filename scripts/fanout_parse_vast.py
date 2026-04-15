@@ -56,14 +56,15 @@ def vast_api() -> object:
     return VastAIProvider()
 
 
-def find_and_launch_3090(provider, label: str) -> tuple[int, str, int]:
-    """Find a reliable 3090 offer and launch an instance. Returns
-    (instance_id, ssh_host, ssh_port)."""
-    import requests
-    api_key = os.environ["VAST_API_KEY"]
-    base = "https://console.vast.ai/api/v0"
-    h = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+def _vast_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {os.environ['VAST_API_KEY']}",
+        "Content-Type": "application/json",
+    }
 
+
+def _find_offers(used_offer_ids: set[int], limit: int = 20) -> list[dict]:
+    import requests
     query = {
         "verified": {"eq": True},
         "rentable": {"eq": True},
@@ -76,44 +77,62 @@ def find_and_launch_3090(provider, label: str) -> tuple[int, str, int]:
         "geolocation": {"in": RELIABLE_COUNTRIES},
         "type": "on-demand",
         "order": [["dph_total", "asc"]],
-        "limit": 10,
+        "limit": limit,
     }
-    r = requests.post(f"{base}/bundles/", headers=h, json=query)
-    offers = r.json().get("offers", [])
+    r = requests.post(
+        "https://console.vast.ai/api/v0/bundles/",
+        headers=_vast_headers(), json=query,
+    )
+    return [o for o in r.json().get("offers", []) if o["id"] not in used_offer_ids]
+
+
+def launch_only(label: str, used_offers: set[int]) -> int:
+    """Fire a launch request and return the new instance id immediately.
+
+    Does NOT wait for "running" — the per-instance worker polls for
+    ssh_host/port on its own, in parallel.  Caller adds the selected
+    offer id to ``used_offers`` so siblings don't race on one host.
+    """
+    import requests
+    offers = _find_offers(used_offers)
     if not offers:
-        raise RuntimeError("No reliable RTX 3090 offers available")
-    # Skip offers we've already used (top-N picking, randomize within cheapest)
-    rng = random.Random()
-    rng.shuffle(offers[: min(4, len(offers))])
+        raise RuntimeError("no reliable 3090 offers available")
     offer = offers[0]
+    used_offers.add(offer["id"])
     logger.info(
         "[%s] launching offer %s ($%.3f/hr, %s)",
         label, offer["id"], offer["dph_total"], offer.get("geolocation"),
     )
     r = requests.put(
-        f"{base}/asks/{offer['id']}/", headers=h,
+        f"https://console.vast.ai/api/v0/asks/{offer['id']}/",
+        headers=_vast_headers(),
         json={
             "image": "nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04",
-            "label": label,
-            "disk": 30,
-            "runtype": "ssh_direct",
+            "label": label, "disk": 30, "runtype": "ssh_direct",
         },
     )
     d = r.json()
     if not d.get("success"):
         raise RuntimeError(f"launch failed: {d}")
-    iid = int(d["new_contract"])
-    # Poll for SSH info
-    for _ in range(120):
-        r = requests.get(f"{base}/instances/", headers=h)
+    return int(d["new_contract"])
+
+
+def get_ssh_info(iid: int, timeout: int = 1800) -> tuple[str, int]:
+    """Poll vast until ``iid`` has ssh_host and ssh_port populated."""
+    import requests
+    start = time.time()
+    while time.time() - start < timeout:
+        r = requests.get(
+            "https://console.vast.ai/api/v0/instances/", headers=_vast_headers(),
+        )
         for inst in r.json().get("instances", []):
             if int(inst["id"]) == iid:
                 host = inst.get("ssh_host")
                 port = inst.get("ssh_port")
-                if host and port and inst.get("actual_status") == "running":
-                    return iid, host, int(port)
+                if host and port:
+                    return host, int(port)
         time.sleep(15)
-    raise RuntimeError(f"[{label}] instance {iid} did not reach running within timeout")
+    raise TimeoutError(f"instance {iid} never got ssh host/port")
 
 
 def stop_instance(provider, iid: int) -> None:
@@ -205,12 +224,15 @@ python3.11 -c "import torch, stanza; print('ready, cuda=', torch.cuda.is_availab
 
 
 def run_worker(
-    iid: int, host: str, port: int, chunk_path: Path,
+    iid: int, chunk_path: Path,
     out_local: Path, label: str, provider,
 ) -> None:
     try:
+        logger.info("[%s] waiting for vast to assign ssh host/port", label)
+        host, port = get_ssh_info(iid)
+        logger.info("[%s] ssh info: %s:%s", label, host, port)
         wait_for_ssh(host, port, label)
-        logger.info("[%s] provisioning", label)
+        logger.info("[%s] provisioning (~5 min)", label)
         ssh_run(host, port, PROVISION, timeout=1800)
         logger.info("[%s] uploading %s", label, chunk_path.name)
         rsync_push(host, port, chunk_path, f"/workspace/lfm/{chunk_path.name}")
@@ -263,19 +285,24 @@ def main() -> None:
 
     provider = vast_api()
 
-    launched: list[tuple[int, str, int, Path, Path, str]] = []
+    # Fire all N launches up-front — each one is just an API call and
+    # takes ~2s.  Per-instance workers poll for their own ssh info and
+    # provision in parallel.
+    used_offers: set[int] = set()
+    launched: list[tuple[int, Path, Path, str]] = []
     for i, chunk in enumerate(chunk_paths):
-        iid, host, port = find_and_launch_3090(provider, f"v13-parse-{i}")
-        out = args.out_dir / f"constituents_v13-parse-{i}.txt"
-        launched.append((iid, host, port, chunk, out, f"v13-parse-{i}"))
-        time.sleep(5)  # stagger to avoid API rate limits
+        label = f"v13-parse-{i}"
+        iid = launch_only(label, used_offers)
+        out = args.out_dir / f"constituents_{label}.txt"
+        launched.append((iid, chunk, out, label))
+        time.sleep(3)
 
-    logger.info("%d instances launched", len(launched))
+    logger.info("%d instances launched (polling for ssh in parallel)", len(launched))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=N) as ex:
         futs = [
-            ex.submit(run_worker, iid, host, port, chunk, out, label, provider)
-            for iid, host, port, chunk, out, label in launched
+            ex.submit(run_worker, iid, chunk, out, label, provider)
+            for iid, chunk, out, label in launched
         ]
         for f in concurrent.futures.as_completed(futs):
             try:
@@ -287,7 +314,7 @@ def main() -> None:
     merged = args.out_dir / "constituents.txt"
     lines = 0
     with merged.open("w") as out_f:
-        for _, _, _, _, part, _ in launched:
+        for _, _, part, _ in launched:
             if part.exists():
                 for line in part.read_text().splitlines():
                     out_f.write(line + "\n")
