@@ -78,7 +78,7 @@ length_boost_factor: 15.0
 # Anti-reduplication regularization (carried forward from v7_english)
 unlikelihood_weight: 0.15
 unlikelihood_window: 4
-scheduled_sampling_target: 0.15
+scheduled_sampling_target: 0.075
 scheduled_sampling_start_epoch: 1
 scheduled_sampling_warmup_epochs: 2
 
