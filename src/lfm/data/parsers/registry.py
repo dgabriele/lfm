@@ -15,14 +15,18 @@ logger = logging.getLogger(__name__)
 # 16 training languages is more valuable than higher recall on 7.
 # Stanza dependency parsers cover 14/16 languages; swa and tgl
 # fall back to full-sentence-only.
-_BACKEND_PRIORITY: list[tuple[str, dict[str, str]]] = [
-    # Benepar (Berkeley Neural Parser) is ~5-10x faster than Stanza's
-    # CRF constituency parser on GPU while producing Penn Treebank-
-    # compatible trees.  For any language we have a benepar model for,
-    # prefer it.  Falls through to depcon for others.
-    ("benepar", BENEPAR_MODELS),
-    ("depcon", DEPCON_LANGS),
-]
+# If LFM_FORCE_STANZA=1, skip benepar (its model download is flaky on
+# fresh containers) and use Stanza's depcon everywhere.
+import os as _os
+if _os.environ.get("LFM_FORCE_STANZA") == "1":
+    _BACKEND_PRIORITY: list[tuple[str, dict[str, str]]] = [
+        ("depcon", DEPCON_LANGS),
+    ]
+else:
+    _BACKEND_PRIORITY = [
+        ("benepar", BENEPAR_MODELS),
+        ("depcon", DEPCON_LANGS),
+    ]
 
 
 def supported_languages() -> dict[str, str]:

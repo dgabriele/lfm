@@ -5,7 +5,16 @@ Invoked on each vast.ai instance by the fan-out orchestrator.  Reads
 one sentence per line, runs Stanza GPU constituency (2 GPU workers),
 wraps each constituent with phrase-type tags, and writes one wrapped
 constituent per line.
+
+The Stanza backend is selected explicitly here (bypassing the
+registry's benepar preference) because benepar's model download is
+fragile on fresh vast instances and Stanza GPU is proven good.
 """
+
+import os
+# Must be set BEFORE importing anything from lfm.data.parsers so the
+# registry's get_backend dispatches to stanza instead of benepar.
+os.environ.setdefault("LFM_FORCE_STANZA", "1")
 
 from __future__ import annotations
 
