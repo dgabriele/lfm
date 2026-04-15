@@ -398,10 +398,24 @@ def extract_constituents_parallel(
 
     use_gpu = torch.cuda.is_available()
     # 2 GPU workers (~2 GB each, fits 8 GB) or parallel CPU
-    if use_gpu:
-        actual_workers = min(2, len(work_items))
-    else:
-        actual_workers = min(num_workers, len(work_items))
+    target_workers = 2 if use_gpu else num_workers
+    # If we have fewer language buckets than target workers, split the
+    # largest bucket to get better utilization — mono-lingual input
+    # would otherwise pin us to 1 worker regardless of available CPUs/GPUs.
+    _CHUNK_THRESHOLD = 1000  # don't bother chunking tiny buckets
+    while (
+        len(work_items) < target_workers
+        and max(len(t) for _, t, _ in work_items) > _CHUNK_THRESHOLD
+    ):
+        i_max = max(
+            range(len(work_items)), key=lambda i: len(work_items[i][1]),
+        )
+        lang, texts, ml = work_items.pop(i_max)
+        indices = work_indices.pop(i_max)
+        half = len(texts) // 2
+        work_items.extend([(lang, texts[:half], ml), (lang, texts[half:], ml)])
+        work_indices.extend([indices[:half], indices[half:]])
+    actual_workers = min(target_workers, len(work_items))
 
     total_sents = sum(len(t) for _, t, _ in work_items)
     logger.info(

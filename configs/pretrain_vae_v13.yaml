@@ -1,0 +1,94 @@
+# ==========================================================================
+# v13 — English orthographic VAE, clean corpus + phrase-type wrappers.
+#
+# vs v12:
+#   - Multi-source corpus (Wikipedia + Gutenberg non-fiction + arXiv)
+#   - No quote-containing sentences, parentheticals extracted, contractions
+#     expanded, all lowercase, punctuation-token-free constituents.
+#   - Phrase-type special tokens ``<NP>...</NP>`` etc. declared in SPM.
+#   - SPM vocab 10k (from 8k).
+#   - SS target 0.075 from the start (v7-validated).
+# ==========================================================================
+
+dataset_path: /workspace/lfm/data/datasets/english-constituents-v13
+spm_model_path: /workspace/lfm/data/datasets/english-constituents-v13/spm.model
+spm_vocab_size: 10000
+syllable_aligned_bpe: false
+
+constituent_context: false
+
+# Architecture — unchanged from v12
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 0
+encoder_pooling: mean
+
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+kl_beta: 0.0
+
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+use_vq: false
+
+# Training
+batch_size: 200
+gradient_accumulation_steps: 2
+use_amp: true
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 5
+
+z_var_weight: 0.01
+z_var_target: 0.03
+z_var_floor: 0.01
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 0
+dip_weight: 0.1
+bow_weight: 0.0
+
+length_boost_threshold: 40
+length_boost_factor: 15.0
+
+# Anti-reduplication + exposure-bias regularization — SS capped at the
+# v7-validated 7.5% and reached quickly (warmup over 1 epoch) so ep1+
+# all train at steady 7.5%.
+unlikelihood_weight: 0.15
+unlikelihood_window: 4
+scheduled_sampling_target: 0.075
+scheduled_sampling_start_epoch: 0
+scheduled_sampling_warmup_epochs: 1
+
+diagnostic_every: 5000
+checkpoint_every_steps: 5000
+val_fraction: 0.05
+seed: 42
+device: cuda
+output_path: /workspace/lfm/data/models/v13_english_ortho/vae_decoder.pt
+
+topo_weight: 0.0
+topo_sample_pairs: 32
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true
