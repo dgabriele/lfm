@@ -107,7 +107,9 @@ def launch_only(label: str, used_offers: set[int]) -> int:
         f"https://console.vast.ai/api/v0/asks/{offer['id']}/",
         headers=_vast_headers(),
         json={
-            "image": "nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04",
+            # pytorch/pytorch is vast's default image and is pre-cached on
+            # most hosts — nvidia/cuda often stalls on slow/throttled pulls.
+            "image": "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
             "label": label, "disk": 30, "runtype": "ssh_direct",
         },
     )
@@ -163,7 +165,7 @@ def ssh_run(host: str, port: int, cmd: str, timeout: int = 600) -> str:
     return r.stdout
 
 
-def wait_for_ssh(host: str, port: int, label: str, timeout: int = 1200) -> None:
+def wait_for_ssh(host: str, port: int, label: str, timeout: int = 3600) -> None:
     logger.info("[%s] waiting for SSH on %s:%s", label, host, port)
     start = time.time()
     while time.time() - start < timeout:
@@ -219,6 +221,10 @@ cd lfm && git pull --ff-only 2>&1 | tail -1
 python3.11 -m pip install --quiet --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -1
 python3.11 -m pip install --quiet --no-cache-dir -e . 2>&1 | tail -1
 python3.11 -m pip install --quiet --no-cache-dir stanza h5py sentencepiece 2>&1 | tail -1
+# Pre-download Stanza English models to avoid first-use download failures
+# inside multiprocessing spawn workers (which silently crash if the
+# constituency model is missing).
+python3.11 -c "import stanza; stanza.download('en', processors='tokenize,pos,constituency', verbose=False)"
 python3.11 -c "import torch, stanza; print('ready, cuda=', torch.cuda.is_available())"
 """
 
