@@ -86,6 +86,52 @@ _PREPOSITIONS = frozenset({
     "including", "excluding",
 })
 
+# Determiners / articles / specifiers — illegal as VP head or as the
+# final token of any constituent.
+_DETERMINERS = frozenset({
+    "a", "an", "the", "this", "that", "these", "those", "my", "your",
+    "his", "her", "its", "our", "their", "some", "any", "no", "every",
+    "each", "either", "neither", "both", "much", "many", "few", "less",
+    "more", "most", "several", "such",
+})
+
+# Coordinating + frequent connectives — cannot end a constituent.
+_CONNECTIVES = frozenset({
+    "and", "or", "but", "nor", "yet", "so",
+})
+
+# Words that cannot end a well-formed constituent (would indicate the
+# parse is truncated).  Union of prepositions, determiners, connectives,
+# and a handful of common auxiliaries.
+_INVALID_TAIL = _PREPOSITIONS | _DETERMINERS | _CONNECTIVES | frozenset({
+    "is", "was", "were", "are", "be", "been", "being",
+    "has", "have", "had", "do", "does", "did",
+    "can", "could", "will", "would", "shall", "should",
+    "may", "might", "must", "to",
+})
+
+# Subordinators — valid openers for SBAR.
+_SUBORDINATORS = frozenset({
+    "that", "which", "who", "whom", "whose", "whoever", "whichever",
+    "because", "if", "when", "whenever", "while", "although", "though",
+    "since", "unless", "until", "before", "after", "as", "so", "whether",
+    "where", "wherever", "once", "whereas", "given",
+})
+
+# Stopwords used for content-word density check.  Any alphabetic token
+# not in this set counts as a content word.
+_STOPWORDS = (
+    _PREPOSITIONS | _DETERMINERS | _CONNECTIVES | _SUBORDINATORS
+    | frozenset({
+        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
+        "us", "them", "myself", "yourself", "himself", "herself",
+        "itself", "ourselves", "themselves", "is", "was", "were", "are",
+        "be", "been", "being", "am", "has", "have", "had", "do", "does",
+        "did", "can", "could", "will", "would", "shall", "should", "may",
+        "might", "must", "not", "n't", "than", "also",
+    })
+)
+
 # Multi-spaces or stray digits-only tokens would have been filtered
 # upstream but check inner content is non-trivial after trim.
 _MIN_INNER_CHARS = 10
@@ -117,16 +163,36 @@ def _clean(line: str) -> tuple[str | None, str]:
 
     # Structural validity checks on the parsed content itself.
     tokens = inner.split()
+    tokens_lc = [t.lower() for t in tokens]
     if len(tokens) < _MIN_PHRASE_TOKENS:
         return None, "too_few_tokens"
-    # A PP must start with a real English preposition, not a digit or
-    # random word — Stanza mislabels numeric sequences as PP.
-    if label == "PP" and tokens[0].lower() not in _PREPOSITIONS:
+    # A PP must start with a real English preposition — Stanza mislabels
+    # numeric sequences or fragments as PP.
+    if label == "PP" and tokens_lc[0] not in _PREPOSITIONS:
         return None, "pp_no_prep"
+    # A VP cannot start with a preposition or determiner.  Real VPs
+    # start with a verb or adverb; such openers indicate a mislabel.
+    if label == "VP" and tokens_lc[0] in _PREPOSITIONS | _DETERMINERS:
+        return None, "vp_bad_head"
+    # An SBAR should start with a subordinator.
+    if label == "SBAR" and tokens_lc[0] not in _SUBORDINATORS:
+        return None, "sbar_no_sub"
+    # No constituent should end with a function word (truncated parse).
+    if tokens_lc[-1] in _INVALID_TAIL:
+        return None, "dangling_func"
     # Drop digit-dominated constituents (sports scores, stats).
     n_alpha = sum(1 for t in tokens if any(c.isalpha() for c in t))
     if n_alpha / len(tokens) < _MIN_ALPHA_FRACTION:
         return None, "digit_heavy"
+    # Content-word density: fraction of alphabetic tokens that are
+    # *not* stopwords.  Too low means the constituent is pure
+    # filler/connector tissue with no actual semantic content.
+    n_content = sum(
+        1 for t in tokens_lc
+        if any(c.isalpha() for c in t) and t not in _STOPWORDS
+    )
+    if n_content / len(tokens) < 0.40:
+        return None, "low_content"
     return line, "kept"
 
 
