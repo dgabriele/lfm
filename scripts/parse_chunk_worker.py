@@ -11,12 +11,12 @@ registry's benepar preference) because benepar's model download is
 fragile on fresh vast instances and Stanza GPU is proven good.
 """
 
+from __future__ import annotations
+
 import os
 # Must be set BEFORE importing anything from lfm.data.parsers so the
 # registry's get_backend dispatches to stanza instead of benepar.
 os.environ.setdefault("LFM_FORCE_STANZA", "1")
-
-from __future__ import annotations
 
 import argparse
 import importlib.util
