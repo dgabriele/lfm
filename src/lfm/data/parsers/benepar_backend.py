@@ -1,6 +1,10 @@
 """Berkeley Neural Parser (benepar) constituency backend.
 
-Supports: ar, hu, ko, pl (languages with pretrained benepar models).
+Supports: ar, en, hu, ko, pl (languages with pretrained benepar models).
+
+Benepar is typically 5-10x faster than Stanza's CRF constituency parser
+on GPU and produces Penn Treebank-compatible bracketed trees (same
+labels).
 """
 
 from __future__ import annotations
@@ -11,11 +15,41 @@ from lfm.data.parsers.base import ConstituencyBackend, ParseTree
 
 logger = logging.getLogger(__name__)
 
+
+def _patch_t5_tokenizer() -> None:
+    """Compatibility shim for benepar 0.2 + transformers ≥ 5.
+
+    Benepar's underlying benepar_en3 parser is built on T5 and calls
+    ``T5Tokenizer.build_inputs_with_special_tokens``, which recent
+    transformers removed.  We restore the original behavior inline:
+    wrap ids with EOS, optionally concatenate a second sequence.
+    """
+    try:
+        from transformers import T5Tokenizer, T5TokenizerFast
+    except ImportError:
+        return
+    for cls in (T5Tokenizer, T5TokenizerFast):
+        if not hasattr(cls, "build_inputs_with_special_tokens"):
+            def _bi(self, token_ids_0, token_ids_1=None):
+                if token_ids_1 is None:
+                    return list(token_ids_0) + [self.eos_token_id]
+                return (
+                    list(token_ids_0) + [self.eos_token_id]
+                    + list(token_ids_1) + [self.eos_token_id]
+                )
+            cls.build_inputs_with_special_tokens = _bi
+
+
+_patch_t5_tokenizer()
+
 BENEPAR_MODELS: dict[str, str] = {
     "ara": "benepar_ar2",
     "hun": "benepar_hu2",
     "kor": "benepar_ko2",
     "pol": "benepar_pl2",
+    # English: benepar_en3 (standard) ~90MB, benepar_en3_large ~1.5GB.
+    # en3 is much faster with only a small F1 drop; preferred for LFM.
+    "eng": "benepar_en3",
 }
 
 # spaCy model names for tokenization (benepar needs spaCy pipeline)
@@ -24,6 +58,7 @@ SPACY_MODELS: dict[str, str] = {
     "hun": "xx_ent_wiki_sm",
     "kor": "ko_core_news_sm",
     "pol": "pl_core_news_sm",
+    "eng": "en_core_web_sm",
 }
 
 
@@ -63,15 +98,22 @@ def _benepar_tree_to_parse_tree(tree_str: str) -> ParseTree:
 class BeneparBackend:
     """Constituency parsing via Berkeley Neural Parser."""
 
-    def __init__(self, lang_iso3: str) -> None:
+    def __init__(self, lang_iso3: str, use_gpu: bool = True) -> None:
         import benepar
         import spacy
+
+        if use_gpu:
+            try:
+                spacy.require_gpu()
+            except Exception:
+                logger.warning("benepar: GPU requested but unavailable; CPU fallback")
 
         model_name = BENEPAR_MODELS[lang_iso3]
         spacy_model = SPACY_MODELS.get(lang_iso3, "xx_ent_wiki_sm")
 
         logger.info(
-            "Loading benepar %s with spaCy %s...", model_name, spacy_model,
+            "Loading benepar %s with spaCy %s (use_gpu=%s)...",
+            model_name, spacy_model, use_gpu,
         )
         try:
             self._nlp = spacy.load(spacy_model)
@@ -81,7 +123,11 @@ class BeneparBackend:
             self._nlp = spacy.load(spacy_model)
 
         if "benepar" not in self._nlp.pipe_names:
-            self._nlp.add_pipe("benepar", config={"model": model_name})
+            try:
+                self._nlp.add_pipe("benepar", config={"model": model_name})
+            except LookupError:
+                benepar.download(model_name)
+                self._nlp.add_pipe("benepar", config={"model": model_name})
 
         self._lang = lang_iso3
 

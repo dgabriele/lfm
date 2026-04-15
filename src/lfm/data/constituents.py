@@ -181,7 +181,12 @@ def _parse_language_worker(
 
     lang, texts, min_length, progress_file, sent_indices = args
 
-    backend = get_backend(lang, use_gpu=True)
+    # Respect the same LFM_PARSER_DEVICE env var the parent uses.  This
+    # matters for benepar whose GPU path can fail silently in spawn
+    # children (per-worker cupy context conflicts).
+    import os as _os
+    _worker_use_gpu = _os.environ.get("LFM_PARSER_DEVICE", "").lower() != "cpu"
+    backend = get_backend(lang, use_gpu=_worker_use_gpu)
 
     labels = EXTRACT_LABELS
     results: list[tuple[str, str, str, int]] = []
@@ -363,7 +368,13 @@ def extract_constituents_parallel(
     from collections import defaultdict
 
     if num_workers is None:
-        num_workers = max(1, int(os.cpu_count() * 0.9))
+        env_workers = os.environ.get("LFM_PARSER_WORKERS")
+        if env_workers:
+            num_workers = max(1, int(env_workers))
+        else:
+            # Default: 90% of cores, hard-capped at 20 so a busy
+            # workstation keeps a few cores for system + dev use.
+            num_workers = max(1, min(20, int(os.cpu_count() * 0.9)))
 
     # Group by language, tracking global indices
     by_lang: dict[str, list[str]] = defaultdict(list)
@@ -396,7 +407,17 @@ def extract_constituents_parallel(
 
     import torch
 
-    use_gpu = torch.cuda.is_available()
+    # Respect LFM_PARSER_DEVICE (cpu|gpu) override; otherwise autodetect.
+    # Benepar's GPU path is currently flaky on some environments —
+    # forcing CPU with many workers is often faster end-to-end than
+    # single-GPU inference.
+    _device_override = os.environ.get("LFM_PARSER_DEVICE", "").lower()
+    if _device_override == "cpu":
+        use_gpu = False
+    elif _device_override == "gpu":
+        use_gpu = True
+    else:
+        use_gpu = torch.cuda.is_available()
     # 2 GPU workers (~2 GB each, fits 8 GB) or parallel CPU
     target_workers = 2 if use_gpu else num_workers
     # If we have fewer language buckets than target workers, split the

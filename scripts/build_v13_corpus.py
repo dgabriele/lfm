@@ -72,6 +72,10 @@ _RE_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _RE_MULTISPACE = re.compile(r"\s+")
 _RE_STRAY = re.compile(r"[_\\{}]")
 _RE_UNKNOWN = re.compile(r"\bunknown\b", re.IGNORECASE)
+# arXiv-summarization anonymizes citations/math as @xmathNN / @xcite /
+# @xref / @xlabel / etc.  Any sentence with these placeholders is
+# not usable English for LFM — drop them.
+_RE_ARXIV_PLACEHOLDER = re.compile(r"@x(math|cite|ref|label|tag)", re.IGNORECASE)
 # Allow basic Latin + Latin-1 + Latin Extended-A/B; drop everything else
 _RE_NON_LATIN = re.compile(r"[^\x00-\x7F\u00A0-\u024F]")
 _RE_GUTENBERG_START = re.compile(
@@ -180,6 +184,15 @@ def _is_acceptable_sentence(s: str) -> bool:
     if _RE_NON_LATIN.search(s):
         return False
     if _RE_UNKNOWN.search(s):
+        return False
+    if _RE_ARXIV_PLACEHOLDER.search(s):
+        return False
+    # Orphan numeric opener from period-splitting ("2.40 era" → "40 era").
+    # Reject if the first token is 1–3 digits (likely the tail of an
+    # improperly-split decimal).  Real sentence-initial 4+ digit years
+    # (e.g. ``1945 was``) are kept.
+    first = s.split(" ", 1)[0]
+    if first.isdigit() and len(first) <= 3:
         return False
     return True
 
@@ -365,22 +378,35 @@ def paragraphs_to_sentences(
 # Constituent wrapping
 # ──────────────────────────────────────────────────────────────────────
 _ALNUM_RE = re.compile(r"\w")
+# Characters we strip from token edges (anything non-alnum that isn't a
+# word-internal hyphen/apostrophe).  Keeps ``don't``, ``well-known``,
+# ``3.14``, ``2020-21`` intact while peeling ``(`` / ``)`` / ``,`` /
+# ``;`` etc. off word boundaries.
+_EDGE_STRIP = "(){}[]<>,;:.!?\"`~\\|/"
 
 
 def _tokenize_keep_words(text: str) -> list[str]:
-    """Split on whitespace, drop tokens that have no alphanumerics, and
-    merge standalone possessive ``'s`` / ``s'`` back onto the previous
-    token so constituents never begin or end with an apostrophe chunk.
+    """Split on whitespace, strip bracket/punctuation chars off the
+    edges of each token, drop anything with no alphanumerics, and merge
+    standalone possessive ``'s`` / ``s'`` back onto the previous token.
+    Guarantees that the returned words contain **no** brackets or other
+    structure-marker characters anywhere.
     """
     raw = text.split()
     out: list[str] = []
     for tok in raw:
+        # Peel off edge punctuation — keeps internal hyphens/apostrophes.
+        tok = tok.strip(_EDGE_STRIP)
         if tok in ("'s", "s'", "'"):
             if out:
                 out[-1] = out[-1] + tok
             continue
-        # Must contain at least one letter or digit
+        # Must contain at least one letter or digit after stripping.
         if not _ALNUM_RE.search(tok):
+            continue
+        # Any remaining bracket-like character inside the token → drop
+        # (e.g. ``3)`` → already stripped; ``foo(bar)`` → drop defensively).
+        if any(ch in "()[]{}<>" for ch in tok):
             continue
         out.append(tok)
     return out
