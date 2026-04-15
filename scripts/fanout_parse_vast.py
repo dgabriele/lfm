@@ -208,24 +208,18 @@ PROVISION = r"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git python3 python3-pip tmux rsync build-essential software-properties-common 2>&1 | tail -2
-add-apt-repository -y ppa:deadsnakes/ppa 2>&1 | tail -2
-apt-get update -qq
-apt-get install -y -qq python3.11 python3.11-dev python3.11-venv 2>&1 | tail -2
-curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 2>&1 | tail -1
+apt-get install -y -qq git rsync 2>&1 | tail -1
 mkdir -p /workspace && cd /workspace
 if [ ! -d lfm ]; then
   git clone https://github.com/dgabriele/lfm.git
 fi
 cd lfm && git pull --ff-only 2>&1 | tail -1
-python3.11 -m pip install --quiet --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -1
-python3.11 -m pip install --quiet --no-cache-dir -e . 2>&1 | tail -1
-python3.11 -m pip install --quiet --no-cache-dir stanza h5py sentencepiece 2>&1 | tail -1
-# Pre-download Stanza English models to avoid first-use download failures
-# inside multiprocessing spawn workers (which silently crash if the
-# constituency model is missing).
-python3.11 -c "import stanza; stanza.download('en', processors='tokenize,pos,constituency', verbose=False)"
-python3.11 -c "import torch, stanza; print('ready, cuda=', torch.cuda.is_available())"
+# pytorch/pytorch image already has python + torch pre-installed; just
+# add lfm + its extra deps.  'python' → the conda env's python3.
+python -m pip install --quiet --no-cache-dir -e . 2>&1 | tail -1
+python -m pip install --quiet --no-cache-dir stanza h5py sentencepiece 2>&1 | tail -1
+python -c "import stanza; stanza.download('en', processors='tokenize,pos,constituency', verbose=False)"
+python -c "import torch, stanza; print('ready, cuda=', torch.cuda.is_available())"
 """
 
 
@@ -245,7 +239,7 @@ def run_worker(
         logger.info("[%s] running parse worker (Stanza GPU)", label)
         parse_cmd = (
             f"cd /workspace/lfm && "
-            f"python3.11 scripts/parse_chunk_worker.py "
+            f"python scripts/parse_chunk_worker.py "
             f"--input {chunk_path.name} "
             f"--output constituents_{label}.txt 2>&1 | tee parse_{label}.log"
         )
