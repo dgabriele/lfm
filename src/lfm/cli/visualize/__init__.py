@@ -91,6 +91,8 @@ def register_visualize_group(
     from lfm.cli.visualize.smoothness import SmoothnessCommand
     from lfm.cli.visualize.adaptiveness import AdaptivenessCommand
     from lfm.cli.visualize.surface_diversity import SurfaceDiversityCommand
+    from lfm.cli.visualize.random_z_quality import RandomZQualityCommand
+    from lfm.cli.visualize.pc_traversal import PCTraversalCommand
     from lfm.cli.visualize.all import AllCommand
 
     # Commands that use shared checkpoint arguments
@@ -106,6 +108,8 @@ def register_visualize_group(
         SmoothnessCommand(),
         AdaptivenessCommand(),
         SurfaceDiversityCommand(),
+        RandomZQualityCommand(),
+        PCTraversalCommand(),
         AllCommand(),
     ]
 

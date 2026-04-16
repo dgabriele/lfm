@@ -59,7 +59,13 @@ def _load_resume_checkpoint(
         share_decoder_layers=ckpt.get("share_decoder_layers", True),
     )
     hidden = cfg.decoder_hidden_dim
-    full_vocab = ckpt.get("vocab_size", cfg.spm_vocab_size) + 2
+    if "vocab_size" in ckpt:
+        full_vocab = int(ckpt["vocab_size"]) + 2
+    else:
+        # Older checkpoints (v7–v13) didn't save vocab_size; infer from
+        # the encoder token embedding shape stored in the module state.
+        emb_w = ckpt["modules"]["enc_token_embedding"]["weight"]
+        full_vocab = int(emb_w.shape[0])
 
     # Reconstruct all modules
     enc_token_embedding = nn.Embedding(full_vocab, hidden).to(device)
