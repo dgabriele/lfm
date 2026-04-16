@@ -483,6 +483,8 @@ export const PhraseVAEConfig = z.object({
   seed: ui(z.number().int().default(42), {
     section: "ops",
     label: "Random seed",
+    caption:
+      "Global RNG seed. Drives torch/numpy/python global seeding plus the length-weighted sampler. Same seed → same batch ordering.",
     inputKind: "number",
   }),
   device: ui(z.enum(["cuda", "cpu", "mps"]).default("cuda"), {
