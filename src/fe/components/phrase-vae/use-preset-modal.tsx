@@ -12,15 +12,24 @@ import type { PhraseVAEConfigShape } from "@/lib/config-schemas/phrase-vae";
  * VAE row server-side (subsequent edits to the preset don't propagate).
  *
  * Defaults:
- *   - name = "<preset-name>-1" (auto-incremented if taken; we add the
- *     digit suffix on the client and bump on collision via the server's
- *     unique-violation backstop).
- *   - description = blank
- *   - corpus_id = preset's `corpus_id`
- *   - vae_type = "token_vocab"
+ *   - name = "<preset-name>-1" (auto-incremented if taken).
+ *   - description = blank.
+ *   - corpus = preset's `corpus_id`.
+ *   - vae_type = NOT user-selectable; derived from the chosen corpus
+ *     (every corpus is intrinsically IPA or token-vocab).  Shown
+ *     read-only so the user can see what they're getting.
  */
 
-export type CorpusOption = { value: string; label: string };
+export type CorpusOption = {
+  value: string;
+  label: string;
+  vaeType: "ipa" | "token_vocab";
+};
+
+const VAE_TYPE_LABEL: Record<string, string> = {
+  ipa: "IPA (character / phoneme)",
+  token_vocab: "Token vocab (BPE)",
+};
 
 export function UsePresetButton({
   presetId,
@@ -94,14 +103,18 @@ function UsePresetModal({
 }) {
   const nameId = useId();
   const descId = useId();
-  const corpusId = useId();
-  const typeId = useId();
+  const corpusFieldId = useId();
 
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");
   const [corpusVal, setCorpusVal] = useState(defaultCorpus);
-  const [vaeType, setVaeType] = useState<"ipa" | "token_vocab">("token_vocab");
   const [pending, startTransition] = useTransition();
+
+  // Resolve the chosen corpus's vae_type — shown read-only and sent
+  // along on submit.  Server side trusts the corpus registry, not
+  // this value, but we send it for symmetry + better error messages.
+  const selectedCorpus = corpora.find((c) => c.value === corpusVal);
+  const derivedVaeType = selectedCorpus?.vaeType ?? "token_vocab";
 
   const trimmed = name.trim();
   const nameError = !trimmed
@@ -121,7 +134,6 @@ function UsePresetModal({
           name: trimmed,
           description: description.trim(),
           corpusId: corpusVal,
-          vaeType,
         });
         // server action redirects on success; component will unmount
       } catch (err) {
@@ -140,8 +152,8 @@ function UsePresetModal({
         <Modal.Container placement="center" size="md">
           <Modal.Dialog className="rounded-[calc(var(--radius)*0.6)] w-full max-w-lg">
             <form onSubmit={onSubmit} className="flex flex-col">
-            <Modal.Header className="flex items-start justify-between gap-3 px-5 py-4 border-b border-separator">
-              <div className="flex flex-col gap-1">
+            <Modal.Header className="flex flex-row flex-nowrap items-start justify-between gap-3 px-5 py-4 border-b border-separator">
+              <div className="flex flex-col gap-1 flex-1 min-w-0">
                 <Modal.Heading className="text-lg font-semibold">
                   Use preset
                 </Modal.Heading>
@@ -155,7 +167,7 @@ function UsePresetModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="p-1 rounded-full text-muted hover:text-foreground"
+                className="shrink-0 p-1 rounded-full text-muted hover:text-foreground"
                 aria-label="Close"
               >
                 <X className="w-4 h-4" />
@@ -192,10 +204,10 @@ function UsePresetModal({
                 />
               </label>
 
-              <label htmlFor={corpusId} className="flex flex-col gap-1.5">
+              <label htmlFor={corpusFieldId} className="flex flex-col gap-1.5">
                 <span className="text-sm text-foreground/90">Training corpus</span>
                 <select
-                  id={corpusId}
+                  id={corpusFieldId}
                   value={corpusVal}
                   onChange={(e) => setCorpusVal(e.target.value)}
                   className={`h-10 ${inputClass} ${okBorder}`}
@@ -207,35 +219,21 @@ function UsePresetModal({
                   ))}
                 </select>
                 <span className="text-xs text-muted leading-snug">
-                  Defaults to whatever the preset references.  Override
-                  if you want to fork into a different corpus.
+                  Defaults to whatever the preset references.  VAE type
+                  (below) is determined by the corpus you pick — every
+                  corpus is intrinsically IPA or token-vocab.
                 </span>
               </label>
 
-              <fieldset id={typeId} className="flex flex-col gap-1.5">
-                <legend className="text-sm text-foreground/90">VAE type</legend>
-                <div className="flex gap-2">
-                  {(["token_vocab", "ipa"] as const).map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => setVaeType(t)}
-                      className={[
-                        "flex-1 h-10 px-3 rounded-[calc(var(--radius)*0.6)] text-sm border transition-colors",
-                        vaeType === t
-                          ? "border-accent/60 bg-accent/10 text-accent"
-                          : "border-separator text-foreground/80 hover:bg-default/40",
-                      ].join(" ")}
-                    >
-                      {t === "token_vocab" ? "Token vocab (BPE)" : "IPA"}
-                    </button>
-                  ))}
+              <div className="flex flex-col gap-1.5">
+                <span className="text-sm text-foreground/90">VAE type</span>
+                <div className="h-10 px-3 rounded-[calc(var(--radius)*0.6)] bg-default/30 border border-separator text-sm text-foreground/90 inline-flex items-center">
+                  {VAE_TYPE_LABEL[derivedVaeType]}
                 </div>
                 <span className="text-xs text-muted leading-snug">
-                  Token vocab = orthographic SPM (v12/v13/v14 family).
-                  IPA = character/phoneme alphabet (v7-style).
+                  Auto-derived from the selected corpus.
                 </span>
-              </fieldset>
+              </div>
             </Modal.Body>
             <Modal.Footer className="flex justify-end gap-2 px-5 py-4 border-t border-separator">
               <button

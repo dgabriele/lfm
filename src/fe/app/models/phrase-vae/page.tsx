@@ -24,7 +24,11 @@ export default async function PhraseVAEIndexPage() {
 
   const presetsById: Record<string, PhraseVaeConfigPresetRow> = {};
   for (const p of presets) presetsById[p.id] = p;
-  const corpusOptions = corpora.map((c) => ({ value: c.id, label: c.name }));
+  const corpusOptions = corpora.map((c) => ({
+    value: c.id,
+    label: c.name,
+    vaeType: c.vaeType,
+  }));
 
   return (
     <div className="flex flex-1 min-h-0">

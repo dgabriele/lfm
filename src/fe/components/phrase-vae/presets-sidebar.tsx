@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Pencil, FileCog } from "lucide-react";
+import { Pencil } from "lucide-react";
 import type { PhraseVaeConfigPresetRow } from "@/lib/db/schema";
 import { phraseVAEToYaml } from "@/lib/config-schemas/phrase-vae-yaml";
 import type { PhraseVAEConfigShape } from "@/lib/config-schemas/phrase-vae";
@@ -52,14 +52,16 @@ export function PresetsSidebar({
                 className="flex flex-col gap-1 rounded-[calc(var(--radius)*0.6)] px-2 py-1.5 hover:bg-default/40 transition-colors"
               >
                 <div className="flex items-center gap-2">
-                  <FileCog
-                    className="w-3.5 h-3.5 shrink-0 text-accent/70"
-                    strokeWidth={2}
-                    aria-hidden
-                  />
                   <span className="flex-1 min-w-0 text-sm text-foreground/90 truncate">
                     {p.name}
                   </span>
+                  <UsePresetButton
+                    presetId={p.id}
+                    presetName={p.name}
+                    presetConfig={cfg}
+                    corpora={corpora}
+                    existingVaeNames={existingVaeNames}
+                  />
                   <Link
                     href={`/models/phrase-vae/presets/${p.id}/edit`}
                     aria-label={`Edit ${p.name}`}
@@ -68,13 +70,6 @@ export function PresetsSidebar({
                   >
                     <Pencil className="w-3.5 h-3.5" strokeWidth={2} />
                   </Link>
-                  <UsePresetButton
-                    presetId={p.id}
-                    presetName={p.name}
-                    presetConfig={cfg}
-                    corpora={corpora}
-                    existingVaeNames={existingVaeNames}
-                  />
                   <PresetOverflowMenu
                     id={p.id}
                     name={p.name}

@@ -12,11 +12,14 @@ import { corpusDb, corpusDbDir } from "./duckdb";
  * window — no full scans, no growing OFFSET cost.
  */
 
+export type VaeType = "ipa" | "token_vocab";
+
 export type Corpus = {
   id: string;
   name: string;
   description: string;
   tags: string[];
+  vaeType: VaeType;
   sampleCount: number;
   vocabSize?: number;
   maxSeqLen?: number;
@@ -38,6 +41,7 @@ type CorpusRow = {
   name: string;
   description: string | null;
   tags: string[] | null;
+  vae_type: VaeType | null;
   source_paths: string[] | null;
   parquet_path: string;
   sample_count: bigint | number | null;
@@ -61,6 +65,10 @@ function rowToCorpus(r: CorpusRow): Corpus {
     name: r.name,
     description: r.description ?? "",
     tags: r.tags ?? [],
+    // Default to token_vocab when missing — every existing corpus
+    // is BPE-based; new IPA corpora must explicitly mark themselves
+    // as such in corpus.json.
+    vaeType: (r.vae_type ?? "token_vocab") as VaeType,
     sampleCount: toNum(r.sample_count),
     sourcePaths: r.source_paths ?? [],
   };

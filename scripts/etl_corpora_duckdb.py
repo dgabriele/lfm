@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS corpora (
     name          VARCHAR NOT NULL,
     description   TEXT,
     tags          VARCHAR[],
+    -- vae_type: which decoder/tokenization regime this corpus
+    -- belongs to ('ipa' or 'token_vocab').  Authoritative — UI
+    -- derives the model's VAE type from this column rather than
+    -- asking the user.
+    vae_type      VARCHAR,
     source_paths  VARCHAR[],
     parquet_path  VARCHAR NOT NULL,
     sample_count  BIGINT,
@@ -76,6 +81,7 @@ def upsert(conn: duckdb.DuckDBPyConnection, entry: dict) -> None:
         "name": entry["name"],
         "description": entry.get("description", ""),
         "tags": entry.get("tags", []),
+        "vae_type": entry.get("vae_type"),
         "source_paths": entry.get("source_paths", []),
         "parquet_path": entry["parquet_path"],
         "sample_count": stats.get("total"),
@@ -90,12 +96,12 @@ def upsert(conn: duckdb.DuckDBPyConnection, entry: dict) -> None:
     conn.execute(
         """
         INSERT INTO corpora (
-            id, name, description, tags, source_paths, parquet_path,
+            id, name, description, tags, vae_type, source_paths, parquet_path,
             sample_count, vocab_size, max_seq_len,
             length_min, length_max, length_mean, length_p50, length_p99,
             updated_at
         ) VALUES (
-            $id, $name, $description, $tags, $source_paths, $parquet_path,
+            $id, $name, $description, $tags, $vae_type, $source_paths, $parquet_path,
             $sample_count, $vocab_size, $max_seq_len,
             $length_min, $length_max, $length_mean, $length_p50, $length_p99,
             now()
@@ -104,6 +110,7 @@ def upsert(conn: duckdb.DuckDBPyConnection, entry: dict) -> None:
             name         = EXCLUDED.name,
             description  = EXCLUDED.description,
             tags         = EXCLUDED.tags,
+            vae_type     = EXCLUDED.vae_type,
             source_paths = EXCLUDED.source_paths,
             parquet_path = EXCLUDED.parquet_path,
             sample_count = EXCLUDED.sample_count,

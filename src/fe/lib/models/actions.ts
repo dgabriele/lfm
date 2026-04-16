@@ -147,13 +147,14 @@ export async function duplicatePhraseVAEConfigPreset(id: string) {
 /**
  * Instantiate a new PhraseVAE from a preset.  The preset's config
  * is snapshotted into the new VAE row — subsequent edits to the
- * preset never mutate this VAE.
+ * preset never mutate this VAE.  The VAE's type is derived from the
+ * selected corpus's `vae_type` (every corpus is intrinsically IPA or
+ * token-vocab); the client doesn't get to choose.
  */
 export async function createPhraseVAEFromPreset(input: {
   presetId: string;
   name: string;
   description: string;
-  vaeType: "ipa" | "token_vocab";
   corpusId: string;
 }) {
   // Re-fetch the preset to snapshot the latest version of its config.
@@ -166,6 +167,11 @@ export async function createPhraseVAEFromPreset(input: {
   if (!preset) throw new Error(`preset ${input.presetId} not found`);
   const snapshot = PhraseVAEConfig.parse(preset.config);
 
+  // Authoritative vae_type comes from the corpus registry.
+  const { getCorpus } = await import("@/lib/corpora");
+  const corpus = await getCorpus(input.corpusId);
+  if (!corpus) throw new Error(`corpus "${input.corpusId}" not found`);
+
   let row;
   try {
     [row] = await db
@@ -174,7 +180,7 @@ export async function createPhraseVAEFromPreset(input: {
         name: input.name,
         description: input.description || null,
         status: "initialized",
-        vaeType: input.vaeType,
+        vaeType: corpus.vaeType,
         corpusId: input.corpusId,
         config: snapshot,
         presetId: input.presetId,
