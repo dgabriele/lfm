@@ -22,6 +22,12 @@ const CONFIG_PATH =
   process.env.LFM_SEED_CONFIG ??
   resolve("/workspace/configs/pretrain_vae_v13.yaml");
 const SEED_NAME = "v13-english-ortho";
+const SEED_DESCRIPTION =
+  "Multi-source English (Wikipedia + Gutenberg + arXiv) with phrase-type " +
+  "brackets (<NP>, <VP>, <PP>, <S>, <SBAR>, ...), orthographic lowercased, " +
+  "no standalone punctuation.  SPM 10k, KL-free decoder with DIP + length " +
+  "boosting and v7-validated SS=7.5% + unlikelihood.  First phrase-aware " +
+  "VAE in the LFM pipeline.";
 
 async function main() {
   const raw = readFileSync(CONFIG_PATH, "utf8");
@@ -49,7 +55,11 @@ async function main() {
   if (existing[0]) {
     await db
       .update(schema.vaeModels)
-      .set({ config, updatedAt: new Date() })
+      .set({
+        config,
+        description: SEED_DESCRIPTION,
+        updatedAt: new Date(),
+      })
       .where(eq(schema.vaeModels.id, existing[0].id));
     console.log(`updated ${SEED_NAME} (${existing[0].id})`);
   } else {
@@ -60,7 +70,7 @@ async function main() {
         variant: "phrase-vae",
         status: "planned",
         config,
-        notes: "Seeded from configs/pretrain_vae_v13.yaml",
+        description: SEED_DESCRIPTION,
       })
       .returning({ id: schema.vaeModels.id });
     console.log(`inserted ${SEED_NAME} (${row?.id})`);

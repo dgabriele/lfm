@@ -15,16 +15,66 @@ import { ui, type SectionDef } from "./meta";
  */
 
 export const PHRASE_VAE_SECTIONS: SectionDef[] = [
-  { key: "data", label: "Data & tokenizer" },
-  { key: "arch", label: "Architecture" },
-  { key: "reg", label: "KL & regularization" },
-  { key: "aux", label: "Auxiliary objectives" },
-  { key: "train", label: "Training schedule" },
-  { key: "posterior", label: "Posterior shaping" },
-  { key: "length", label: "Length boosting" },
-  { key: "sampling", label: "Scheduled sampling & unlikelihood" },
-  { key: "adversarial", label: "Adversarial & topology" },
-  { key: "ops", label: "Ops" },
+  {
+    key: "data",
+    label: "Data & tokenizer",
+    caption:
+      "Which corpus feeds the VAE and how its text is subworded. The SPM tokenizer is trained against the selected corpus; phrase-tag corpora declare the bracket tokens as user-defined symbols.",
+  },
+  {
+    key: "arch",
+    label: "Architecture",
+    caption:
+      "Encoder and decoder shape. The encoder pools a sequence into K memory tokens (the latent z); the decoder is a weight-shared RoPE transformer with multi-scale attention windows.",
+  },
+  {
+    key: "reg",
+    label: "KL & regularization",
+    caption:
+      "How aggressively to pull the posterior toward the prior. KL free bits prevents dimension collapse; kl_beta / kl_weight drive how tightly the latent is compressed.",
+  },
+  {
+    key: "aux",
+    label: "Auxiliary objectives",
+    caption:
+      "Optional extra losses: contrastive alignment to a precomputed sentence embedding, phonetic initialization for the embedding table, vector quantization of z.",
+  },
+  {
+    key: "train",
+    label: "Training schedule",
+    caption:
+      "Wall-clock knobs — batch size, accumulation, learning rate cosine bounds, and how many epochs to run.",
+  },
+  {
+    key: "posterior",
+    label: "Posterior shaping",
+    caption:
+      "Fine-tune the geometry of z: variance targets that keep the latent neither collapsed nor diffuse, DIP-VAE off-diagonal penalty for disentanglement, word dropout for denoising.",
+  },
+  {
+    key: "length",
+    label: "Length boosting",
+    caption:
+      "Upweights the reconstruction loss on samples longer than the threshold so the model doesn't shortcut to truncating output.",
+  },
+  {
+    key: "sampling",
+    label: "Scheduled sampling & unlikelihood",
+    caption:
+      "Anti-exposure-bias. Scheduled sampling feeds the model's own prediction during teacher forcing; unlikelihood penalizes repeating tokens from the recent window.",
+  },
+  {
+    key: "adversarial",
+    label: "Adversarial & topology",
+    caption:
+      "Optional adversary on free-run outputs and a topology loss that aligns pairwise latent distances with pairwise sentence-embedding distances.",
+  },
+  {
+    key: "ops",
+    label: "Ops",
+    caption:
+      "Logging cadence, validation split, seed, device, and where the checkpoint lands on disk.",
+  },
 ];
 
 export const PhraseVAEConfig = z.object({

@@ -29,13 +29,13 @@ export const modelVariant = pgEnum("model_variant", [
 
 export const vaeModels = pgTable("vae_models", {
   id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull(),
+  name: text("name").notNull().unique(),
   variant: modelVariant("variant").notNull(),
   status: modelStatus("status").notNull().default("draft"),
   // Full config as JSON — keeps schema flexible while the Zod schema
   // evolves.  Validated against `PhraseVAEConfig` at read/write edges.
   config: jsonb("config").notNull(),
-  notes: text("notes"),
+  description: text("description"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

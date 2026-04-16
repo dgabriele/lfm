@@ -1,5 +1,5 @@
 import "server-only";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, ne } from "drizzle-orm";
 import { db, schema } from "@/lib/db/client";
 
 /**
@@ -23,4 +23,18 @@ export async function getModel(id: string) {
     .where(eq(schema.vaeModels.id, id))
     .limit(1);
   return rows[0] ?? null;
+}
+
+/**
+ * Names of every existing model config, optionally excluding one row
+ * by id (so the edit page can skip its own row when checking for
+ * conflicts).  Used by the editor to block duplicate names before the
+ * DB unique constraint trips.
+ */
+export async function listVaeModelNames(excludeId?: string) {
+  const rows = await db
+    .select({ name: schema.vaeModels.name })
+    .from(schema.vaeModels)
+    .where(excludeId ? ne(schema.vaeModels.id, excludeId) : undefined);
+  return rows.map((r) => r.name);
 }

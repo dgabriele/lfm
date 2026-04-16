@@ -1,6 +1,6 @@
 "use client";
 
-import { useId } from "react";
+import { useEffect, useId, useState } from "react";
 
 /**
  * Minimal, styled HTML form controls.  Each input renders the
@@ -22,7 +22,7 @@ export function Field({ label, caption, error, children }: BaseFieldProps) {
   return (
     <label htmlFor={id} className="flex flex-col gap-1.5">
       <span className="text-sm text-foreground/90">{label}</span>
-      <div className="[&>*]:w-full">
+      <div>
         <Slot id={id}>{children}</Slot>
       </div>
       {caption && (
@@ -52,7 +52,7 @@ const controlClass =
 export function TextInput(
   props: React.InputHTMLAttributes<HTMLInputElement>,
 ) {
-  return <input type="text" {...props} className={`${controlClass} ${props.className ?? ""}`} />;
+  return <input type="text" {...props} className={`${controlClass} w-full ${props.className ?? ""}`} />;
 }
 
 export function NumberInput({
@@ -83,7 +83,7 @@ export function NumberInput({
         if (Number.isFinite(n)) onValueChange(n);
       }}
       {...rest}
-      className={`${controlClass} tabular-nums font-mono ${rest.className ?? ""}`}
+      className={`${controlClass} w-full tabular-nums font-mono ${rest.className ?? ""}`}
     />
   );
 }
@@ -103,7 +103,7 @@ export function SelectInput<T extends string>({
       value={value}
       onChange={(e) => onValueChange(e.target.value as T)}
       {...rest}
-      className={`${controlClass} ${rest.className ?? ""}`}
+      className={`${controlClass} w-full ${rest.className ?? ""}`}
     >
       {options.map((o) => (
         <option key={o.value} value={o.value}>
@@ -150,20 +150,46 @@ export function IntListInput({
   value: number[];
   onValueChange: (v: number[]) => void;
 }) {
+  // Keep a local text buffer so separators in-flight (trailing comma,
+  // spaces) survive while the user types.  We only sync *from* the
+  // controlled `value` when it meaningfully diverges from what we'd
+  // parse out of the buffer — otherwise typing "3, " would round-trip
+  // back to "3, 3" and swallow the user's next keystroke.
+  const [buffer, setBuffer] = useState(() => value.join(", "));
+
+  useEffect(() => {
+    const parsedFromBuffer = parseIntList(buffer);
+    if (!sameNums(parsedFromBuffer, value)) {
+      setBuffer(value.join(", "));
+    }
+  }, [value, buffer]);
+
   return (
     <input
       type="text"
-      value={value.join(", ")}
+      value={buffer}
       onChange={(e) => {
-        const parts = e.target.value
-          .split(/[,\s]+/)
-          .filter(Boolean)
-          .map((s) => Number(s))
-          .filter((n) => Number.isFinite(n) && Number.isInteger(n));
-        onValueChange(parts);
+        const next = e.target.value;
+        setBuffer(next);
+        onValueChange(parseIntList(next));
       }}
+      onBlur={() => setBuffer(value.join(", "))}
       placeholder="e.g. 3, 3, 7, 7, 15, 15, 0, 0"
-      className={`${controlClass} tabular-nums font-mono`}
+      className={`${controlClass} w-full tabular-nums font-mono`}
     />
   );
+}
+
+function parseIntList(s: string): number[] {
+  return s
+    .split(/[,\s]+/)
+    .filter(Boolean)
+    .map((t) => Number(t))
+    .filter((n) => Number.isFinite(n) && Number.isInteger(n));
+}
+
+function sameNums(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }

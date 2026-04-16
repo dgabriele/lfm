@@ -8,7 +8,7 @@ import { InfoHint } from "@/components/info-hint";
  */
 export function CorpusMetadataSidebar({ corpus }: { corpus: Corpus }) {
   return (
-    <aside className="w-80 shrink-0 border-l border-separator bg-surface/40 p-6 flex flex-col gap-6 overflow-y-auto">
+    <aside className="w-96 shrink-0 border-l border-separator bg-surface/40 p-6 flex flex-col gap-6 overflow-y-auto">
       <header>
         <h2 className="text-sm uppercase tracking-wider text-muted font-semibold">
           Metadata

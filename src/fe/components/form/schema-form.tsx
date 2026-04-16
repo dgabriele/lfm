@@ -82,13 +82,20 @@ export function SchemaForm<T extends Record<string, unknown>>({
             className="rounded-[calc(var(--radius)*0.7)] border border-separator bg-surface/40"
           >
             <Disclosure.Heading>
-              <Disclosure.Trigger className="w-full flex items-center justify-between gap-3 px-4 py-3 text-sm font-semibold text-accent/90 hover:text-accent transition-colors">
-                <span className="uppercase tracking-wider text-xs">
-                  {section.label}
+              <Disclosure.Trigger className="w-full flex items-start justify-between gap-3 px-4 py-3 text-left hover:bg-default/20 transition-colors">
+                <span className="flex flex-col gap-1 flex-1 min-w-0">
+                  <span className="uppercase tracking-wider text-xs font-semibold text-accent/90">
+                    {section.label}
+                  </span>
+                  {section.caption && (
+                    <span className="text-xs text-muted leading-snug font-normal normal-case tracking-normal">
+                      {section.caption}
+                    </span>
+                  )}
                 </span>
                 <Disclosure.Indicator>
                   <ChevronDown
-                    className="w-4 h-4 transition-transform data-[expanded]:rotate-180"
+                    className="w-4 h-4 mt-0.5 text-muted transition-transform data-[expanded]:rotate-180"
                     strokeWidth={2}
                   />
                 </Disclosure.Indicator>
