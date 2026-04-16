@@ -425,11 +425,11 @@ def run_epoch_diagnostics(
         ed, ml = word_edit_distance(orig, dec)
         wer = ed / max(ml, 1)
         logger.info(
-            "  recon[%s] orig: %s", _lang_labels[j], orig[:120]
+            "  recon[%s] orig: %s", _lang_labels[j], orig[:500]
         )
         logger.info(
             "  recon[%s]  dec: %s  [WED=%d/%d WER=%.0f%%]",
-            _lang_labels[j], dec[:120], ed, ml, wer * 100,
+            _lang_labels[j], dec[:500], ed, ml, wer * 100,
         )
 
     # --- 2. Interpolation (English <-> non-English) ---
@@ -444,7 +444,7 @@ def run_epoch_diagnostics(
         "  interp: %s -> %s", _lang_labels[0], _lang_labels[1]
     )
     for k, (a, txt) in enumerate(zip(alphas, interp_texts)):
-        logger.info("  interp[%.2f]: %s", a, txt[:120])
+        logger.info("  interp[%.2f]: %s", a, txt[:500])
 
     # --- 3. Perturbation (around English sentence) ---
     # Use wider sigma range (0-2) to show meaningful variation
@@ -463,7 +463,7 @@ def run_epoch_diagnostics(
     perturb_texts = sample_decode(z_perturbed, **_decode_kw)
     logger.info("  perturb: around %s sentence", _lang_labels[0])
     for k, (s, txt) in enumerate(zip(noise_scales, perturb_texts)):
-        logger.info("  perturb[σ=%.1f]: %s", s, txt[:120])
+        logger.info("  perturb[σ=%.1f]: %s", s, txt[:500])
 
     # --- 4. Random z near English cluster ---
     # Sample from the encoder distribution, then also sample
@@ -486,10 +486,10 @@ def run_epoch_diagnostics(
         z_all_random, _, _ = modules["_residual_vq"](z_all_random)
     random_texts = sample_decode(z_all_random, **_decode_kw)
     for j in range(3):
-        logger.info("  random[%d]: %s", j, random_texts[j][:120])
+        logger.info("  random[%d]: %s", j, random_texts[j][:500])
     for j in range(3, 5):
         logger.info(
-            "  near_eng[%d]: %s", j - 3, random_texts[j][:120]
+            "  near_eng[%d]: %s", j - 3, random_texts[j][:500]
         )
 
     # --- 5. Length distribution (autoregressive decode) ---
