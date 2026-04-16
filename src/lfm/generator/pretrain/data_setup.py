@@ -463,7 +463,10 @@ def _load_and_preprocess_phoneme_h5(
         _len_arr = torch.tensor(_train_lengths, dtype=torch.float32)
         _weights = torch.where(_len_arr >= _boost_thresh, _boost_factor, 1.0)
         _sampler = LargeWeightedSampler(
-            _weights, num_samples=len(_weights), replacement=True,
+            _weights,
+            num_samples=len(_weights),
+            replacement=True,
+            seed=getattr(cfg, "seed", None),
         )
         train_loader = DataLoader(
             train_dataset, batch_size=cfg.batch_size,
@@ -729,7 +732,10 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
             _len_arr = torch.tensor(_train_lengths, dtype=torch.float32)
             _weights = torch.where(_len_arr >= _boost_thresh, _boost_factor, 1.0)
             _sampler = LargeWeightedSampler(
-                _weights, num_samples=len(_weights), replacement=True,
+                _weights,
+                num_samples=len(_weights),
+                replacement=True,
+                seed=getattr(cfg, "seed", None),
             )
             train_loader = DataLoader(
                 train_dataset,
