@@ -1,0 +1,91 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+/* Tailwind v4: map custom utilities to HeroUI CSS variables so we can
+ * write `text-accent`, `bg-accent/20`, etc. in our components. */
+@theme inline {
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular,
+    Menlo, Consolas, monospace;
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+}
+
+/* ---------------------------------------------------------------------
+ * Theme overrides — large form radius, fluid typography.
+ *
+ * Sets --radius to a "large" value.  --field-radius derives from --radius
+ * (HeroUI formula: radius * 1.5) so buttons, inputs, cards, etc. all feel
+ * comfortably rounded.
+ *
+ * Fluid root font size: scales smoothly between small-viewport and 4K.
+ * At 1440px wide → 16px; at 3840px (4K) → ~20px; never smaller than 14.
+ * --------------------------------------------------------------------- */
+:root {
+  --radius: 0.875rem;
+  --field-radius: calc(var(--radius) * 1.5);
+
+  /* Theme accent — override HeroUI's default indigo with a more
+   * luminous true-blue.  Hue 235 is closer to cyan-blue than the
+   * stock 253.83 (which skews violet).  `--link` inherits the accent
+   * so hyperlinks and focus rings share the color. */
+  --accent: oklch(0.72 0.17 235);
+  --link: var(--accent);
+}
+
+html {
+  font-size: clamp(14px, 0.56vw + 10px, 20px);
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  font-weight: 500;  /* Inter Medium by default */
+  font-feature-settings: "cv11", "ss01";
+  min-height: 100%;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* Inter looks crisper with these rendering hints. */
+html, body {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Subtle scrollbar — transparent track, thumb uses the muted color so
+ * the rail blends into whatever surface sits behind it. */
+* {
+  scrollbar-color: color-mix(in oklab, var(--muted) 55%, transparent) transparent;
+  scrollbar-width: thin;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--muted) 85%, transparent);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Enable JetBrains Mono's programming ligatures (->, =>, !=, ===, etc.)
+ * wherever monospace text is rendered — code, pre, kbd, samp, and the
+ * Tailwind `font-mono` utility.  `calt` covers contextual alternates
+ * which JetBrains Mono uses for its smart ligature behavior. */
+code, pre, kbd, samp, .font-mono {
+  font-family: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular,
+    Menlo, Consolas, monospace;
+  font-feature-settings: "liga" 1, "calt" 1;
+  font-variant-ligatures: common-ligatures contextual;
+}

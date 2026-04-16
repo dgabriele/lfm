@@ -1,0 +1,35 @@
+# Dev stack for the LFM front-end.
+#
+# Source is bind-mounted from the host so Turbopack hot-reload works
+# as expected.  `node_modules` stays image-owned (named volume) so the
+# container's linux binaries aren't shadowed by the host's.  The
+# project root is mounted read-only at /workspace so the Next.js
+# server can open `data/corpora.duckdb` + `data/datasets/**/*.parquet`
+# directly — no separate DB service needed for the corpus.
+
+services:
+  fe:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: lfm-fe-dev
+    container_name: lfm-fe
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:3000:3000"
+    environment:
+      NODE_ENV: development
+      LFM_CORPORA_DB: /workspace/data/corpora.duckdb
+      # Turbopack polls by default inside Docker; explicit env keeps
+      # HMR predictable under bind mounts.
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - .:/app
+      - fe_node_modules:/app/node_modules
+      - ../..:/workspace:ro
+    working_dir: /app
+    command: ["pnpm", "dev", "--hostname", "0.0.0.0"]
+
+volumes:
+  fe_node_modules:
