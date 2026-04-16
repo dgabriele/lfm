@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Pencil } from "lucide-react";
+import { Pencil, Plus } from "lucide-react";
 import type { PhraseVaeConfigPresetRow } from "@/lib/db/schema";
 import { phraseVAEToYaml } from "@/lib/config-schemas/phrase-vae-yaml";
 import type { PhraseVAEConfigShape } from "@/lib/config-schemas/phrase-vae";
@@ -29,13 +29,24 @@ export function PresetsSidebar({
 }) {
   return (
     <aside className="w-96 shrink-0 border-l border-separator bg-surface/40 p-6 flex flex-col gap-4 overflow-y-auto">
-      <header>
-        <h2 className="text-xs uppercase tracking-wider text-accent/80 font-semibold">
-          Config presets
-        </h2>
-        <p className="text-xs text-muted mt-1">
-          Reusable templates.  Most recently edited first.
-        </p>
+      <header className="flex items-start justify-between gap-3">
+        <div className="flex flex-col gap-1">
+          <h2 className="text-xs uppercase tracking-wider text-accent/80 font-semibold">
+            Config presets
+          </h2>
+          <p className="text-xs text-muted">
+            Reusable templates.  Most recently edited first.
+          </p>
+        </div>
+        <Link
+          href="/models/phrase-vae/presets/new"
+          aria-label="New config preset"
+          title="New config preset"
+          className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-[calc(var(--radius)*0.5)] text-xs font-semibold text-accent bg-accent/10 hover:bg-accent/20 transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5" strokeWidth={2.25} />
+          New
+        </Link>
       </header>
 
       {presets.length === 0 ? (

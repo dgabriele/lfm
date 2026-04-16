@@ -44,9 +44,9 @@ export function VaesTable({
         <Boxes className="w-10 h-10 text-accent/70" strokeWidth={1.5} />
         <h2 className="text-lg font-semibold">No phrase VAEs yet</h2>
         <p className="text-sm text-muted max-w-md leading-relaxed">
-          Use the <span className="text-accent">Use</span> action on a
-          config preset in the right rail to instantiate your first
-          phrase VAE.
+          Click <span className="text-accent">New VAE</span> in the header
+          (or <span className="text-accent">Use</span> on a config preset
+          in the right rail) to instantiate your first phrase VAE.
         </p>
       </div>
     );
