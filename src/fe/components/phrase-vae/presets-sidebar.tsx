@@ -3,19 +3,19 @@ import { Pencil, FileCog } from "lucide-react";
 import type { PhraseVaeConfigPresetRow } from "@/lib/db/schema";
 import { phraseVAEToYaml } from "@/lib/config-schemas/phrase-vae-yaml";
 import type { PhraseVAEConfigShape } from "@/lib/config-schemas/phrase-vae";
-import { DownloadYamlButton } from "./download-yaml-button";
-import { DuplicatePresetButton } from "./duplicate-preset-button";
+import { PresetOverflowMenu } from "./preset-overflow-menu";
 import { UsePresetButton, type CorpusOption } from "./use-preset-modal";
 import { TimestampedMeta } from "./timestamped-meta";
 
 /**
  * Right-side rail listing phrase-VAE *config presets* in most-recently
- * -updated order.  Per row, four quick actions:
+ * -updated order.  Per row:
  *
- *   - Edit       (Pencil)   → preset editor
- *   - Download   (Download) → grab the YAML directly
- *   - Use        (Rocket)   → instantiate as a new PhraseVAE (modal)
- *   - Duplicate  (Copy)     → fork into a new preset row
+ *   - primary actions on the row itself: Edit (icon-only), Use (label)
+ *   - secondary actions in a "…" overflow menu: Download YAML, Duplicate
+ *
+ * Splitting them this way keeps the row scannable when the preset name
+ * is long, and makes "Use" the visually obvious next step.
  */
 
 export function PresetsSidebar({
@@ -68,11 +68,6 @@ export function PresetsSidebar({
                   >
                     <Pencil className="w-3.5 h-3.5" strokeWidth={2} />
                   </Link>
-                  <DownloadYamlButton
-                    id={p.id}
-                    name={p.name}
-                    yaml={phraseVAEToYaml(cfg)}
-                  />
                   <UsePresetButton
                     presetId={p.id}
                     presetName={p.name}
@@ -80,7 +75,11 @@ export function PresetsSidebar({
                     corpora={corpora}
                     existingVaeNames={existingVaeNames}
                   />
-                  <DuplicatePresetButton id={p.id} name={p.name} />
+                  <PresetOverflowMenu
+                    id={p.id}
+                    name={p.name}
+                    yaml={phraseVAEToYaml(cfg)}
+                  />
                 </div>
                 <TimestampedMeta
                   updatedAt={p.updatedAt.toISOString()}

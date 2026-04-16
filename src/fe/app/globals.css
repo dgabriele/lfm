@@ -52,6 +52,37 @@ html, body {
   text-rendering: optimizeLegibility;
 }
 
+/* Universal pointer cursor on anything click-actionable.  Tailwind/
+ * HeroUI don't ship this by default; without it native <button>s and
+ * role-based interactives keep the text caret on hover, which makes
+ * the UI feel inert. */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+a[href],
+[role="link"],
+[role="switch"]:not([aria-disabled="true"]),
+[role="checkbox"]:not([aria-disabled="true"]),
+[role="radio"]:not([aria-disabled="true"]),
+[role="tab"]:not([aria-disabled="true"]),
+[role="menuitem"]:not([aria-disabled="true"]),
+[role="option"]:not([aria-disabled="true"]),
+summary,
+label[for]:not([aria-disabled="true"]),
+select:not(:disabled),
+input[type="checkbox"]:not(:disabled),
+input[type="radio"]:not(:disabled),
+input[type="submit"]:not(:disabled),
+input[type="button"]:not(:disabled),
+input[type="reset"]:not(:disabled),
+input[type="file"]:not(:disabled) {
+  cursor: pointer;
+}
+button:disabled,
+[role="button"][aria-disabled="true"],
+[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
 /* Subtle scrollbar — transparent track, thumb uses the muted color so
  * the rail blends into whatever surface sits behind it. */
 * {

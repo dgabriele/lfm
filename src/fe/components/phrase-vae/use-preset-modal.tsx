@@ -55,9 +55,10 @@ export function UsePresetButton({
         aria-label={`Use ${presetName} — instantiate a new phrase VAE`}
         title="Use as template for new phrase VAE"
         onClick={() => setOpen(true)}
-        className="p-1.5 rounded-[calc(var(--radius)*0.5)] text-muted hover:text-accent hover:bg-accent/10 transition-colors"
+        className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[calc(var(--radius)*0.5)] text-xs font-semibold text-accent bg-accent/10 hover:bg-accent/20 transition-colors"
       >
         <Rocket className="w-3.5 h-3.5" strokeWidth={2} />
+        Use
       </button>
       {open && (
         <UsePresetModal
@@ -134,11 +135,11 @@ function UsePresetModal({
   const okBorder = "border-separator focus:border-accent/60";
 
   return (
-    <Modal isOpen onOpenChange={(o) => { if (!o) onClose(); }} isDismissable>
-      <Modal.Backdrop />
-      <Modal.Container>
-        <Modal.Dialog className="rounded-[calc(var(--radius)*0.6)] w-full max-w-lg">
-          <form onSubmit={onSubmit} className="flex flex-col">
+    <Modal isOpen onOpenChange={(o) => { if (!o) onClose(); }}>
+      <Modal.Backdrop isDismissable>
+        <Modal.Container placement="center" size="md">
+          <Modal.Dialog className="rounded-[calc(var(--radius)*0.6)] w-full max-w-lg">
+            <form onSubmit={onSubmit} className="flex flex-col">
             <Modal.Header className="flex items-start justify-between gap-3 px-5 py-4 border-b border-separator">
               <div className="flex flex-col gap-1">
                 <Modal.Heading className="text-lg font-semibold">
@@ -253,9 +254,10 @@ function UsePresetModal({
                 {pending ? "Creating…" : "Instantiate"}
               </button>
             </Modal.Footer>
-          </form>
-        </Modal.Dialog>
-      </Modal.Container>
+            </form>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
     </Modal>
   );
 }
