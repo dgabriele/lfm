@@ -83,8 +83,21 @@ def sample_decode(
             out = _dec(tgt=tgt, memory=mem, tgt_mask=cm)
 
         logits = modules["output_head"](out[:, -1])
-        # Suppress special tokens
-        logits[:, 0:4] = float("-inf")
+        # Suppress only the SPM control tokens the model actually assigned
+        # (unk/bos/eos/pad, skipping any that are -1).  The old `[:, 0:4]`
+        # slice was a v7/v12 artifact that assumed 0=UNK, 1=BOS, 2=EOS,
+        # 3=PAD — for v13 (bos/eos/pad=-1, phrase tags at IDs 1–16) it
+        # forbids the decoder from ever emitting `<S>`, `</S>`, or `<NP>`,
+        # which is why recons collapsed or mis-wrapped.
+        if hasattr(sp, "id_to_piece"):
+            for _tid in (
+                sp.unk_id(),  # type: ignore[attr-defined]
+                sp.bos_id(),  # type: ignore[attr-defined]
+                sp.eos_id(),  # type: ignore[attr-defined]
+                sp.pad_id(),  # type: ignore[attr-defined]
+            ):
+                if _tid >= 0:
+                    logits[:, _tid] = float("-inf")
         logits[:, bos_id] = float("-inf")
         # Temperature
         logits = logits / max(temperature, 1e-8)
