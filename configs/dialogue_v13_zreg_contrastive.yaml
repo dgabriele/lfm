@@ -1,0 +1,67 @@
+# Dialogue game on the v13 z-regularized phrase-VAE decoder, CLIP-style
+# contrastive scoring.  Carbon-copy of dialogue_v8_qwen_contrastive_vast
+# with:
+#   - decoder swapped for v13_english_ortho_zreg
+#   - generator_name switched from phoneme_vae → multilingual_vae (token
+#     vocab, not phoneme alphabet)
+#   - generator_vocab_size bumped to 10000 to match v13 SPM
+#   - constrained_close: true so free-run decode always terminates in a
+#     balanced `</TAG>` instead of a mid-word cutoff
+
+decoder_path: /workspace/lfm/data/models/v13_english_ortho_zreg/vae_decoder.pt
+spm_path: /workspace/lfm/data/datasets/english-constituents-v13/spm.model
+output_dir: /workspace/lfm/data/dialogue_game_v13_zreg_contrastive
+embedding_store_dir: /workspace/lfm/data/embeddings_qwen_v2_clean
+
+generator_name: multilingual_vae
+generator_vocab_size: 10000
+
+# Dialogue structure — same as v8 run
+num_turns: 4
+context_hidden_dim: 512
+context_heads: 4
+
+# Diffusion z-generator
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_phrases: 3
+variable_phrases: true
+target_phrases: 2.0
+length_weight: 0.5
+z_diversity_weight: 0.3
+
+# CLIP-style contrastive scoring
+contrastive_scoring: true
+contrastive_temperature: 0.07
+
+# Other losses off (contrastive is the whole objective)
+per_turn_weight: 0.0
+ce_weight: 0.0
+topo_weight: 0.0
+independent_turns: false
+
+# Phase 2 VRAM management (24 GB target)
+phase2_vram_budget_mb: 6000
+phase2_min_chunk: 8
+
+# Constrained decoding: enabled.  Covers the common case where free-run
+# generation doesn't emit EOS before max_tokens_per_phrase — trailing
+# non-word-start pieces are popped and the matching close tag inserted.
+constrained_close: true
+
+# Training
+batch_size: 512
+gradient_accumulation_steps: 1
+steps: 6000
+gru_lr: 0.00005
+receiver_lr: 0.0003
+num_distractors: 15
+min_targets: 1
+max_targets: 1
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100

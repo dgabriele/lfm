@@ -225,6 +225,15 @@ class VAEPretrainConfig(LFMBaseConfig):
     # 0 disables the mechanism entirely (v7/v12 behavior).
     z_noise_sigma: float = 0.0
 
+    # Tag-balance auxiliary loss: encourages matched open/close tag
+    # counts in the decoder's predicted distribution.  Softmax mass
+    # over all open-tag IDs should equal mass over close-tag IDs per
+    # sample; squared difference × this weight is added to the total
+    # loss.  Off-by-default (preserves v7/v12 behavior).  Tag IDs are
+    # auto-discovered at trainer startup by scanning SPM pieces for
+    # `<…>` / `</…>` patterns.
+    tag_balance_weight: float = 0.0
+
     # Constituent context training: the encoder sees the full parent
     # sentence while the decoder is supervised only on the constituent
     # span.  Requires a constituency dataset with parent_seq fields

@@ -33,6 +33,35 @@ from lfm.utils.oom import shrink_on_oom
 logger = logging.getLogger(__name__)
 
 
+def _derive_tag_ids(sp: Any, device: torch.device) -> tuple[Tensor, Tensor]:
+    """Scan the text backend's vocabulary for `<TAG>` / `</TAG>` pairs and
+    return two tensors of token IDs (opens, closes).  Only the SPM path
+    is meaningful; phoneme tokenizers return empty tensors.  Constant
+    across training, so called once at trainer startup."""
+    opens: list[int] = []
+    closes: list[int] = []
+    if hasattr(sp, "id_to_piece") and hasattr(sp, "vocab_size"):
+        for tid in range(int(sp.vocab_size())):
+            piece = sp.id_to_piece(tid)
+            if piece.startswith("</") and piece.endswith(">"):
+                closes.append(tid)
+            elif piece.startswith("<") and piece.endswith(">") and not piece.startswith("</"):
+                # Skip SentencePiece's own <unk>, <s>, </s>, <pad> via
+                # control-id check — user_defined_symbols are regular,
+                # so we rely on the control check indirectly by
+                # looking at piece text only.  This may include <unk>
+                # in the open set, but v13 sets bos/eos/pad=-1 so only
+                # <unk> would be picked up — and that's harmless
+                # because its expected count is ~0 anyway.  Filter it
+                # out explicitly for safety.
+                if piece.lower() not in ("<unk>", "<s>", "<pad>"):
+                    opens.append(tid)
+    return (
+        torch.tensor(opens, dtype=torch.long, device=device),
+        torch.tensor(closes, dtype=torch.long, device=device),
+    )
+
+
 class VAEPretrainer:
     """Pretrain a VAE encoder-decoder on multilingual text data.
 
@@ -84,6 +113,20 @@ class VAEPretrainer:
         # 5. Build VAE model components
         hidden = cfg.decoder_hidden_dim
         modules = build_model(cfg, hidden, full_vocab, device)
+
+        # Derive open/close tag ID tensors for the tag-balance auxiliary
+        # loss.  Scans the SPM vocab once; `<XYZ>` goes to opens,
+        # `</XYZ>` to closes.  Works only for the SPM path (phoneme
+        # tokenizers have no bracket tags).  If tag_balance_weight=0
+        # the tensors are ignored.
+        _tag_open_ids, _tag_close_ids = _derive_tag_ids(sp, device)
+        if getattr(cfg, "tag_balance_weight", 0.0) > 0:
+            logger.info(
+                "tag_balance_weight=%.3f: %d open / %d close tags detected",
+                cfg.tag_balance_weight,
+                int(_tag_open_ids.numel()),
+                int(_tag_close_ids.numel()),
+            )
 
         # 5b. Phonetic embedding initialization
         phonetic_sim_matrix: Tensor | None = None
@@ -296,6 +339,7 @@ class VAEPretrainer:
             train_klb_sum = 0.0
             train_vq_sum = 0.0
             train_bow_sum = 0.0
+            train_tagbal_sum = 0.0
             train_acc_correct = 0
             train_acc_total = 0
             train_count = 0
@@ -356,7 +400,7 @@ class VAEPretrainer:
                         _do_kl = cfg.kl_weight > 0 or cfg.kl_beta > 0
                         (ce_loss, kl_loss, kl_per_dim_train,
                          z_batch, dec_hidden, mu_batch, logvar_batch,
-                         vq_loss_batch, bow_loss) = (
+                         vq_loss_batch, bow_loss, tag_balance_loss) = (
                             _vae_forward(
                                 batch_tokens,
                                 batch_lengths,
@@ -370,6 +414,8 @@ class VAEPretrainer:
                                 _phonetic_smoothing=cfg.phonetic_label_smoothing,
                                 encoder_tokens=enc_tokens_override,
                                 encoder_lengths=enc_lengths_override,
+                                _tag_open_ids=_tag_open_ids,
+                                _tag_close_ids=_tag_close_ids,
                                 **modules,
                             )
                         )
@@ -431,6 +477,7 @@ class VAEPretrainer:
                             + cfg.contrastive_weight * cl_loss
                             + cfg.kl_beta * kl_beta_loss
                             + cfg.bow_weight * bow_loss
+                            + getattr(cfg, "tag_balance_weight", 0.0) * tag_balance_loss
                         ) / accum
 
                     scaler.scale(loss).backward()
@@ -540,6 +587,7 @@ class VAEPretrainer:
                 train_klb_sum += kl_beta_loss.item() * b
                 train_vq_sum += vq_loss.item() * b
                 train_bow_sum += bow_loss.item() * b
+                train_tagbal_sum += tag_balance_loss.item() * b
                 train_acc_correct += _correct
                 train_acc_total += _total
                 train_count += b
@@ -582,6 +630,8 @@ class VAEPretrainer:
                         _vq_util_str = " ".join(f"{u:.0%}" for u in rvq.utilization)
                     if cfg.bow_weight > 0:
                         extra_parts.append(f"BoW={bow_loss.item():.3f}")
+                    if getattr(cfg, "tag_balance_weight", 0.0) > 0:
+                        extra_parts.append(f"TagBal={tag_balance_loss.item():.4f}")
                     if disc is not None and global_step >= cfg.adv_warmup_steps:
                         extra_parts.append(
                             f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f} adv={adv_loss_val:.3f}"

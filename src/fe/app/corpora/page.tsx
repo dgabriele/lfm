@@ -24,7 +24,7 @@ export default async function CorporaListPage() {
         </p>
       </header>
 
-      <ul className="grid grid-cols-[repeat(auto-fill,minmax(22rem,1fr))] gap-4">
+      <ul className="grid grid-cols-[repeat(auto-fill,minmax(30rem,1fr))] gap-4">
         {corpora.map((c) => (
           <li key={c.id}>
             <Link

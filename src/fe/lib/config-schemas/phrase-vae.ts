@@ -363,6 +363,14 @@ export const PhraseVAEConfig = z.object({
     inputKind: "number",
     step: 0.05,
   }),
+  tag_balance_weight: ui(z.number().default(0.0), {
+    section: "posterior",
+    label: "Tag-balance weight",
+    caption:
+      "Penalizes open/close tag count mismatch in the predicted distribution. Tag IDs are auto-discovered from SPM (`<…>` / `</…>`). 0 disables; typical 0.01–0.1 for phrase-tag corpora.",
+    inputKind: "number",
+    step: 0.01,
+  }),
 
   // ── Length boost ───────────────────────────────────────────────
   length_boost_threshold: ui(z.number().int().default(40), {

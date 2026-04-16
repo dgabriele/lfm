@@ -313,6 +313,10 @@ class ExpressionDecoder:
         z_weights: Tensor,
         max_tokens_per_phrase: int = 48,
         temperature: float = 0.0,
+        *,
+        constrained_close: bool = False,
+        tag_open_to_close: dict[int, int] | None = None,
+        is_word_start: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Decode z-sequence into tokens via KV-cached autoregressive generation.
 
@@ -478,4 +482,77 @@ class ExpressionDecoder:
                 )
                 out = decoder(all_embed, memory, tgt_mask=tgt_mask)
 
+        if constrained_close and tag_open_to_close and is_word_start is not None:
+            _apply_constrained_close(
+                tokens=tokens,
+                token_mask=token_mask,
+                phrase_boundaries=phrase_boundaries,
+                z_weights=z_weights,
+                tag_open_to_close=tag_open_to_close,
+                is_word_start=is_word_start,
+                eos_id=gen.eos_id,
+            )
+
         return tokens, token_mask, phrase_boundaries
+
+
+def _apply_constrained_close(
+    *,
+    tokens: Tensor,
+    token_mask: Tensor,
+    phrase_boundaries: Tensor,
+    z_weights: Tensor,
+    tag_open_to_close: dict[int, int],
+    is_word_start: Tensor,
+    eos_id: int,
+) -> None:
+    """Post-process force-truncated phrases to end with a matched close
+    tag at a word boundary.
+
+    For each active phrase, if its last content token is neither EOS nor
+    a registered close tag, walk backward popping non-word-start tokens
+    until we hit a word-initial piece or the phrase's open tag, then
+    overwrite the next position with the close tag corresponding to the
+    phrase's open tag.  Mutates ``tokens``/``token_mask`` in place.
+
+    Skips phrases whose open tag isn't in the open→close registry (no
+    close tag to emit) and phrases that ended naturally at EOS.
+    """
+    batch, num_phrases = phrase_boundaries.shape
+    close_set = set(tag_open_to_close.values())
+    for bi in range(batch):
+        prev_end = 0
+        for pi in range(num_phrases):
+            if z_weights[bi, pi].item() <= 0.01:
+                continue
+            boundary = int(phrase_boundaries[bi, pi].item())
+            end = boundary if boundary > 0 and pi < num_phrases - 1 else _mask_end(token_mask[bi])
+            if end <= prev_end:
+                continue
+            last = int(tokens[bi, end - 1].item())
+            if last == eos_id or last in close_set:
+                prev_end = end
+                continue
+            open_tag = int(tokens[bi, prev_end].item())
+            close_tag = tag_open_to_close.get(open_tag)
+            if close_tag is None:
+                prev_end = end
+                continue
+            pos = end - 1
+            while pos > prev_end and not bool(is_word_start[tokens[bi, pos]].item()):
+                pos -= 1
+            if pos + 1 < tokens.shape[1]:
+                tokens[bi, pos + 1] = close_tag
+                token_mask[bi, pos + 1] = True
+                # Zero out anything that used to live past the new close.
+                if pos + 2 < end:
+                    tokens[bi, pos + 2:end] = 0
+                    token_mask[bi, pos + 2:end] = False
+            prev_end = end
+
+
+def _mask_end(mask_row: Tensor) -> int:
+    idxs = torch.nonzero(mask_row, as_tuple=False)
+    if idxs.numel() == 0:
+        return 0
+    return int(idxs[-1].item()) + 1

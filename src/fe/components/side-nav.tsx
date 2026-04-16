@@ -74,6 +74,7 @@ export function SideNav() {
       <nav className="flex flex-col gap-1">
         <DisclosureGroup
           defaultExpandedKeys={defaultExpanded.length ? defaultExpanded : ["models"]}
+          className="flex flex-col gap-2"
         >
           {NAV.map((entry) =>
             entry.kind === "link" ? (

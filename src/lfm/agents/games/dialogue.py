@@ -55,6 +55,48 @@ from lfm.generator.config import GeneratorConfig
 logger = logging.getLogger(__name__)
 
 
+def _build_constrained_close_tables(
+    faculty: LanguageFaculty, device: torch.device,
+) -> tuple[torch.Tensor | None, dict[int, int]]:
+    """Scan the faculty's tokenizer vocabulary once, return:
+
+      * ``is_word_start`` — bool tensor of shape ``(vocab_size,)``.  True
+        for pieces that begin a new word (``▁`` prefix) or are
+        user-defined symbols (e.g. `<NP>`, which are atomic word units).
+      * ``tag_open_to_close`` — mapping from open-tag ID to its
+        matching close-tag ID.
+
+    Returns ``(None, {})`` for tokenizers that don't expose
+    ``id_to_piece`` (phoneme alphabets).  The decoder treats that as
+    "constrained close not supported" and silently no-ops.
+    """
+    tok = getattr(faculty.generator, "_tokenizer", None)
+    sp = getattr(tok, "_sp", None) if tok is not None else None
+    if sp is None or not hasattr(sp, "id_to_piece"):
+        return None, {}
+    V = int(sp.vocab_size())
+    ws = torch.zeros(V, dtype=torch.bool, device=device)
+    pieces: dict[str, int] = {}
+    opens: dict[str, int] = {}
+    closes: dict[str, int] = {}
+    for tid in range(V):
+        p = sp.id_to_piece(tid)
+        pieces[p] = tid
+        if p.startswith("\u2581") or (
+            p.startswith("<") and p.endswith(">") and not p.startswith("</")
+        ):
+            ws[tid] = True
+        # user-defined symbol closes should also count as word-ending
+        # "whole" tokens — they mark phrase boundaries.
+        if p.startswith("</") and p.endswith(">"):
+            ws[tid] = True
+            closes[p[2:-1]] = tid
+        elif p.startswith("<") and p.endswith(">") and not p.startswith("</"):
+            opens[p[1:-1]] = tid
+    mapping = {opens[k]: closes[k] for k in opens.keys() & closes.keys()}
+    return ws, mapping
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -153,6 +195,15 @@ class DialogueGameConfig(LFMBaseConfig):
     # Phase 2 VRAM management
     phase2_vram_budget_mb: float = 1500.0
     phase2_min_chunk: int = 4
+
+    # Constrained decoding: if a phrase doesn't emit EOS within
+    # ``max_tokens_per_phrase`` (typically sized to cover mean+2σ of
+    # training phrase length), backtrack trailing non-word-start
+    # pieces and append the matching close tag — so the decoder's
+    # free-run output always ends in a balanced `</TAG>` instead of
+    # mid-word cutoff.  Default off; turn on when the trained decoder
+    # still occasionally fails to close.
+    constrained_close: bool = False
 
     # Message encoder
     encoder: MessageEncoderConfig = MessageEncoderConfig()
@@ -381,6 +432,15 @@ class DialogueGame(nn.Module):
 
         # Phrase decoder (shared autoregressive decode logic)
         self.phrase_decoder = ExpressionDecoder(gen)
+
+        # Constrained-close helpers (word-start table + open→close tag
+        # map).  Derived from the faculty's tokenizer once; empty if
+        # the tokenizer has no bracket tags (phoneme alphabets).  Only
+        # consulted by the decoder when ``config.constrained_close``
+        # is True.
+        self._is_word_start, self._tag_open_to_close = (
+            _build_constrained_close_tables(faculty, device)
+        )
 
         # Context projection (decoder hidden → fixed-size turn summary)
         self.hidden_to_context = nn.Linear(
@@ -766,7 +826,12 @@ class DialogueGame(nn.Module):
 
         # Phase 1: z-gen + no_grad decode at full batch.
         z_seq, z_weights, num_phrases = self.z_gen(conditioning)
-        tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(z_seq, z_weights)
+        tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(
+            z_seq, z_weights,
+            constrained_close=self.config.constrained_close,
+            tag_open_to_close=self._tag_open_to_close,
+            is_word_start=self._is_word_start,
+        )
         tokens_cpu = tokens.cpu()
         gen_mask_cpu = gen_mask.cpu()
 

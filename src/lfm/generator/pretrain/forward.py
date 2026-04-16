@@ -153,7 +153,9 @@ def _vae_forward(
     _residual_vq: nn.Module | None = None,
     encoder_tokens: Tensor | None = None,
     encoder_lengths: Tensor | None = None,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None, Tensor]:
+    _tag_open_ids: Tensor | None = None,
+    _tag_close_ids: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None, Tensor, Tensor]:
     """Run one VAE forward pass with optional scheduled sampling.
 
     When ``scheduled_sampling_p > 0``, a two-pass approach is used:
@@ -406,7 +408,33 @@ def _vae_forward(
         kl_per_dim = torch.zeros(b, mu.size(-1), device=device)
         kl_loss = torch.tensor(0.0, device=device)
 
-    return ce_loss, kl_loss, kl_per_dim, z, dec_out, mu, logvar, vq_commitment_loss, bow_loss
+    # Tag-balance auxiliary loss: penalize mismatched open/close tag
+    # expected counts over the generated distribution.  Each sample's
+    # predicted softmax mass over open-tag IDs should sum to roughly
+    # the same as its mass over close-tag IDs (every `<NP>` needs a
+    # matching `</NP>`).  Off-by-default (tag_balance_weight=0).
+    tag_balance_weight = (
+        getattr(_cfg, "tag_balance_weight", 0.0) if _cfg is not None else 0.0
+    )
+    if (
+        tag_balance_weight > 0
+        and _tag_open_ids is not None
+        and _tag_close_ids is not None
+        and _tag_open_ids.numel() > 0
+    ):
+        probs = F.softmax(logits, dim=-1)  # (B, S, V)
+        mask_f = src_mask.unsqueeze(-1).float()  # (B, S, 1)
+        probs_masked = probs * mask_f
+        p_open = probs_masked.index_select(-1, _tag_open_ids).sum(dim=(1, 2))
+        p_close = probs_masked.index_select(-1, _tag_close_ids).sum(dim=(1, 2))
+        tag_balance_loss = (p_open - p_close).pow(2).mean()
+    else:
+        tag_balance_loss = torch.tensor(0.0, device=device)
+
+    return (
+        ce_loss, kl_loss, kl_per_dim, z, dec_out, mu, logvar,
+        vq_commitment_loss, bow_loss, tag_balance_loss,
+    )
 
 
 # ---------------------------------------------------------------------------
