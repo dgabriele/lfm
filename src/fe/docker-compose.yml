@@ -15,11 +15,15 @@ services:
     image: lfm-fe-dev
     container_name: lfm-fe
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "0.0.0.0:3000:3000"
     environment:
       NODE_ENV: development
       LFM_CORPORA_DB: /workspace/data/corpora.duckdb
+      DATABASE_URL: postgres://lfm:lfm@db:5432/lfm
       # Turbopack polls by default inside Docker; explicit env keeps
       # HMR predictable under bind mounts.
       WATCHPACK_POLLING: "true"
@@ -31,5 +35,26 @@ services:
     working_dir: /app
     command: ["pnpm", "dev", "--hostname", "0.0.0.0"]
 
+  db:
+    image: postgres:17-alpine
+    container_name: lfm-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lfm
+      POSTGRES_PASSWORD: lfm
+      POSTGRES_DB: lfm
+    ports:
+      # Host-published so we can connect from psql/tools; safe on LAN
+      # since this is a dev setup.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - fe_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lfm -d lfm"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
 volumes:
   fe_node_modules:
+  fe_db_data:

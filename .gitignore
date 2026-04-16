@@ -20,6 +20,11 @@ wheels/
 .installed.cfg
 *.egg
 
+# Un-ignore the front-end's lib/ directory (Next app source).  Python's
+# `lib/` convention would otherwise silently swallow src/fe/lib/.
+!src/fe/lib/
+!src/fe/lib/**
+
 checkpoints/
 
 # Model checkpoints and training artifacts (never commit these!)

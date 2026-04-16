@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Library, type LucideIcon } from "lucide-react";
+import { Library, Boxes, type LucideIcon } from "lucide-react";
 
 const NAV_ITEMS: { label: string; href: string; icon: LucideIcon }[] = [
   { label: "Corpora", href: "/corpora", icon: Library },
+  { label: "Models", href: "/models", icon: Boxes },
 ];
 
 /**
