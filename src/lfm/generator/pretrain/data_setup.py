@@ -539,7 +539,15 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
 
         # 3. Tokenize, keeping language labels aligned.
         # Track which input indices survived for embedding alignment.
-        _spm_specials = {0, 1, 2, 3}
+        # Only filter IDs that SPM actually assigned as control tokens.
+        # v13's SPM disables BOS/EOS/PAD (-1) and puts phrase tags at
+        # IDs 1–16 via user_defined_symbols; the old hardcoded {0,1,2,3}
+        # would silently strip <S>, </S>, and <NP>.
+        _spm_specials = {
+            tid
+            for tid in [sp.unk_id(), sp.bos_id(), sp.eos_id(), sp.pad_id()]
+            if tid >= 0
+        }
         token_ids_list = []
         languages_list = []
         _surviving_indices: list[int] = []
