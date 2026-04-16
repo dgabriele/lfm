@@ -22,16 +22,20 @@ const ABSOLUTE = new Intl.DateTimeFormat("en-US", {
 
 function formatAgo(d: Date, now: number): string {
   const s = Math.max(0, Math.floor((now - d.getTime()) / 1000));
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 60) return "updated just now";
+  if (s < 3600) return `updated ${Math.floor(s / 60)}m ago`;
   if (s < 86400) {
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
-    return m ? `${h}h ${m}m ago` : `${h}h ago`;
+    return m
+      ? `updated ${h}h ${m}m ago`
+      : `updated ${h}h ago`;
   }
   const days = Math.floor(s / 86400);
   const h = Math.floor((s % 86400) / 3600);
-  return h ? `${days}d ${h}h ago` : `${days}d ago`;
+  return h
+    ? `updated ${days}d ${h}h ago`
+    : `updated ${days}d ago`;
 }
 
 export function TimestampedMeta({

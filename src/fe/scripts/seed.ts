@@ -42,29 +42,29 @@ async function main() {
   const db = drizzle(sql, { schema });
 
   const existing = await db
-    .select({ id: schema.vaeModels.id })
-    .from(schema.vaeModels)
+    .select({ id: schema.phraseVaeConfigPresets.id })
+    .from(schema.phraseVaeConfigPresets)
     .where(
       and(
-        eq(schema.vaeModels.variant, "phrase-vae"),
-        eq(schema.vaeModels.name, SEED_NAME),
+        eq(schema.phraseVaeConfigPresets.variant, "phrase-vae"),
+        eq(schema.phraseVaeConfigPresets.name, SEED_NAME),
       ),
     )
     .limit(1);
 
   if (existing[0]) {
     await db
-      .update(schema.vaeModels)
+      .update(schema.phraseVaeConfigPresets)
       .set({
         config,
         description: SEED_DESCRIPTION,
         updatedAt: new Date(),
       })
-      .where(eq(schema.vaeModels.id, existing[0].id));
+      .where(eq(schema.phraseVaeConfigPresets.id, existing[0].id));
     console.log(`updated ${SEED_NAME} (${existing[0].id})`);
   } else {
     const [row] = await db
-      .insert(schema.vaeModels)
+      .insert(schema.phraseVaeConfigPresets)
       .values({
         name: SEED_NAME,
         variant: "phrase-vae",
@@ -72,7 +72,7 @@ async function main() {
         config,
         description: SEED_DESCRIPTION,
       })
-      .returning({ id: schema.vaeModels.id });
+      .returning({ id: schema.phraseVaeConfigPresets.id });
     console.log(`inserted ${SEED_NAME} (${row?.id})`);
   }
 

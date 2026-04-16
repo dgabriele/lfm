@@ -15,16 +15,17 @@ import { phraseVAEToYaml } from "@/lib/config-schemas/phrase-vae-yaml";
 import { SchemaForm } from "@/components/form/schema-form";
 import { YamlPreview } from "@/components/form/yaml-preview";
 import {
-  createPhraseVAEModel,
-  updatePhraseVAEModel,
-  deletePhraseVAEModel,
+  createPhraseVAEConfigPreset,
+  updatePhraseVAEConfigPreset,
+  deletePhraseVAEConfigPreset,
 } from "@/lib/models/actions";
 
 /**
- * Client shell for the phrase-VAE config editor.  Holds form state,
- * wires up `SchemaForm` + `YamlPreview`, and calls the appropriate
- * server action on save.  Used by both `/new` and `/[id]/edit` pages;
- * the difference is whether `initialId` is present.
+ * Client shell for the phrase-VAE *config preset* editor.  Holds form
+ * state, wires up `SchemaForm` + `YamlPreview`, and calls the
+ * appropriate server action on save.  A preset is a reusable template;
+ * instantiating it as an actual PhraseVAE happens via the "Use" button
+ * on the presets sidebar (snapshots the config into the new VAE).
  */
 
 export type CorpusOption = { value: string; label: string };
@@ -123,7 +124,7 @@ function IdentitySection({
   );
 }
 
-export function PhraseVAEEditor({
+export function PhraseVAEPresetEditor({
   initialId,
   initialName,
   initialDescription,
@@ -175,19 +176,19 @@ export function PhraseVAEEditor({
     };
     startTransition(async () => {
       if (initialId) {
-        await updatePhraseVAEModel(initialId, payload);
+        await updatePhraseVAEConfigPreset(initialId, payload);
         router.refresh();
       } else {
-        await createPhraseVAEModel(payload);
+        await createPhraseVAEConfigPreset(payload);
       }
     });
   };
 
   const onDelete = () => {
     if (!initialId) return;
-    if (!confirm(`Delete config "${name}"?`)) return;
+    if (!confirm(`Delete preset "${name}"?`)) return;
     startTransition(async () => {
-      await deletePhraseVAEModel(initialId);
+      await deletePhraseVAEConfigPreset(initialId);
     });
   };
 
@@ -196,7 +197,7 @@ export function PhraseVAEEditor({
       <header className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-2 flex-1 min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">
-            {name.trim() || "Untitled config"}
+            {name.trim() || "Untitled preset"}
           </h1>
           {description.trim() && (
             <p

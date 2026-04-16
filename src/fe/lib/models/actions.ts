@@ -9,8 +9,15 @@ import {
   type PhraseVAEConfigShape,
 } from "@/lib/config-schemas/phrase-vae";
 
-// Postgres unique-violation SQLSTATE.  Mapped to a friendlier error so
-// the client-side check is backstopped cleanly if it's ever bypassed.
+/**
+ * Mutations split into "config preset" actions (the recipe templates)
+ * and "phrase VAE" actions (instantiated models).
+ *
+ * Config validation happens at every write boundary so a misshapen
+ * client state can't corrupt either table.
+ */
+
+// Postgres unique-violation SQLSTATE.
 const PG_UNIQUE_VIOLATION = "23505";
 
 function isUniqueViolation(err: unknown): err is { code: string } {
@@ -22,13 +29,9 @@ function isUniqueViolation(err: unknown): err is { code: string } {
   );
 }
 
-/**
- * Server actions for phrase-VAE model configs.  Validation happens
- * against the Zod schema at the boundary so a misshapen client state
- * can't corrupt the DB.
- */
+// ── Config preset actions (templates) ────────────────────────────
 
-export async function createPhraseVAEModel(input: {
+export async function createPhraseVAEConfigPreset(input: {
   name: string;
   description: string;
   config: PhraseVAEConfigShape;
@@ -37,7 +40,7 @@ export async function createPhraseVAEModel(input: {
   let row;
   try {
     [row] = await db
-      .insert(schema.vaeModels)
+      .insert(schema.phraseVaeConfigPresets)
       .values({
         name: input.name,
         description: input.description || null,
@@ -45,54 +48,151 @@ export async function createPhraseVAEModel(input: {
         status: "draft",
         config: parsed,
       })
-      .returning({ id: schema.vaeModels.id });
+      .returning({ id: schema.phraseVaeConfigPresets.id });
   } catch (err) {
     if (isUniqueViolation(err)) {
-      throw new Error(`A config named "${input.name}" already exists.`);
+      throw new Error(`A preset named "${input.name}" already exists.`);
     }
     throw err;
   }
   revalidatePath("/models/phrase-vae");
   if (!row) throw new Error("insert returned no row");
-  redirect(`/models/phrase-vae/${row.id}/edit`);
+  redirect(`/models/phrase-vae/presets/${row.id}/edit`);
 }
 
-export async function updatePhraseVAEModel(
+export async function updatePhraseVAEConfigPreset(
   id: string,
   input: { name: string; description: string; config: PhraseVAEConfigShape },
 ) {
   const parsed = PhraseVAEConfig.parse(input.config);
   try {
     await db
-      .update(schema.vaeModels)
+      .update(schema.phraseVaeConfigPresets)
       .set({
         name: input.name,
         description: input.description || null,
         config: parsed,
         updatedAt: new Date(),
       })
-      .where(eq(schema.vaeModels.id, id));
+      .where(eq(schema.phraseVaeConfigPresets.id, id));
   } catch (err) {
     if (isUniqueViolation(err)) {
-      throw new Error(`A config named "${input.name}" already exists.`);
+      throw new Error(`A preset named "${input.name}" already exists.`);
     }
     throw err;
   }
   revalidatePath("/models/phrase-vae");
-  revalidatePath(`/models/phrase-vae/${id}/edit`);
+  revalidatePath(`/models/phrase-vae/presets/${id}/edit`);
 }
 
-/** Bump `updated_at` so the row rises to the top of the MRU list. */
-export async function touchPhraseVAEModel(id: string) {
+export async function touchPhraseVAEConfigPreset(id: string) {
   await db
-    .update(schema.vaeModels)
+    .update(schema.phraseVaeConfigPresets)
     .set({ updatedAt: new Date() })
-    .where(eq(schema.vaeModels.id, id));
+    .where(eq(schema.phraseVaeConfigPresets.id, id));
   revalidatePath("/models/phrase-vae");
 }
 
-export async function deletePhraseVAEModel(id: string) {
-  await db.delete(schema.vaeModels).where(eq(schema.vaeModels.id, id));
+export async function deletePhraseVAEConfigPreset(id: string) {
+  await db
+    .delete(schema.phraseVaeConfigPresets)
+    .where(eq(schema.phraseVaeConfigPresets.id, id));
+  revalidatePath("/models/phrase-vae");
+  redirect("/models/phrase-vae");
+}
+
+/**
+ * Duplicate a preset into a new preset row — useful for forking a
+ * known-good config and tweaking from there.  Auto-suffixes the new
+ * name with " (copy)" / " (copy 2)" / … until unique.
+ */
+export async function duplicatePhraseVAEConfigPreset(id: string) {
+  const sources = await db
+    .select()
+    .from(schema.phraseVaeConfigPresets)
+    .where(eq(schema.phraseVaeConfigPresets.id, id))
+    .limit(1);
+  const src = sources[0];
+  if (!src) throw new Error(`preset ${id} not found`);
+
+  // Find an unused " (copy …)" name.
+  const existing = new Set(
+    (await db.select({ name: schema.phraseVaeConfigPresets.name })
+      .from(schema.phraseVaeConfigPresets)).map((r) => r.name.toLowerCase()),
+  );
+  let candidate = `${src.name} (copy)`;
+  let n = 2;
+  while (existing.has(candidate.toLowerCase())) {
+    candidate = `${src.name} (copy ${n})`;
+    n += 1;
+  }
+
+  const [row] = await db
+    .insert(schema.phraseVaeConfigPresets)
+    .values({
+      name: candidate,
+      description: src.description,
+      variant: src.variant,
+      status: "draft",
+      config: src.config,
+    })
+    .returning({ id: schema.phraseVaeConfigPresets.id });
+  if (!row) throw new Error("insert returned no row");
+  revalidatePath("/models/phrase-vae");
+  redirect(`/models/phrase-vae/presets/${row.id}/edit`);
+}
+
+// ── Phrase VAE actions (instantiated models) ─────────────────────
+
+/**
+ * Instantiate a new PhraseVAE from a preset.  The preset's config
+ * is snapshotted into the new VAE row — subsequent edits to the
+ * preset never mutate this VAE.
+ */
+export async function createPhraseVAEFromPreset(input: {
+  presetId: string;
+  name: string;
+  description: string;
+  vaeType: "ipa" | "token_vocab";
+  corpusId: string;
+}) {
+  // Re-fetch the preset to snapshot the latest version of its config.
+  const presets = await db
+    .select()
+    .from(schema.phraseVaeConfigPresets)
+    .where(eq(schema.phraseVaeConfigPresets.id, input.presetId))
+    .limit(1);
+  const preset = presets[0];
+  if (!preset) throw new Error(`preset ${input.presetId} not found`);
+  const snapshot = PhraseVAEConfig.parse(preset.config);
+
+  let row;
+  try {
+    [row] = await db
+      .insert(schema.phraseVaes)
+      .values({
+        name: input.name,
+        description: input.description || null,
+        status: "initialized",
+        vaeType: input.vaeType,
+        corpusId: input.corpusId,
+        config: snapshot,
+        presetId: input.presetId,
+      })
+      .returning({ id: schema.phraseVaes.id });
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      throw new Error(`A phrase VAE named "${input.name}" already exists.`);
+    }
+    throw err;
+  }
+  if (!row) throw new Error("insert returned no row");
+  revalidatePath("/models/phrase-vae");
+  redirect(`/models/phrase-vae/${row.id}`);
+}
+
+export async function deletePhraseVAE(id: string) {
+  await db.delete(schema.phraseVaes).where(eq(schema.phraseVaes.id, id));
   revalidatePath("/models/phrase-vae");
   redirect("/models/phrase-vae");
 }

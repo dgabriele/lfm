@@ -1,14 +1,30 @@
 import Link from "next/link";
-import { Plus, Sparkles } from "lucide-react";
-import { listPhraseVAEModels } from "@/lib/models/queries";
-import { ConfigsSidebar } from "@/components/phrase-vae/configs-sidebar";
+import { Plus } from "lucide-react";
+import {
+  listPhraseVAEConfigPresets,
+  listPhraseVAEs,
+  listPhraseVAENames,
+} from "@/lib/models/queries";
+import { listCorpora } from "@/lib/corpora";
+import { PresetsSidebar } from "@/components/phrase-vae/presets-sidebar";
+import { VaesTable } from "@/components/phrase-vae/vaes-table";
+import type { PhraseVaeConfigPresetRow } from "@/lib/db/schema";
 
 export const metadata = {
-  title: "Phrase VAE — LFM",
+  title: "Phrase VAEs — LFM",
 };
 
 export default async function PhraseVAEIndexPage() {
-  const configs = await listPhraseVAEModels();
+  const [vaes, presets, corpora, existingVaeNames] = await Promise.all([
+    listPhraseVAEs(),
+    listPhraseVAEConfigPresets(),
+    listCorpora(),
+    listPhraseVAENames(),
+  ]);
+
+  const presetsById: Record<string, PhraseVaeConfigPresetRow> = {};
+  for (const p of presets) presetsById[p.id] = p;
+  const corpusOptions = corpora.map((c) => ({ value: c.id, label: c.name }));
 
   return (
     <div className="flex flex-1 min-h-0">
@@ -16,54 +32,28 @@ export default async function PhraseVAEIndexPage() {
         <header className="flex items-center justify-between gap-4">
           <div className="flex flex-col gap-1">
             <h1 className="text-2xl font-semibold tracking-tight">
-              Phrase VAE
+              Phrase VAEs
             </h1>
             <p className="text-sm text-muted">
-              Configure the frozen phrase-decoder VAE that turns continuous
-              representations into variable-length linguistic surface forms.
+              Instantiated phrase-VAE models — each rooted in a config
+              preset that was snapshotted at instantiation time.
             </p>
           </div>
           <Link
-            href="/models/phrase-vae/new"
+            href="/models/phrase-vae/presets/new"
             className="h-10 px-4 rounded-[calc(var(--radius)*0.6)] bg-accent text-accent-foreground text-sm font-semibold hover:brightness-110 transition-all flex items-center gap-2 shrink-0"
           >
             <Plus className="w-4 h-4" strokeWidth={2.25} />
-            New config
+            New preset
           </Link>
         </header>
-
-        {configs.length === 0 ? (
-          <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-4 text-center">
-            <Sparkles className="w-10 h-10 text-accent/70" strokeWidth={1.5} />
-            <h2 className="text-lg font-semibold">
-              No configs yet
-            </h2>
-            <p className="text-sm text-muted max-w-md leading-relaxed">
-              A phrase-VAE config captures everything the training loop
-              needs — dataset, tokenizer, architecture, objectives,
-              schedule.  Start with a fresh config or seed the v13 preset.
-            </p>
-            <Link
-              href="/models/phrase-vae/new"
-              className="mt-2 h-10 px-5 rounded-[calc(var(--radius)*0.6)] bg-accent text-accent-foreground text-sm font-semibold hover:brightness-110 transition-all flex items-center gap-2"
-            >
-              <Plus className="w-4 h-4" strokeWidth={2.25} />
-              Create first config
-            </Link>
-          </div>
-        ) : (
-          <div className="flex-1 min-h-0 flex flex-col gap-3 text-sm text-muted leading-relaxed max-w-prose">
-            <p>
-              Configs are listed in the right rail, most recently edited
-              first.  <strong className="text-foreground/90">Edit</strong> opens
-              the editor; <strong className="text-foreground/90">Use</strong>{" "}
-              downloads the YAML for immediate consumption by the training
-              pipeline.
-            </p>
-          </div>
-        )}
+        <VaesTable vaes={vaes} presetsById={presetsById} />
       </section>
-      <ConfigsSidebar configs={configs} />
+      <PresetsSidebar
+        presets={presets}
+        corpora={corpusOptions}
+        existingVaeNames={existingVaeNames}
+      />
     </div>
   );
 }
