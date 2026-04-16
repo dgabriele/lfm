@@ -100,6 +100,14 @@ _CONNECTIVES = frozenset({
     "and", "or", "but", "nor", "yet", "so",
 })
 
+# Pure coordinators — can NEVER open an extracted constituent.  If a
+# constituent starts with one of these, the left conjunct was stripped
+# by the tree walk ("X <S> and Y </S>") so what we have is a fragment,
+# not a well-formed phrase.  "so" and "yet" are excluded because they
+# have legitimate non-coordinator uses at the start of a clause
+# ("so that...", "yet he failed...").
+_CC_OPENERS = frozenset({"and", "or", "but", "nor"})
+
 # Words that cannot end a well-formed constituent (would indicate the
 # parse is truncated).  Union of prepositions, determiners, connectives,
 # and a handful of common auxiliaries.
@@ -166,6 +174,9 @@ def _clean(line: str) -> tuple[str | None, str]:
     tokens_lc = [t.lower() for t in tokens]
     if len(tokens) < _MIN_PHRASE_TOKENS:
         return None, "too_few_tokens"
+    # Coordinator opener — fragment from a stripped left conjunct.
+    if tokens_lc[0] in _CC_OPENERS:
+        return None, "cc_opener"
     # A PP must start with a real English preposition — Stanza mislabels
     # numeric sequences or fragments as PP.
     if label == "PP" and tokens_lc[0] not in _PREPOSITIONS:
