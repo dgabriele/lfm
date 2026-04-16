@@ -77,22 +77,57 @@ class PCTraversalVisualization(BaseVisualization):
                 texts.append(sp.decode(toks).strip())
             traversals[k] = (scale, texts)
 
+        # Core numerical analysis to stdout before the traversal text
+        # dump — gives a scannable summary of the latent geometry
+        # without needing to open the saved figure.
+        ev_ratio = pca.explained_variance_ratio_
+        cum_ev = np.cumsum(ev_ratio)
+        # Participation ratio: (Σλ)² / Σ(λ²) — effective dimensionality.
+        eigvals = pca.explained_variance_
+        participation = (eigvals.sum() ** 2) / (eigvals ** 2).sum()
+        # Sorted list + thresholds for "dims to explain 50 / 90 / 99%".
+        # Uses the full fit (top_k components); clamps if top_k is low.
+        def _dims_to_reach(threshold: float) -> int:
+            return int((cum_ev < threshold).sum()) + 1
+        print(
+            f"\n==== PC traversal ({z_np.shape[0]} encoded samples, "
+            f"top_k={pca.n_components_}) ===="
+        )
+        print(f"participation ratio (effective dim): {participation:.2f}")
+        print(f"dims to reach 50% variance: {_dims_to_reach(0.50)}")
+        print(f"dims to reach 90% variance: {_dims_to_reach(0.90)}")
+        print(f"dims to reach 99% variance: {_dims_to_reach(0.99)}")
+        print()
+        print("PC   σ          var%    cum%")
+        for k in range(pca.n_components_):
+            print(
+                f"PC{k:<2}  {float(np.sqrt(eigvals[k])):>6.3f}   "
+                f"{100*ev_ratio[k]:>5.2f}%  {100*cum_ev[k]:>5.2f}%"
+            )
+        print()
+        print("traversal samples per PC:")
+
         # Log + report ---------------------------------------------------
         report_lines = [
             f"PC traversal on {z_np.shape[0]} encoded samples, top_k={pca.n_components_}, "
             f"steps={n_steps}, span=±{span_sigma:g}σ",
+            f"participation ratio (effective dim): {participation:.2f}",
+            f"dims to reach 50/90/99%: "
+            f"{_dims_to_reach(0.50)}/{_dims_to_reach(0.90)}/{_dims_to_reach(0.99)}",
             "",
         ]
         for k, (scale, texts) in traversals.items():
             ev = pca.explained_variance_ratio_[k]
             header = f"PC{k}  (σ={scale:.3f}, explains {100*ev:.2f}% variance)"
             report_lines.append(header)
-            logger.info(header)
+            print(header)
             for t, text in zip(sweep, texts):
-                line = f"  t={t:+.2f}σ  {text[:160]}"
+                line = f"  t={t:+.2f}σ  {text}"
                 report_lines.append(line)
-                logger.info(line)
+                print(line)
             report_lines.append("")
+            print()
+        print("==== end PC traversal ====\n")
 
         self._report_text = "\n".join(report_lines)
 

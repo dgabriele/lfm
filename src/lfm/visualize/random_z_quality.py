@@ -114,16 +114,45 @@ class RandomZQualityVisualization(BaseVisualization):
             lengths.append(len(text))
         uniq = len(set(texts))
 
-        logger.info("random-z decode on %d samples:", n)
-        logger.info("  matched tags:    %d (%.1f%%)", counts["matched"], 100 * counts["matched"] / n)
-        logger.info("  mismatched tags: %d (%.1f%%)", counts["mismatched"], 100 * counts["mismatched"] / n)
-        logger.info("  unmatched:       %d (%.1f%%)", counts["unmatched"], 100 * counts["unmatched"] / n)
-        logger.info("  unique outputs:  %d (%.1f%%)", uniq, 100 * uniq / n)
-        logger.info("  length: min=%d max=%d mean=%.1f p99=%d",
-                    min(lengths), max(lengths), float(np.mean(lengths)),
-                    int(np.percentile(lengths, 99)))
-        # Show a handful of examples from each category.
-        self._log_examples(cats, texts)
+        # Core numerical analysis — printed directly to stdout so the
+        # figures are a visual aid, not the only way to read results.
+        lens_arr = np.asarray(lengths, dtype=np.int32)
+        pct_bounds = (0, 25, 50, 75, 90, 99, 100)
+        pct_vals = np.percentile(lens_arr, pct_bounds)
+        print(f"\n==== random-z decode quality (N={n}) ====")
+        print(f"tag pair outcome      count     pct")
+        print(f"  matched             {counts['matched']:>5}   {100*counts['matched']/n:>5.1f}%")
+        print(f"  mismatched          {counts['mismatched']:>5}   {100*counts['mismatched']/n:>5.1f}%")
+        print(f"  unmatched           {counts['unmatched']:>5}   {100*counts['unmatched']/n:>5.1f}%")
+        print(f"unique outputs:       {uniq:>5}   {100*uniq/n:>5.1f}%")
+        print()
+        print(f"decoded length (chars): min={lens_arr.min()} max={lens_arr.max()} "
+              f"mean={lens_arr.mean():.1f} std={lens_arr.std():.1f}")
+        print("  percentile  length")
+        for p, v in zip(pct_bounds, pct_vals):
+            print(f"  p{p:<3}        {int(v)}")
+        # Histogram buckets that mirror the saved figure so you can
+        # scan the shape from the terminal.
+        hist, bin_edges = np.histogram(lens_arr, bins=10)
+        print("  length histogram (10 bins):")
+        for i, c in enumerate(hist):
+            lo, hi = int(bin_edges[i]), int(bin_edges[i + 1])
+            bar = "#" * int(40 * c / max(hist))
+            print(f"    [{lo:>4}-{hi:<4}]  {c:>4}  {bar}")
+        print()
+        print("outer-tag type frequency:")
+        if tag_types:
+            for tag, ct in sorted(tag_types.items(), key=lambda kv: -kv[1]):
+                print(f"  <{tag}>  {ct:>5}   {100*ct/n:>5.1f}%")
+        else:
+            print("  (no recognizable opener)")
+        print()
+        print("examples (up to 3 per category):")
+        for cat in ("matched", "mismatched", "unmatched"):
+            ex = [t for (c, _), t in zip(cats, texts) if c == cat][:3]
+            for t in ex:
+                print(f"  [{cat}] {t}")
+        print("==== end random-z ====\n")
 
         # Save a compact text report next to the figures.
         report = [
@@ -189,7 +218,7 @@ class RandomZQualityVisualization(BaseVisualization):
         for cat in ("matched", "mismatched", "unmatched"):
             examples = [t for (c, _), t in zip(cats, texts) if c == cat][:k]
             for t in examples:
-                logger.info("  [%s] %s", cat, t[:140])
+                logger.info("  [%s] %s", cat, t)
 
     def save(self, figures, suffixes=None):  # type: ignore[override]
         # Write the text report alongside the figures.
