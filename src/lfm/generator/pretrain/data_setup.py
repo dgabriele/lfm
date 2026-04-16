@@ -6,9 +6,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Sampler, random_split
 
 from lfm.data.corpus import (
     MultilingualCorpusDataset,
@@ -27,6 +28,45 @@ def _encode_ipa(sp: Any, text: str) -> list[int]:
     """Encode IPA text. Syllable alignment is baked into the SPM vocabulary
     at training time — no pre-processing needed at encode time."""
     return sp.encode(text, out_type=int)
+
+
+class LargeWeightedSampler(Sampler[int]):
+    """Drop-in replacement for ``WeightedRandomSampler`` that scales past
+    torch's hard 2^24 categorical limit (``torch.multinomial`` throws
+    ``number of categories cannot exceed 2^24``).  v13's 27M-sample
+    training set tripped this.
+
+    Uses ``numpy.random.choice`` under the hood — arbitrary n, identical
+    sampling semantics (with replacement, weighted).
+    """
+
+    def __init__(
+        self,
+        weights: torch.Tensor,
+        num_samples: int,
+        replacement: bool = True,
+        seed: int | None = None,
+    ) -> None:
+        w = weights.detach().cpu().numpy().astype(np.float64, copy=False)
+        total = w.sum()
+        if not np.isfinite(total) or total <= 0:
+            raise ValueError("LargeWeightedSampler: weights must sum to a positive finite value")
+        self._probs = w / total
+        self._num_samples = num_samples
+        self._replacement = replacement
+        self._rng = np.random.default_rng(seed)
+
+    def __iter__(self):
+        idx = self._rng.choice(
+            len(self._probs),
+            size=self._num_samples,
+            replace=self._replacement,
+            p=self._probs,
+        )
+        return iter(idx.tolist())
+
+    def __len__(self) -> int:
+        return self._num_samples
 
 
 class PreprocessedData:
@@ -422,7 +462,7 @@ def _load_and_preprocess_phoneme_h5(
         _train_lengths = [len(token_ids_list[i]) for i in _train_indices]
         _len_arr = torch.tensor(_train_lengths, dtype=torch.float32)
         _weights = torch.where(_len_arr >= _boost_thresh, _boost_factor, 1.0)
-        _sampler = torch.utils.data.WeightedRandomSampler(
+        _sampler = LargeWeightedSampler(
             _weights, num_samples=len(_weights), replacement=True,
         )
         train_loader = DataLoader(
@@ -688,7 +728,7 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
             _train_lengths = [len(token_ids_list[i]) for i in _train_indices]
             _len_arr = torch.tensor(_train_lengths, dtype=torch.float32)
             _weights = torch.where(_len_arr >= _boost_thresh, _boost_factor, 1.0)
-            _sampler = torch.utils.data.WeightedRandomSampler(
+            _sampler = LargeWeightedSampler(
                 _weights, num_samples=len(_weights), replacement=True,
             )
             train_loader = DataLoader(
