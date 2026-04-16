@@ -465,7 +465,16 @@ def _encode_labeled_fallback(
 
     sp = spm_lib.SentencePieceProcessor(model_file=config.spm_model)
     vocab_size = sp.vocab_size()
-    _spm_specials = {0, 1, 2, 3}
+    # Adaptive: only strip IDs the SPM model actually assigned to
+    # controls (unk/bos/eos/pad).  v13-style models put phrase tags at
+    # IDs 1-16 via user_defined_symbols while leaving bos/eos/pad = -1;
+    # a hardcoded {0,1,2,3} filter would silently drop `<S>`, `</S>`,
+    # `<NP>` from every sample.
+    _spm_specials = {
+        tid
+        for tid in [sp.unk_id(), sp.bos_id(), sp.eos_id(), sp.pad_id()]
+        if tid >= 0
+    }
 
     languages: list[str] = []
     token_ids_list: list[list[int]] = []

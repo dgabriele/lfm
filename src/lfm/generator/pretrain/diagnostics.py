@@ -107,10 +107,26 @@ def sample_decode(
         nxt = torch.multinomial(probs, num_samples=1)
         ids = torch.cat([ids, nxt], dim=1)
     # Decode single-sentence output: truncate at first EOS.
-    # Specials differ by backend: SPM reserves ids 0-3 for UNK/BOS/EOS/PAD,
-    # while the phoneme alphabet uses 0..vocab_size-1 all as valid phonemes.
+    # Strip only the SPM control IDs that were actually assigned.  The
+    # old hardcoded {0,1,2,3} filter worked for v7/v12 (UNK/BOS/EOS/PAD)
+    # but swallowed `<S>`, `</S>`, `<NP>` in v13 — those IDs hold
+    # user_defined_symbols (phrase tags), not controls, because the
+    # v13 SPM disables bos/eos/pad (-1).  Query the model for the
+    # truth.
     texts = []
-    _spm_internal = {0, 1, 2, 3} if hasattr(sp, "id_to_piece") else set()
+    if hasattr(sp, "id_to_piece"):
+        _spm_internal = {
+            tid
+            for tid in [
+                sp.unk_id(),  # type: ignore[attr-defined]
+                sp.bos_id(),  # type: ignore[attr-defined]
+                sp.eos_id(),  # type: ignore[attr-defined]
+                sp.pad_id(),  # type: ignore[attr-defined]
+            ]
+            if tid >= 0
+        }
+    else:
+        _spm_internal = set()
     _specials = _spm_internal | {bos_id, eos_id}
     for j in range(n):
         toks = ids[j, 1:].cpu().tolist()
