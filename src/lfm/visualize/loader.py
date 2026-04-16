@@ -275,7 +275,11 @@ def _encode_token_ids(
 
     eos_id = vocab_size + 1
     dataset = MultilingualCorpusDataset(token_ids_list, cfg.max_seq_len, eos_id)
-    loader = DataLoader(dataset, batch_size=config.batch_size, shuffle=False)
+    from lfm.data.corpus import pad_collate as _pad_collate
+    loader = DataLoader(
+        dataset, batch_size=config.batch_size, shuffle=False,
+        collate_fn=_pad_collate,
+    )
 
     enc_tok = modules["enc_token_embedding"]
     enc_pos = modules["enc_pos_embedding"]
