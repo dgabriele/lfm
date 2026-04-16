@@ -1,0 +1,104 @@
+# ==========================================================================
+# v13-zreg — same v13 corpus + architecture, with added latent-space
+# regularization so the decoder produces valid constituents from z values
+# that are slightly off the encoder's posterior manifold.
+#
+# Differences vs pretrain_vae_v13.yaml:
+#   - z_noise_sigma: 0.05 (new, denoising-VAE augmentation at reparam time)
+#   - z_var_target: 0.05 (wider posterior; was 0.03 → ~35% larger z_std)
+#   - z_var_weight: 1.0  (strong enough to actually pull — was 0.01)
+#   - output_path → data/models/v13_english_ortho_zreg/
+#
+# Motivation: at the v13 baseline, perturbations with σ ≥ 0.5 produce
+# garbage outside the tight train manifold.  We explicitly expose the
+# decoder to noisy z during training and widen the target z spread so
+# "nearby z" is populated with real examples the decoder has seen.
+#
+# KL is kept off (kl_weight=0) — prior attempts at KL-based
+# regularization in this codebase all pinned KL at baseline and didn't
+# change the latent geometry (decoder-dominance / posterior collapse).
+# ==========================================================================
+
+dataset_path: /workspace/lfm/data/datasets/english-constituents-v13
+spm_model_path: /workspace/lfm/data/datasets/english-constituents-v13/spm.model
+spm_vocab_size: 10000
+syllable_aligned_bpe: false
+
+constituent_context: false
+
+# Architecture — unchanged from v12/v13
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 0
+encoder_pooling: mean
+
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+kl_beta: 0.0
+
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+phonetic_init: false
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.0
+use_vq: false
+
+# Latent-space robustness — the one thing that's actually different
+# from v13.  See header comment.
+z_noise_sigma: 0.05
+
+# Training
+batch_size: 200
+gradient_accumulation_steps: 2
+use_amp: true
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 5
+
+z_var_weight: 1.0
+z_var_target: 0.05
+z_var_floor: 0.01
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 0
+dip_weight: 0.1
+bow_weight: 0.0
+
+length_boost_threshold: 40
+length_boost_factor: 15.0
+
+unlikelihood_weight: 0.15
+unlikelihood_window: 4
+scheduled_sampling_target: 0.075
+scheduled_sampling_start_epoch: 0
+scheduled_sampling_warmup_epochs: 1
+
+diagnostic_every: 5000
+checkpoint_every_steps: 5000
+val_fraction: 0.05
+seed: 42
+device: cuda
+output_path: /workspace/lfm/data/models/v13_english_ortho_zreg/vae_decoder.pt
+
+topo_weight: 0.0
+topo_sample_pairs: 32
+use_adversarial: false
+adv_weight: 0.1
+adv_lr: 0.0001
+adv_disc_hidden: 256
+adv_disc_embed_dim: 128
+adv_warmup_steps: 1000
+adv_free_run_len: 32
+adv_spectral_norm: true

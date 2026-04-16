@@ -215,6 +215,16 @@ class VAEPretrainConfig(LFMBaseConfig):
     vq_ema_update: bool = True
     vq_decay: float = 0.99
 
+    # Standard-VAE z-noise injection: during training only, add gaussian
+    # noise ``randn_like(z) * z_noise_sigma`` to z between the encoder
+    # reparameterization and ``latent_to_decoder``.  Teaches the decoder
+    # to produce valid output from z values slightly off the encoder's
+    # posterior manifold — directly addresses perturbation robustness
+    # without relying on KL (which collapses in this setup).  Typical
+    # values: 0.03–0.10 absolute (compare against observed z_std).
+    # 0 disables the mechanism entirely (v7/v12 behavior).
+    z_noise_sigma: float = 0.0
+
     # Constituent context training: the encoder sees the full parent
     # sentence while the decoder is supervised only on the constituent
     # span.  Requires a constituency dataset with parent_seq fields

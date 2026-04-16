@@ -236,6 +236,14 @@ def _vae_forward(
         mu, logvar = h.chunk(2, dim=-1)
         std = (0.5 * logvar).exp()
         z = mu + std * torch.randn_like(std)
+        # Denoising-VAE augmentation: add extra gaussian noise to z
+        # during training so the decoder learns to produce valid
+        # reconstructions from z values slightly off the encoder's
+        # posterior manifold.  Disabled when z_noise_sigma <= 0
+        # (v7/v12 default).
+        if _cfg is not None and getattr(_cfg, "z_noise_sigma", 0.0) > 0:
+            if enc_token_embedding.training:
+                z = z + torch.randn_like(z) * _cfg.z_noise_sigma
         vq_commitment_loss = None
 
     # Decode — reshape into K memory tokens for multi-token z injection
