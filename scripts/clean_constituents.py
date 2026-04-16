@@ -177,6 +177,17 @@ def _clean(line: str) -> tuple[str | None, str]:
     # Coordinator opener — fragment from a stripped left conjunct.
     if tokens_lc[0] in _CC_OPENERS:
         return None, "cc_opener"
+    # Stanza routinely labels PPs and infinitive VPs as top-level <S>
+    # when they sit alone at the parse-tree root ("of the model X",
+    # "to test X").  The opener gives the misparse away; relabel as
+    # <PP> so the content is preserved but the structural label is
+    # honest.  Downstream content checks (low_content, dangling_func,
+    # digit_heavy, etc.) still apply to the relabeled line.
+    _relabeled = False
+    if label == "S" and tokens_lc[0] in (_PREPOSITIONS | {"to"}):
+        label = "PP"
+        line = f"<PP> {inner} </PP>"
+        _relabeled = True
     # A PP must start with a real English preposition — Stanza mislabels
     # numeric sequences or fragments as PP.
     if label == "PP" and tokens_lc[0] not in _PREPOSITIONS:
@@ -204,7 +215,7 @@ def _clean(line: str) -> tuple[str | None, str]:
     )
     if n_content / len(tokens) < 0.40:
         return None, "low_content"
-    return line, "kept"
+    return line, "s_to_pp_relabel" if _relabeled else "kept"
 
 
 def main() -> None:
@@ -230,6 +241,9 @@ def main() -> None:
             if cleaned is None:
                 reasons[reason] = reasons.get(reason, 0) + 1
                 continue
+            if reason != "kept":
+                # Track non-drop transformations (e.g. s_to_pp_relabel) too.
+                reasons[reason] = reasons.get(reason, 0) + 1
             if not args.no_dedupe:
                 h = hash(cleaned)
                 if h in seen:
