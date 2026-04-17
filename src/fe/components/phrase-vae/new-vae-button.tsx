@@ -2,6 +2,7 @@
 
 import { useId, useMemo, useState, useTransition } from "react";
 import { Modal } from "@heroui/react";
+import { unstable_rethrow } from "next/navigation";
 import { Boxes, X } from "lucide-react";
 import { createPhraseVAEFromPreset } from "@/lib/models/actions";
 import type { CorpusOption } from "./use-preset-modal";
@@ -131,6 +132,7 @@ function NewVAEModal({
           corpusId: corpusVal,
         });
       } catch (err) {
+        unstable_rethrow(err);
         alert(err instanceof Error ? err.message : String(err));
       }
     });

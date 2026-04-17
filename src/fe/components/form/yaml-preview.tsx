@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { Pencil } from "lucide-react";
 import { createHighlighter, type Highlighter } from "shiki";
 
 /**
@@ -18,7 +20,14 @@ function getHighlighter(): Promise<Highlighter> {
   return highlighterPromise;
 }
 
-export function YamlPreview({ yaml }: { yaml: string }) {
+export function YamlPreview({
+  yaml,
+  editHref,
+}: {
+  yaml: string;
+  /** When provided, renders an Edit link alongside Copy. */
+  editHref?: string;
+}) {
   const [html, setHtml] = useState<string>("");
 
   useEffect(() => {
@@ -42,7 +51,18 @@ export function YamlPreview({ yaml }: { yaml: string }) {
         <h3 className="text-xs uppercase tracking-wider text-accent/80 font-semibold">
           YAML preview
         </h3>
-        <CopyButton text={yaml} />
+        <div className="flex items-center gap-3">
+          {editHref && (
+            <Link
+              href={editHref}
+              className="inline-flex items-center gap-1 text-xs text-muted hover:text-accent transition-colors"
+            >
+              <Pencil className="w-3.5 h-3.5" strokeWidth={2} />
+              Edit
+            </Link>
+          )}
+          <CopyButton text={yaml} />
+        </div>
       </header>
       <div
         className="flex-1 overflow-auto text-xs [&_pre]:!bg-transparent [&_pre]:m-0 [&_pre]:p-4"

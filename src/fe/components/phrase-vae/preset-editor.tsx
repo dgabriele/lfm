@@ -18,7 +18,18 @@ import {
   createPhraseVAEConfigPreset,
   updatePhraseVAEConfigPreset,
   deletePhraseVAEConfigPreset,
+  updatePhraseVAE,
+  deletePhraseVAE,
 } from "@/lib/models/actions";
+
+/**
+ * The editor edits either a reusable *preset template* or a *VAE
+ * instance*'s snapshotted config.  The target governs which server
+ * actions to call on save/delete and where the "create" flow lands.
+ */
+export type EditorTarget =
+  | { kind: "preset"; id?: string }   // undefined id = create new
+  | { kind: "vae"; id: string };
 
 /**
  * Client shell for the phrase-VAE *config preset* editor.  Holds form
@@ -125,14 +136,14 @@ function IdentitySection({
 }
 
 export function PhraseVAEPresetEditor({
-  initialId,
+  target = { kind: "preset" },
   initialName,
   initialDescription,
   initialConfig,
   corpora,
   existingNames,
 }: {
-  initialId?: string;
+  target?: EditorTarget;
   initialName?: string;
   initialDescription?: string | null;
   initialConfig?: PhraseVAEConfigShape;
@@ -175,20 +186,30 @@ export function PhraseVAEPresetEditor({
       config,
     };
     startTransition(async () => {
-      if (initialId) {
-        await updatePhraseVAEConfigPreset(initialId, payload);
-        router.refresh();
+      if (target.kind === "preset") {
+        if (target.id) {
+          await updatePhraseVAEConfigPreset(target.id, payload);
+          router.refresh();
+        } else {
+          await createPhraseVAEConfigPreset(payload);
+        }
       } else {
-        await createPhraseVAEConfigPreset(payload);
+        await updatePhraseVAE(target.id, payload);
       }
     });
   };
 
+  const hasId = target.kind === "vae" || !!target.id;
   const onDelete = () => {
-    if (!initialId) return;
-    if (!confirm(`Delete preset "${name}"?`)) return;
+    if (!hasId) return;
+    const kindLabel = target.kind === "preset" ? "preset" : "phrase VAE";
+    if (!confirm(`Delete ${kindLabel} "${name}"?`)) return;
     startTransition(async () => {
-      await deletePhraseVAEConfigPreset(initialId);
+      if (target.kind === "preset" && target.id) {
+        await deletePhraseVAEConfigPreset(target.id);
+      } else if (target.kind === "vae") {
+        await deletePhraseVAE(target.id);
+      }
     });
   };
 
@@ -213,7 +234,7 @@ export function PhraseVAEPresetEditor({
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {initialId && (
+          {hasId && (
             <button
               type="button"
               onClick={onDelete}
@@ -231,7 +252,7 @@ export function PhraseVAEPresetEditor({
             className="h-9 px-4 rounded-[calc(var(--radius)*0.6)] text-sm bg-accent text-accent-foreground font-semibold hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center gap-1.5"
           >
             <Save className="w-4 h-4" />
-            {pending ? "Saving…" : initialId ? "Save" : "Create"}
+            {pending ? "Saving…" : hasId ? "Save" : "Create"}
           </button>
         </div>
       </header>

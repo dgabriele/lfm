@@ -4,7 +4,23 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import model_validator
+
 from lfm.config.base import LFMBaseConfig
+
+# Fields that USED to exist on VAEPretrainConfig but have been
+# removed.  Old YAMLs / saved checkpoint configs still reference
+# them; we strip silently so legacy artifacts keep loading.
+_DEPRECATED_FIELDS: frozenset[str] = frozenset({
+    "use_adversarial",
+    "adv_weight",
+    "adv_lr",
+    "adv_disc_hidden",
+    "adv_disc_embed_dim",
+    "adv_warmup_steps",
+    "adv_free_run_len",
+    "adv_spectral_norm",
+})
 
 # IPA vowels — used to strip trailing orphan consonants from decoded text
 _IPA_VOWELS = set(
@@ -65,17 +81,15 @@ class VAEPretrainConfig(LFMBaseConfig):
             Penalizes distance mismatches between latent pairs and their
             decoded output pairs, enforcing Lipschitz continuity.
         topo_sample_pairs: Number of random pairs per batch for topo loss.
-        use_adversarial: Enable structural adversarial discriminator.
-        adv_weight: Weight of adversarial loss in total generator loss.
-        adv_lr: Learning rate for discriminator (separate from VAE).
-        adv_disc_hidden: Discriminator CNN channel width.
-        adv_disc_embed_dim: Discriminator embedding dimensionality.
-        adv_warmup_steps: Train discriminator alone for this many steps
-            before adding adversarial signal to generator.
-        adv_free_run_len: Max length for free-run decoding during
-            adversarial training (shorter than ``max_seq_len`` for speed).
-        adv_spectral_norm: Apply spectral normalization to discriminator.
     """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_deprecated(cls, data: Any) -> Any:
+        """Silently drop removed fields so old YAMLs/checkpoints still load."""
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if k not in _DEPRECATED_FIELDS}
+        return data
 
     dataset_path: str | None = None
     corpus_loader: str | None = "leipzig"
@@ -163,16 +177,6 @@ class VAEPretrainConfig(LFMBaseConfig):
     # Legacy topological regularization (disabled — replaced by z_var)
     topo_weight: float = 0.0
     topo_sample_pairs: int = 32
-
-    # Adversarial structural discriminator
-    use_adversarial: bool = False
-    adv_weight: float = 0.1
-    adv_lr: float = 1e-4
-    adv_disc_hidden: int = 256
-    adv_disc_embed_dim: int = 128
-    adv_warmup_steps: int = 1000
-    adv_free_run_len: int = 32
-    adv_spectral_norm: bool = True
 
     # Scheduled sampling: anneal from 0 to target probability over warmup
     # epochs, starting at ``scheduled_sampling_start_epoch``.  At each

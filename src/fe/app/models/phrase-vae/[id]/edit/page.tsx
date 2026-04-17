@@ -1,9 +1,6 @@
 import { notFound } from "next/navigation";
 import { listCorpora } from "@/lib/corpora";
-import {
-  getPhraseVAEConfigPreset,
-  listPhraseVAEConfigPresetNames,
-} from "@/lib/models/queries";
+import { getPhraseVAE, listPhraseVAENames } from "@/lib/models/queries";
 import { PhraseVAEPresetEditor } from "@/components/phrase-vae/preset-editor";
 import {
   PhraseVAEConfig,
@@ -13,16 +10,16 @@ import { BackLink } from "@/components/back-link";
 
 type Props = { params: Promise<{ id: string }> };
 
-export default async function EditPhraseVAEPresetPage({ params }: Props) {
+export default async function EditPhraseVAEPage({ params }: Props) {
   const { id } = await params;
-  const [row, corpora, existingNames] = await Promise.all([
-    getPhraseVAEConfigPreset(id),
+  const [vae, corpora, existingNames] = await Promise.all([
+    getPhraseVAE(id),
     listCorpora(),
-    listPhraseVAEConfigPresetNames(id),
+    listPhraseVAENames(id),
   ]);
-  if (!row || row.variant !== "phrase-vae") notFound();
+  if (!vae) notFound();
 
-  const parsed = PhraseVAEConfig.safeParse(row.config);
+  const parsed = PhraseVAEConfig.safeParse(vae.config);
   const config: PhraseVAEConfigShape = parsed.success
     ? parsed.data
     : PhraseVAEConfig.parse({});
@@ -30,11 +27,11 @@ export default async function EditPhraseVAEPresetPage({ params }: Props) {
 
   return (
     <section className="flex-1 min-w-0 min-h-0 flex flex-col p-10 gap-6 overflow-hidden">
-      <BackLink fallbackHref="/models/phrase-vae" label="Back to phrase VAEs" />
+      <BackLink fallbackHref={`/models/phrase-vae/${id}`} label="Back to VAE" />
       <PhraseVAEPresetEditor
-        target={{ kind: "preset", id: row.id }}
-        initialName={row.name}
-        initialDescription={row.description}
+        target={{ kind: "vae", id: vae.id }}
+        initialName={vae.name}
+        initialDescription={vae.description}
         initialConfig={config}
         corpora={options}
         existingNames={existingNames}

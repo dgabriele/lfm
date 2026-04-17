@@ -1,0 +1,98 @@
+# ==========================================================================
+# v15 — IPA sentence VAE, English-only, no phrase tags.
+#
+# Architecture: same as v13-zreg (proven 0.0105 val CE, clean basin
+# geometry).  Corpus: 8-12M generic English sentences filtered for no
+# proper nouns, no digits, no quotes, NER-cleaned, converted to IPA.
+#
+# Key differences vs v13-zreg:
+#   - IPA tokenization with syllable-aligned BPE (like v7)
+#   - Full sentences, no constituency tags — BOS/EOS only
+#   - English-only (no multilingual)
+#   - SPM vocab 8000 (IPA phoneme inventory is smaller than English BPE)
+#   - Downstream: p2g converts IPA → English-like text for LLM interpretation
+# ==========================================================================
+
+dataset_path: /workspace/lfm/data/datasets/english-sentences-v15
+spm_vocab_size: 8000
+syllable_aligned_bpe: true
+
+# No constituency tags — decoder produces raw IPA sentences
+constituent_context: false
+
+# Architecture — unchanged from v13-zreg (proven)
+latent_dim: 256
+encoder_num_layers: 2
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+max_seq_len: 0
+encoder_pooling: mean
+
+# KL off — z_var + DIP regularization instead (proven in v13-zreg)
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 10000
+kl_beta: 0.0
+
+# No contrastive at pretrain — game handles discrimination
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+embeddings_path: ""
+
+# Phonetic init: ON for IPA (helps the embedding layer)
+phonetic_init: true
+phonetic_init_scale: 0.5
+phonetic_label_smoothing: 0.1
+use_vq: false
+
+# Latent-space robustness (carried from v13-zreg)
+z_noise_sigma: 0.05
+
+# Training
+batch_size: 200
+gradient_accumulation_steps: 2
+use_amp: true
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 3
+
+z_var_weight: 1.0
+z_var_target: 0.05
+z_var_floor: 0.01
+word_dropout: 0.0
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 0
+dip_weight: 0.1
+bow_weight: 0.0
+
+# Length boost: full sentences are more uniform than constituency mix,
+# so lighter boost is needed.
+length_boost_threshold: 30
+length_boost_factor: 5.0
+
+# Unlikelihood + scheduled sampling (proven in v13-zreg)
+unlikelihood_weight: 0.15
+unlikelihood_window: 4
+scheduled_sampling_target: 0.075
+scheduled_sampling_start_epoch: 0
+scheduled_sampling_warmup_epochs: 1
+
+# Diagnostics
+diagnostic_every: 5000
+checkpoint_every_steps: 5000
+val_fraction: 0.05
+seed: 42
+device: cuda
+output_path: /workspace/lfm/data/models/v15_ipa/vae_decoder.pt
+
+# Disabled
+topo_weight: 0.0
+topo_sample_pairs: 32

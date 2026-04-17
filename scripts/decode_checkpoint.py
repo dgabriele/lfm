@@ -121,7 +121,19 @@ def main() -> None:
         ],
     )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument(
+        "--sigmas",
+        default="0.0,0.25,0.5,1.0,2.0",
+        help="Comma-separated σ values for perturbation sweep.",
+    )
+    ap.add_argument(
+        "--alphas",
+        default="0.0,0.25,0.5,0.75,1.0",
+        help="Comma-separated α values for interpolation sweep.",
+    )
     args = ap.parse_args()
+    sigmas = [float(x) for x in args.sigmas.split(",")]
+    alphas = [float(x) for x in args.alphas.split(",")]
 
     device = torch.device(args.device)
     sp = spm.SentencePieceProcessor(model_file=str(args.spm))
@@ -202,7 +214,6 @@ def main() -> None:
     # --- Interpolation between first two prompts ---
     if z.size(0) >= 2:
         print("\n=== INTERPOLATION (z[0] → z[1]) ===\n")
-        alphas = [0.0, 0.25, 0.5, 0.75, 1.0]
         z_interp = torch.stack(
             [(1 - a) * z[0] + a * z[1] for a in alphas], dim=0
         )
@@ -219,7 +230,6 @@ def main() -> None:
     # --- Perturbation around z[0] ---
     if z.size(0) >= 1:
         print("\n=== PERTURBATION (around z[0]) ===\n")
-        sigmas = [0.0, 0.25, 0.5, 1.0, 2.0]
         gen = torch.Generator(device=device).manual_seed(42)
         z_pert = torch.stack(
             [z[0] + s * torch.randn(z[0].shape, device=device, generator=gen)

@@ -93,6 +93,7 @@ def register_visualize_group(
     from lfm.cli.visualize.surface_diversity import SurfaceDiversityCommand
     from lfm.cli.visualize.random_z_quality import RandomZQualityCommand
     from lfm.cli.visualize.pc_traversal import PCTraversalCommand
+    from lfm.cli.visualize.basin_analysis import BasinAnalysisCommand
     from lfm.cli.visualize.all import AllCommand
 
     # Commands that use shared checkpoint arguments
@@ -110,6 +111,7 @@ def register_visualize_group(
         SurfaceDiversityCommand(),
         RandomZQualityCommand(),
         PCTraversalCommand(),
+        BasinAnalysisCommand(),
         AllCommand(),
     ]
 

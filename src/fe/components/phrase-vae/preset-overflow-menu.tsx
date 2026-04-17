@@ -41,16 +41,13 @@ export function PresetOverflowMenu({
 
   return (
     <Dropdown>
-      <Dropdown.Trigger>
-        <button
-          type="button"
-          aria-label={`More actions for ${name}`}
-          title="More actions"
-          disabled={pending}
-          className="p-1.5 rounded-[calc(var(--radius)*0.5)] text-muted hover:text-foreground hover:bg-default/40 transition-colors disabled:opacity-40"
-        >
-          <MoreVertical className="w-3.5 h-3.5" strokeWidth={2} />
-        </button>
+      <Dropdown.Trigger
+        aria-label={`More actions for ${name}`}
+        title="More actions"
+        isDisabled={pending}
+        className="p-1.5 rounded-[calc(var(--radius)*0.5)] text-muted hover:text-foreground hover:bg-default/40 transition-colors disabled:opacity-40"
+      >
+        <MoreVertical className="w-3.5 h-3.5" strokeWidth={2} />
       </Dropdown.Trigger>
       <Dropdown.Popover className="rounded-[calc(var(--radius)*0.5)] min-w-40 p-1 bg-surface border border-separator shadow-lg">
         <Dropdown.Menu aria-label={`Actions for ${name}`}>

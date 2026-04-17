@@ -2,6 +2,7 @@
 
 import { useId, useMemo, useState, useTransition } from "react";
 import { Modal } from "@heroui/react";
+import { unstable_rethrow } from "next/navigation";
 import { Rocket, X } from "lucide-react";
 import { createPhraseVAEFromPreset } from "@/lib/models/actions";
 import type { PhraseVAEConfigShape } from "@/lib/config-schemas/phrase-vae";
@@ -137,6 +138,7 @@ function UsePresetModal({
         });
         // server action redirects on success; component will unmount
       } catch (err) {
+        unstable_rethrow(err);
         alert(err instanceof Error ? err.message : String(err));
       }
     });

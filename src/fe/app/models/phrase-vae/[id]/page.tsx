@@ -111,7 +111,10 @@ export default async function PhraseVAEDetailPage({ params }: Props) {
           </Section>
         </div>
         <div className="min-h-0 lg:sticky lg:top-0">
-          <YamlPreview yaml={yamlText} />
+          <YamlPreview
+            yaml={yamlText}
+            editHref={`/models/phrase-vae/${vae.id}/edit`}
+          />
         </div>
       </div>
     </section>

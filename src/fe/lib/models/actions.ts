@@ -202,3 +202,35 @@ export async function deletePhraseVAE(id: string) {
   revalidatePath("/models/phrase-vae");
   redirect("/models/phrase-vae");
 }
+
+/**
+ * Update a PhraseVAE instance — its snapshotted config, name, and
+ * description.  The snapshot is the authoritative config for this VAE;
+ * this action is how a user hand-tunes a VAE after instantiation
+ * without touching the source preset.
+ */
+export async function updatePhraseVAE(
+  id: string,
+  input: { name: string; description: string; config: PhraseVAEConfigShape },
+) {
+  const parsed = PhraseVAEConfig.parse(input.config);
+  try {
+    await db
+      .update(schema.phraseVaes)
+      .set({
+        name: input.name,
+        description: input.description || null,
+        config: parsed,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.phraseVaes.id, id));
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      throw new Error(`A phrase VAE named "${input.name}" already exists.`);
+    }
+    throw err;
+  }
+  revalidatePath("/models/phrase-vae");
+  revalidatePath(`/models/phrase-vae/${id}`);
+  redirect(`/models/phrase-vae/${id}`);
+}

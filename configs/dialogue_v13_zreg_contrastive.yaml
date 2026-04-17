@@ -56,7 +56,6 @@ gradient_accumulation_steps: 1
 steps: 6000
 gru_lr: 0.00005
 receiver_lr: 0.0003
-num_distractors: 15
 min_targets: 1
 max_targets: 1
 

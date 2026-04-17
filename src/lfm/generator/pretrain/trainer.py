@@ -180,22 +180,6 @@ class VAEPretrainer:
             growth_interval=100000,
         )
 
-        # 5b. Build adversarial discriminator (optional)
-        disc = None
-        disc_optimizer = None
-        if cfg.use_adversarial:
-            from lfm.generator.discriminator import StructuralDiscriminator
-
-            disc = StructuralDiscriminator(
-                vocab_size=full_vocab,
-                embed_dim=cfg.adv_disc_embed_dim,
-                hidden_dim=cfg.adv_disc_hidden,
-                use_spectral_norm=cfg.adv_spectral_norm,
-            ).to(device)
-            disc_optimizer = torch.optim.AdamW(
-                disc.parameters(), lr=cfg.adv_lr
-            )
-
         # 5c. Phonetic distance cache for topo loss
         _topo_dist_cache = None
         if cfg.topo_weight > 0:
