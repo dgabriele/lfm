@@ -238,7 +238,7 @@ class BaseVAEGenerator(GeneratorModule):
                 if not m:
                     continue
                 if eos_id is not None and tid == eos_id:
-                    break
+                    continue
                 if bos_id is not None and tid == bos_id:
                     continue
                 clean.append(int(tid))
