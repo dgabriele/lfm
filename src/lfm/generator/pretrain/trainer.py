@@ -477,53 +477,6 @@ class VAEPretrainer:
                     )
                     continue
 
-                # -- Adversarial step --
-                adv_loss_val = 0.0
-                d_real_val = 0.0
-                d_fake_val = 0.0
-
-                if (
-                    disc is not None
-                    and disc_optimizer is not None
-                    and global_step >= cfg.adv_warmup_steps
-                    and (i + 1) % 5 == 0
-                ):
-                    dec_mods = {
-                        k: modules[k]
-                        for k in [
-                            "latent_to_decoder", "dec_token_embedding",
-                            "dec_pos_embedding", "decoder", "output_head",
-                        ]
-                    }
-                    adv_batch = min(b, 32)
-                    with torch.no_grad():
-                        gen_tokens, _, gen_mask = _free_run_decode(
-                            torch.randn(adv_batch, cfg.latent_dim, device=device),
-                            cfg.adv_free_run_len, bos_id=bos_id,
-                            num_memory_tokens=getattr(cfg, "num_memory_tokens", 1),
-                            **dec_mods,
-                        )
-                    real_tokens = batch_tokens[:adv_batch]
-                    real_lengths = batch_lengths[:adv_batch]
-                    real_mask = (
-                        torch.arange(real_tokens.size(1), device=device).unsqueeze(0)
-                        < real_lengths.unsqueeze(1)
-                    )
-                    with torch.amp.autocast(device_type=device.type, enabled=cfg.use_amp):
-                        real_logits = disc(real_tokens, real_mask)
-                        fake_logits = disc(gen_tokens, gen_mask)
-                        disc_loss = F.binary_cross_entropy_with_logits(
-                            real_logits, torch.full_like(real_logits, 0.9),
-                        ) + F.binary_cross_entropy_with_logits(
-                            fake_logits, torch.full_like(fake_logits, 0.1),
-                        )
-                    disc_optimizer.zero_grad()
-                    scaler.scale(disc_loss).backward()
-                    scaler.step(disc_optimizer)
-                    adv_loss_val = disc_loss.item()
-                    d_real_val = torch.sigmoid(real_logits).mean().item()
-                    d_fake_val = torch.sigmoid(fake_logits).mean().item()
-
                 if (i + 1) % accum == 0 or (i + 1) == len(train_loader):
                     scaler.unscale_(optimizer)
                     last_grad_norm = nn.utils.clip_grad_norm_(
@@ -616,10 +569,6 @@ class VAEPretrainer:
                         extra_parts.append(f"BoW={bow_loss.item():.3f}")
                     if getattr(cfg, "tag_balance_weight", 0.0) > 0:
                         extra_parts.append(f"TagBal={tag_balance_loss.item():.4f}")
-                    if disc is not None and global_step >= cfg.adv_warmup_steps:
-                        extra_parts.append(
-                            f"D_r={d_real_val:.2f} D_f={d_fake_val:.2f} adv={adv_loss_val:.3f}"
-                        )
                     extra_str = (" " + " ".join(extra_parts)) if extra_parts else ""
                     logger.info(
                         "  ep%d batch=%d/%d step=%d CE=%.3f %.0f tok/s %.0fMB%s",
