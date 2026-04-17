@@ -169,8 +169,11 @@ def _train_sentencepiece(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if syllable_aligned:
-        logger.info("Syllabifying corpus for syllable-aligned BPE...")
-        lines = [syllabify_for_bpe(line) for line in lines]
+        import multiprocessing as mp
+        n_workers = min(16, mp.cpu_count())
+        logger.info("Syllabifying corpus for syllable-aligned BPE (%d workers)...", n_workers)
+        with mp.Pool(n_workers) as pool:
+            lines = pool.map(syllabify_for_bpe, lines, chunksize=4096)
 
     corpus_file = out_dir / "spm_train_corpus.txt"
     with open(corpus_file, "w", encoding="utf-8") as f:
