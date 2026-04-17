@@ -363,9 +363,6 @@ class AgentTrainer:
                     hard_ratio * 100,
                 )
 
-                # Print surface samples every checkpoint.  VAE-agnostic:
-                # game.gen.render_surface picks the right alphabet for v7
-                # (IPA, hyphenated) or v8 (phoneme, native).
                 if "_tokens" in out and step % cfg.checkpoint_every == 0:
                     try:
                         if "_dialogue_tokens" in out:
@@ -375,11 +372,10 @@ class AgentTrainer:
                             ):
                                 surface = game.gen.render_surface(
                                     toks[0:1], mask=mask[0:1],
-                                    output_mode="hyphenated_ipa",
                                 )[0]
                                 logger.info(
                                     "  [T%d] %s  (%d tok)",
-                                    turn_i, surface[:120], int(mask[0].sum().item()),
+                                    turn_i, surface, int(mask[0].sum().item()),
                                 )
                         else:
                             toks = out["_tokens"]
@@ -387,12 +383,11 @@ class AgentTrainer:
                             n = min(5, toks.size(0))
                             surfaces = game.gen.render_surface(
                                 toks[:n], mask=mask[:n],
-                                output_mode="hyphenated_ipa",
                             )
                             for j, surface in enumerate(surfaces):
                                 logger.info(
                                     "  sample[%d]: %s  (%d tok)",
-                                    j, surface[:100], int(mask[j].sum().item()),
+                                    j, surface, int(mask[j].sum().item()),
                                 )
                     except Exception:
                         pass
