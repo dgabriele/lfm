@@ -1,0 +1,65 @@
+# Dialogue game on v15 IPA sentence VAE, CLIP-style contrastive scoring
+# with entropy-weighted pooling.
+#
+# Key changes from dialogue_v13_zreg_contrastive:
+#   - IPA decoder (v15, sentence-level, no phrase tags)
+#   - generator_name: multilingual_vae (IPA tokenization)
+#   - generator_vocab_size: 8000 (IPA SPM vocab)
+#   - contrastive_pooling: entropy_weighted (upweights known morphemes)
+#   - constrained_close: false (no phrase tags to close)
+
+decoder_path: /workspace/lfm/data/models/v15_ipa/vae_decoder.pt
+spm_path: /workspace/lfm/data/datasets/english-sentences-v15/spm.model
+output_dir: /workspace/lfm/data/dialogue_game_v15_ipa_contrastive
+embedding_store_dir: /workspace/lfm/data/embeddings_qwen_v2_clean
+
+generator_name: multilingual_vae
+generator_vocab_size: 8000
+
+# Dialogue structure
+num_turns: 4
+context_hidden_dim: 512
+context_heads: 4
+
+# Diffusion z-generator
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+max_phrases: 3
+variable_phrases: true
+target_phrases: 2.0
+length_weight: 0.5
+z_diversity_weight: 0.3
+
+# CLIP-style contrastive scoring with entropy-weighted pooling
+contrastive_scoring: true
+contrastive_temperature: 0.07
+contrastive_pooling: entropy_weighted
+
+# Other losses off
+per_turn_weight: 0.0
+ce_weight: 0.0
+topo_weight: 0.0
+independent_turns: false
+
+# Phase 2 VRAM management
+phase2_vram_budget_mb: 6000
+phase2_min_chunk: 8
+
+# No constrained close needed (no phrase tags)
+constrained_close: false
+
+# Training
+batch_size: 512
+gradient_accumulation_steps: 1
+steps: 6000
+gru_lr: 0.00005
+receiver_lr: 0.0003
+min_targets: 1
+max_targets: 1
+
+# Runtime
+device: cuda
+seed: 42
+log_every: 20
+checkpoint_every: 100

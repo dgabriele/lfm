@@ -184,6 +184,7 @@ class DialogueGameConfig(LFMBaseConfig):
     # receiver undermines topology.
     contrastive_scoring: bool = False
     contrastive_temperature: float = 0.07
+    contrastive_pooling: str = "mean"  # "mean" or "entropy_weighted"
 
     # Independent turns: each turn sees only the embedding + turn position,
     # not previous turns.  Produces 4 independent views of the same input,
@@ -936,12 +937,22 @@ class DialogueGame(nn.Module):
             loss: InfoNCE cross-entropy loss.
             logits: ``(B, B)`` cosine similarity matrix (for accuracy).
         """
-        # 1. Surface embedding per turn: mean-pool Phase 2 hidden states
+        # 1. Surface embedding per turn: pool Phase 2 hidden states
         surface_embs: list[Tensor] = []
+        use_entropy = cfg.contrastive_pooling == "entropy_weighted"
         for t in turns:
-            masked = t.hidden * t.mask.unsqueeze(-1).float()
-            lengths = t.mask.float().sum(dim=1, keepdim=True).clamp(min=1)
-            surface_embs.append(masked.sum(dim=1) / lengths)
+            if use_entropy:
+                logits = self.gen.output_head(t.hidden)
+                log_probs = F.log_softmax(logits, dim=-1)
+                entropy = -(log_probs.exp() * log_probs).sum(dim=-1)  # (B, S)
+                confidence = 1.0 / (1.0 + entropy)  # high when decoder is certain
+                weights_pos = confidence * t.mask.float()
+                weights_pos = weights_pos / weights_pos.sum(dim=1, keepdim=True).clamp(min=1e-8)
+                surface_embs.append((t.hidden * weights_pos.unsqueeze(-1)).sum(dim=1))
+            else:
+                masked = t.hidden * t.mask.unsqueeze(-1).float()
+                lengths = t.mask.float().sum(dim=1, keepdim=True).clamp(min=1)
+                surface_embs.append(masked.sum(dim=1) / lengths)
 
         # 2. Aggregate across turns
         weights = F.softmax(self.turn_agg_logits[:len(turns)], dim=0)

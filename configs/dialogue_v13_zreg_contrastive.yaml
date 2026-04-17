@@ -34,6 +34,7 @@ z_diversity_weight: 0.3
 # CLIP-style contrastive scoring
 contrastive_scoring: true
 contrastive_temperature: 0.07
+contrastive_pooling: entropy_weighted
 
 # Other losses off (contrastive is the whole objective)
 per_turn_weight: 0.0
