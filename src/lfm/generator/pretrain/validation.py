@@ -75,7 +75,7 @@ def run_validation(
             with torch.amp.autocast(
                 device_type=device.type, enabled=cfg.use_amp
             ):
-                ce_loss, kl_loss, kl_per_dim, _, dec_hidden_val, _, _, _, _ = _vae_forward(
+                ce_loss, kl_loss, kl_per_dim, _, dec_hidden_val, _, _, _, _, _ = _vae_forward(
                     batch_tokens,
                     batch_lengths,
                     bos_id=bos_id,
