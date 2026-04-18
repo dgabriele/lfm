@@ -48,6 +48,7 @@ phase2_min_chunk: 8
 
 # No constrained close needed (no phrase tags)
 constrained_close: false
+max_tokens_per_phrase: 120
 
 # Soft length regularization: guide z-gen toward latent regions where
 # the decoder produces complete sentences within target window.

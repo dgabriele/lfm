@@ -215,6 +215,8 @@ class DialogueGameConfig(LFMBaseConfig):
     length_reg_target: int = 80
     length_reg_sigma: float = 10.0
 
+    max_tokens_per_phrase: int = 48
+
     # Message encoder
     encoder: MessageEncoderConfig = MessageEncoderConfig()
 
@@ -838,6 +840,7 @@ class DialogueGame(nn.Module):
         z_seq, z_weights, num_phrases = self.z_gen(conditioning)
         tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(
             z_seq, z_weights,
+            max_tokens_per_phrase=self.config.max_tokens_per_phrase,
             constrained_close=self.config.constrained_close,
             tag_open_to_close=self._tag_open_to_close,
             is_word_start=self._is_word_start,
