@@ -199,11 +199,21 @@ class AgentTrainer:
                     self._batch_size = saved_bs
             logger.info("Resumed from %s at step %d", resume, start_step)
 
-        logger.info(
-            "Backprop referential game: %d distractors, chance=%.1f%%, "
-            "curriculum=%s",
-            cfg.num_distractors, chance * 100, cfg.curriculum.enabled,
-        )
+        contrastive = getattr(cfg, "contrastive_scoring", False)
+        if contrastive:
+            num_candidates = self._batch_size
+            chance = 1.0 / num_candidates
+            logger.info(
+                "Contrastive scoring: %d-way (batch-wide InfoNCE), chance=%.1f%%",
+                num_candidates, chance * 100,
+            )
+        else:
+            logger.info(
+                "Receiver scoring: %d distractors, %d-way, chance=%.1f%%, "
+                "curriculum=%s",
+                cfg.num_distractors, num_candidates, chance * 100,
+                cfg.curriculum.enabled,
+            )
         if cfg.curriculum.enabled:
             logger.info(
                 "  curriculum: %.0f%% → %.0f%% hard negatives over %d steps",
