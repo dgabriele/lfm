@@ -25,9 +25,9 @@ context_heads: 4
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_phrases: 3
+max_phrases: 2
 variable_phrases: true
-target_phrases: 2.0
+target_phrases: 1.5
 length_weight: 0.5
 z_diversity_weight: 0.3
 
@@ -50,7 +50,7 @@ phase2_min_chunk: 8
 constrained_close: false
 
 # Training
-batch_size: 512
+batch_size: 256
 gradient_accumulation_steps: 1
 steps: 6000
 gru_lr: 0.00005
