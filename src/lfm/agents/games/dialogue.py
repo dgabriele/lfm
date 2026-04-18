@@ -206,6 +206,15 @@ class DialogueGameConfig(LFMBaseConfig):
     # still occasionally fails to close.
     constrained_close: bool = False
 
+    # Soft length regularization: penalizes the z-gen for producing z's
+    # that make the decoder overshoot a target phrase length.  One-sided:
+    # no penalty before target, gentle increasing pressure after.  The
+    # decoder always finishes naturally — this only guides the z-gen
+    # toward latent regions where sentences conclude within the window.
+    length_reg_weight: float = 0.0
+    length_reg_target: int = 80
+    length_reg_sigma: float = 10.0
+
     # Message encoder
     encoder: MessageEncoderConfig = MessageEncoderConfig()
 
@@ -1111,6 +1120,42 @@ class DialogueGame(nn.Module):
                 + cfg.topo_weight * topo_loss)
         return total, logits, independent_loss.detach(), ce_loss.detach(), topo_loss.detach()
 
+    def _compute_length_reg(self, turns: list[TurnOutput]) -> Tensor:
+        """One-sided soft length penalty through Phase 2 EOS logits.
+
+        Penalizes the z-gen for producing z's where the decoder's EOS
+        probability stays low past the target phrase length.  No penalty
+        before the target — the decoder finishes naturally.  Only gentle
+        increasing pressure after, so the z-gen learns to find latent
+        regions where sentences conclude within the target window.
+        """
+        cfg = self.config
+        target = cfg.length_reg_target
+        sigma = cfg.length_reg_sigma
+        eos_id = self.gen.eos_id
+        total_loss = torch.tensor(0.0, device=turns[0].hidden.device)
+
+        for t in turns:
+            logits = self.gen.output_head(t.hidden)  # (B, S, V)
+            eos_probs = F.softmax(logits, dim=-1)[:, :, eos_id]  # (B, S)
+            S = eos_probs.size(1)
+            positions = torch.arange(S, dtype=torch.float32, device=eos_probs.device)
+
+            # One-sided: zero before target, sigmoid rise after
+            overshoot = F.relu(positions - target) / sigma
+            target_eos = torch.sigmoid(overshoot)  # (S,)
+
+            # BCE loss only where mask is valid (decoder produced tokens)
+            mask = t.mask.float()
+            per_pos = F.binary_cross_entropy(
+                eos_probs.clamp(1e-7, 1 - 1e-7) * mask,
+                target_eos.unsqueeze(0).expand_as(eos_probs) * mask,
+                reduction="none",
+            )
+            total_loss = total_loss + per_pos.sum() / mask.sum().clamp(min=1)
+
+        return total_loss / len(turns)
+
     def _compute_aux_losses(
         self, turns: list[TurnOutput],
     ) -> tuple[Tensor, Tensor, Tensor]:
@@ -1469,7 +1514,12 @@ class DialogueGame(nn.Module):
         aux, vocab_entropy, llm_pressure = self._compute_aux_losses(turns)
         loss = loss + aux
 
-        # Stage 4b: Qwen round-trip REINFORCE reward
+        # Stage 4b: Soft length regularization
+        if cfg.length_reg_weight > 0:
+            length_reg = self._compute_length_reg(turns)
+            loss = loss + cfg.length_reg_weight * length_reg
+
+        # Stage 4c: Qwen round-trip REINFORCE reward
         qwen_roundtrip_reward = None
         if self._qwen_reader is not None and cfg.qwen_roundtrip_weight > 0:
             mon.stage = "qwen_roundtrip"
