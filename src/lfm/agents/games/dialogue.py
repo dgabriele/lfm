@@ -939,7 +939,7 @@ class DialogueGame(nn.Module):
         """
         # 1. Surface embedding per turn: pool Phase 2 hidden states
         surface_embs: list[Tensor] = []
-        use_entropy = cfg.contrastive_pooling == "entropy_weighted"
+        use_entropy = self.config.contrastive_pooling == "entropy_weighted"
         for t in turns:
             if use_entropy:
                 logits = self.gen.output_head(t.hidden)
