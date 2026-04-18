@@ -5,7 +5,7 @@
 #   - IPA decoder (v15, sentence-level, no phrase tags)
 #   - generator_name: multilingual_vae (IPA tokenization)
 #   - generator_vocab_size: 8000 (IPA SPM vocab)
-#   - contrastive_pooling: entropy_weighted (upweights known morphemes)
+#   - contrastive_pooling: mean (entropy_weighted available but caused reduplication)
 #   - constrained_close: false (no phrase tags to close)
 
 decoder_path: /workspace/lfm/data/models/v15_ipa/vae_decoder.pt
@@ -25,16 +25,16 @@ context_heads: 4
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_phrases: 2
+max_phrases: 3
 variable_phrases: true
-target_phrases: 1.5
+target_phrases: 2.0
 length_weight: 0.5
 z_diversity_weight: 0.3
 
-# CLIP-style contrastive scoring with entropy-weighted pooling
+# CLIP-style contrastive scoring
 contrastive_scoring: true
 contrastive_temperature: 0.07
-contrastive_pooling: entropy_weighted
+contrastive_pooling: mean
 
 # Other losses off
 per_turn_weight: 0.0
