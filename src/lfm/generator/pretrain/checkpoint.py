@@ -89,12 +89,14 @@ def save_resume_checkpoint(
     scaler: torch.amp.GradScaler,
     contrastive_proj: nn.Module | None = None,
     cfg: object | None = None,
+    batch_idx: int = 0,
 ) -> None:
     """Save full training state for resume (every epoch)."""
     resume_path = Path(output_dir) / "vae_resume.pt"
     _ckpt = {
         "epoch": epoch,
         "global_step": global_step,
+        "batch_idx": batch_idx,
         "best_val_loss": best_val_loss,
         "spm_hash": _file_hash(spm_path),
         "z_mean": z_running_mean.cpu(),
@@ -202,8 +204,9 @@ def load_resume_checkpoint(
     start_epoch = ckpt["epoch"]
     global_step = ckpt["global_step"]
     best_val_loss = ckpt["best_val_loss"]
+    batch_idx = ckpt.get("batch_idx", 0)
     logger.info(
-        "Resumed at epoch %d, step %d, best_val=%.4f",
-        start_epoch, global_step, best_val_loss,
+        "Resumed at epoch %d, step %d, batch %d, best_val=%.4f",
+        start_epoch, global_step, batch_idx, best_val_loss,
     )
-    return start_epoch, global_step, best_val_loss
+    return start_epoch, global_step, best_val_loss, batch_idx

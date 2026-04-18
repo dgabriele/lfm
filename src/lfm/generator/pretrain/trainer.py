@@ -198,7 +198,7 @@ class VAEPretrainer:
         resume_path = Path(output_dir) / "vae_resume.pt"
         current_spm_hash = _file_hash(spm_path)
         if resume_path.exists():
-            start_epoch, global_step, best_val_loss = load_resume_checkpoint(
+            start_epoch, global_step, best_val_loss, _resume_batch = load_resume_checkpoint(
                 resume_path,
                 device=device,
                 modules=modules,
@@ -207,6 +207,7 @@ class VAEPretrainer:
                 current_spm_hash=current_spm_hash,
                 contrastive_proj=contrastive_proj,
             )
+            cfg._resume_batch_idx = _resume_batch
 
         # 7. Save frozen config snapshot for provenance
         import yaml as _yaml
@@ -339,9 +340,20 @@ class VAEPretrainer:
 
             _epoch_loader = interleaved_loader if interleaved_loader is not None else train_loader
 
+            # On resume mid-epoch, skip batches already trained.
+            # The checkpoint stores the batch index within the epoch;
+            # we fast-forward the dataloader to avoid redundant work.
+            _resume_batch = 0
+            if epoch == start_epoch and hasattr(cfg, '_resume_batch_idx'):
+                _resume_batch = cfg._resume_batch_idx
+                if _resume_batch > 0:
+                    logger.info("Skipping %d batches (resume mid-epoch)", _resume_batch)
+
             for i, batch_data in enumerate(_epoch_loader):
                 if i >= num_batches:
                     break
+                if i < _resume_batch:
+                    continue
                 enc_tokens_override = None
                 enc_lengths_override = None
                 batch_indices = None
@@ -642,8 +654,9 @@ class VAEPretrainer:
                         scheduler=scheduler,
                         scaler=scaler,
                         cfg=cfg,
+                        batch_idx=i + 1,
                     )
-                    logger.info("Mid-epoch checkpoint at step %d", global_step)
+                    logger.info("Mid-epoch checkpoint at step %d (batch %d)", global_step, i + 1)
 
             train_ce = train_ce_sum / max(train_count, 1)
             train_kl = train_kl_sum / max(train_count, 1)
