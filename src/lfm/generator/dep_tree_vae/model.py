@@ -22,7 +22,7 @@ from lfm.generator.dep_tree_vae.projector import PhraseZProjector
 from lfm.generator.dep_tree_vae.skeleton import (
     SKEL_BOS,
     SKEL_EOS,
-    SkeletonDecoder,
+    build_skeleton_decoder,
 )
 from lfm.generator.layers import PhraseDecoder, precompute_rope_freqs
 
@@ -83,7 +83,7 @@ class DepTreeVAE(nn.Module):
         # Components
         self.encoder = SentenceEncoder(full_vocab, cfg)
         self.latent = LatentSpace(cfg.latent)
-        self.skeleton_decoder = SkeletonDecoder(
+        self.skeleton_decoder = build_skeleton_decoder(
             cfg.skeleton, cfg.latent.struct_dim,
         )
         self.phrase_projector = PhraseZProjector(

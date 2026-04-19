@@ -80,8 +80,14 @@ class LatentConfig(LFMBaseConfig):
 
 
 class SkeletonDecoderConfig(LFMBaseConfig):
-    """Config for the lightweight skeleton (role sequence) decoder."""
+    """Config for the lightweight skeleton (role sequence) decoder.
 
+    Modes:
+        ``parallel``: One-shot MLP predicts all positions + length.
+        ``ar``: Autoregressive transformer decoder.
+    """
+
+    mode: str = "parallel"
     hidden_dim: int = 128
     num_layers: int = 2
     num_heads: int = 4
