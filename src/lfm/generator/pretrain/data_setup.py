@@ -711,17 +711,15 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
 
     # Build train/val DataLoaders
     _use_constituent_context = cfg.constituent_context
+    _dl_kwargs: dict = dict(batch_size=cfg.batch_size, drop_last=True)
 
     if _use_contrastive:
         from lfm.data.corpus import IndexedDatasetWrapper
 
         indexed_train = IndexedDatasetWrapper(train_dataset)
         train_loader = DataLoader(
-            indexed_train,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-            drop_last=True,  # InfoNCE needs consistent batch sizes
-            collate_fn=pad_collate_indexed,
+            indexed_train, shuffle=True,
+            collate_fn=pad_collate_indexed, **_dl_kwargs,
         )
     else:
         _boost_thresh = getattr(cfg, "length_boost_threshold", 0)
@@ -738,19 +736,13 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
                 seed=getattr(cfg, "seed", None),
             )
             train_loader = DataLoader(
-                train_dataset,
-                batch_size=cfg.batch_size,
-                sampler=_sampler,
-                drop_last=True,
-                collate_fn=pad_collate,
+                train_dataset, sampler=_sampler,
+                collate_fn=pad_collate, **_dl_kwargs,
             )
         else:
             train_loader = DataLoader(
-                train_dataset,
-                batch_size=cfg.batch_size,
-                shuffle=True,
-                drop_last=True,
-                collate_fn=pad_collate,
+                train_dataset, shuffle=True,
+                collate_fn=pad_collate, **_dl_kwargs,
             )
 
     interleaved_loader = None
@@ -759,7 +751,6 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
 
         sentences, constituents = _load_constituents(cfg)
 
-        # Tokenize sentences and constituents with the same SPM
         sent_token_ids = [_encode_ipa(sp, ipa) for _, ipa in sentences]
         const_token_ids = [_encode_ipa(sp, ipa) for _, ipa, _, _ in constituents]
         const_parent_indices = [parent_idx for _, _, parent_idx, _ in constituents]
@@ -772,10 +763,7 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
             eos_id=eos_id,
         )
         constituent_dl = DataLoader(
-            constituent_dataset,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-            drop_last=True,
+            constituent_dataset, shuffle=True, **_dl_kwargs,
         )
         interleaved_loader = InterleavedLoader(
             sentence_loader=train_loader,
@@ -791,11 +779,8 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
         )
 
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=cfg.batch_size,
-        shuffle=False,
-        drop_last=False,
-        collate_fn=pad_collate,
+        val_dataset, shuffle=False, drop_last=False,
+        batch_size=cfg.batch_size, collate_fn=pad_collate,
     )
 
     return PreprocessedData(
