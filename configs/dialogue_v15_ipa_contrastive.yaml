@@ -53,7 +53,7 @@ max_tokens_per_phrase: 120
 # Soft length regularization: guide z-gen toward latent regions where
 # the decoder produces complete sentences within target window.
 # One-sided — no penalty before target, gentle pressure after.
-length_reg_weight: 0.1
+length_reg_weight: 0.0
 length_reg_target: 80
 length_reg_sigma: 10.0
 
