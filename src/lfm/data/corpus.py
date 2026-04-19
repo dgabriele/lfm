@@ -97,19 +97,21 @@ class MultilingualCorpusDataset(Dataset[tuple[Tensor, int]]):
         # would allocate N × max_seq_len × 8 bytes (tens of GB for large
         # corpora).  int32 is sufficient for vocabularies ≤ 2**31.
         self.data: list[tuple[Tensor, int]] = []
+        filtered = 0
         for ids in token_ids:
             if len(ids) >= max_seq_len:
-                trunc = ids[: max_seq_len - 1]
-                if word_boundary_ids is not None:
-                    for j in range(len(trunc) - 1, -1, -1):
-                        if trunc[j] in word_boundary_ids:
-                            trunc = trunc[:j]
-                            break
-                ids = trunc
+                filtered += 1
+                continue
             ids_with_eos = ids + [eos_id]
             length = len(ids_with_eos)
             self.data.append(
                 (torch.tensor(ids_with_eos, dtype=torch.int32), length)
+            )
+        if filtered:
+            import logging
+            logging.getLogger(__name__).info(
+                "Filtered %d samples exceeding max_seq_len=%d (kept %d)",
+                filtered, max_seq_len, len(self.data),
             )
 
     def __len__(self) -> int:
