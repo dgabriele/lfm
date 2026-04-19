@@ -58,7 +58,7 @@ z_var_target: 0.03
 z_var_floor: 0.01
 
 # Training
-batch_size: 200
+batch_size: 350
 gradient_accumulation_steps: 2
 use_amp: true
 lr: 0.0005
