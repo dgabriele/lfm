@@ -722,6 +722,9 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
             shuffle=True,
             drop_last=True,  # InfoNCE needs consistent batch sizes
             collate_fn=pad_collate_indexed,
+            num_workers=4,
+            pin_memory=True,
+            persistent_workers=True,
         )
     else:
         _boost_thresh = getattr(cfg, "length_boost_threshold", 0)
@@ -743,6 +746,9 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
                 sampler=_sampler,
                 drop_last=True,
                 collate_fn=pad_collate,
+                num_workers=4,
+                pin_memory=True,
+                persistent_workers=True,
             )
         else:
             train_loader = DataLoader(
@@ -751,6 +757,9 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
                 shuffle=True,
                 drop_last=True,
                 collate_fn=pad_collate,
+                num_workers=4,
+                pin_memory=True,
+                persistent_workers=True,
             )
 
     interleaved_loader = None
@@ -776,6 +785,9 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
             batch_size=cfg.batch_size,
             shuffle=True,
             drop_last=True,
+            num_workers=4,
+            pin_memory=True,
+            persistent_workers=True,
         )
         interleaved_loader = InterleavedLoader(
             sentence_loader=train_loader,
@@ -796,6 +808,9 @@ def load_and_preprocess(cfg: VAEPretrainConfig) -> tuple[PreprocessedData, VAEPr
         shuffle=False,
         drop_last=False,
         collate_fn=pad_collate,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=True,
     )
 
     return PreprocessedData(
