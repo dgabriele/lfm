@@ -8,9 +8,9 @@
 #   - contrastive_pooling: mean (entropy_weighted available but caused reduplication)
 #   - constrained_close: false (no phrase tags to close)
 
-decoder_path: /workspace/lfm/data/models/v15_ipa/vae_decoder.pt
-spm_path: /workspace/lfm/data/datasets/english-sentences-v15/spm.model
-output_dir: /workspace/lfm/data/dialogue_game_v15_ipa_contrastive
+decoder_path: /workspace/lfm/data/models/v15b_ipa/vae_decoder.pt
+spm_path: /workspace/lfm/data/models/v15b_ipa/spm.model
+output_dir: /workspace/lfm/data/dialogue_game_v15b_ipa_contrastive
 embedding_store_dir: /workspace/lfm/data/embeddings_qwen_v2_clean
 
 generator_name: multilingual_vae
