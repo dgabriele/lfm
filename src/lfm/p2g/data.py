@@ -30,6 +30,10 @@ class P2GDataset(Dataset):
             self.spelling = [
                 s.decode() if isinstance(s, bytes) else s for s in g["spelling"][:]
             ]
+            if "loss_weight" in g:
+                self.loss_weights = g["loss_weight"][:].tolist()
+            else:
+                self.loss_weights = [1.0] * len(self.ipa)
         self.ipa_vocab = ipa_vocab
         self.sp_vocab = sp_vocab
         self.max_ipa_len = max_ipa_len
@@ -45,6 +49,7 @@ class P2GDataset(Dataset):
             "ipa_ids": ipa_ids,
             "spelling_ids": sp_ids,
             "spelling_len": len(sp_ids),
+            "loss_weight": self.loss_weights[idx],
             "ipa_text": self.ipa[idx],
             "spelling_text": self.spelling[idx],
         }
@@ -61,10 +66,12 @@ def collate(batch: list[dict], max_ipa_len: int, max_spelling_len: int) -> dict:
         ipa[i, : len(ipa_ids)] = torch.tensor(ipa_ids, dtype=torch.long)
         sp[i, : len(sp_ids)] = torch.tensor(sp_ids, dtype=torch.long)
         lens[i] = row["spelling_len"]
+    weights = torch.tensor([r["loss_weight"] for r in batch], dtype=torch.float32)
     return {
         "ipa_ids": ipa,
         "spelling_ids": sp,
         "spelling_lens": lens,
+        "loss_weight": weights,
         "ipa_text": [r["ipa_text"] for r in batch],
         "spelling_text": [r["spelling_text"] for r in batch],
     }

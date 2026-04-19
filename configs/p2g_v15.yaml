@@ -1,0 +1,32 @@
+# p2g v15 — improved phoneme-to-grapheme
+#
+# Improvements over v11:
+#   - 217K pairs (190K corpus + 38K noise-augmented) vs 122K CMU-only
+#   - Inverse-frequency loss weighting (rare words get more gradient)
+#   - Max length 32 (vs 24)
+#   - Noise-augmented training pairs for neologism robustness
+#   - Label smoothing 0.05 (same as v11)
+
+train_h5: data/datasets/p2g_v15/train.h5
+val_h5: data/datasets/p2g_v15/val.h5
+output_dir: data/models/p2g_v15
+
+encoder_layers: 5
+decoder_layers: 5
+decoder_dim: 384
+decoder_heads: 6
+max_ipa_len: 32
+max_spelling_len: 32
+dropout: 0.1
+
+batch_size: 256
+lr: 0.0005
+lr_min: 0.00001
+weight_decay: 0.01
+num_epochs: 80
+label_smoothing: 0.05
+use_loss_weights: true
+
+sample_every_epochs: 10
+seed: 42
+device: cuda

@@ -49,6 +49,8 @@ def set_seed(seed: int) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("config", type=Path)
+    ap.add_argument("--resume", type=Path, default=None,
+                    help="Resume from checkpoint (latest.pt)")
     args = ap.parse_args()
     cfg = yaml.safe_load(args.config.read_text())
 
@@ -107,7 +109,23 @@ def main() -> None:
     best_val = float("inf")
     best_word_acc = 0.0
     step = 0
-    for epoch in range(cfg["num_epochs"]):
+    start_epoch = 0
+
+    if args.resume:
+        logger.info(f"Resuming from {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state"])
+        if "optimizer_state" in ckpt:
+            optim.load_state_dict(ckpt["optimizer_state"])
+        if "scheduler_state" in ckpt:
+            sched.load_state_dict(ckpt["scheduler_state"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+        step = ckpt.get("step", 0)
+        best_val = ckpt.get("val_loss", float("inf"))
+        best_word_acc = ckpt.get("val_word_acc", 0.0)
+        logger.info(f"  resumed at epoch={start_epoch} step={step} best_val={best_val:.3f} best_word_acc={best_word_acc:.3f}")
+
+    for epoch in range(start_epoch, cfg["num_epochs"]):
         model.train()
         running_loss = 0.0
         running_n = 0
@@ -116,9 +134,10 @@ def main() -> None:
                 k: v.to(device) for k, v in batch.items()
                 if isinstance(v, torch.Tensor)
             }
+            lw = batch_t.get("loss_weight") if cfg.get("use_loss_weights") else None
             out = model(
                 batch_t["ipa_ids"], batch_t["spelling_ids"],
-                batch_t["spelling_lens"], step=step,
+                batch_t["spelling_lens"], step=step, loss_weight=lw,
             )
             optim.zero_grad()
             out["loss"].backward()
@@ -128,6 +147,13 @@ def main() -> None:
             step += 1
             running_loss += out["loss"].item()
             running_n += 1
+            if step % 50 == 0:
+                logger.info(
+                    f"  step={step} loss={out['loss'].item():.4f} "
+                    f"char_acc={out['char_acc'].item():.3f} "
+                    f"word_acc={out['word_acc'].item():.3f} "
+                    f"lr={sched.get_last_lr()[0]:.6f}"
+                )
 
         # Validation
         model.eval()
@@ -178,10 +204,13 @@ def main() -> None:
 
         ckpt = {
             "model_state": model.state_dict(),
+            "optimizer_state": optim.state_dict(),
+            "scheduler_state": sched.state_dict(),
             "cfg": cfg,
             "ipa_vocab": ipa_vocab.chars,
             "sp_vocab": sp_vocab.chars,
             "epoch": epoch,
+            "step": step,
             "val_loss": val_loss,
             "val_word_acc": val_word_acc,
         }

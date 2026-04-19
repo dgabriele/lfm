@@ -1,0 +1,33 @@
+# p2g v15 BPE — phoneme-to-grapheme with BPE output tokens
+#
+# Same IPA input as char-level v15, but predicts Qwen BPE tokens
+# instead of individual characters. 646K pairs, 17.7K output vocab.
+#
+# For comparison against char-level p2g_v15 at epoch 2 (word_acc=63.7%).
+
+train_h5: data/datasets/p2g_v15_bpe/train.h5
+val_h5: data/datasets/p2g_v15_bpe/val.h5
+bpe_vocab_path: data/datasets/p2g_v15_bpe/bpe_vocab.json
+output_dir: data/models/p2g_v15_bpe
+
+encoder_layers: 5
+decoder_layers: 5
+d_model: 384
+decoder_dim: 384
+nhead: 6
+decoder_heads: 6
+max_ipa_len: 32
+max_bpe_len: 8
+dropout: 0.1
+
+batch_size: 256
+lr: 0.0005
+lr_min: 0.00001
+weight_decay: 0.01
+num_epochs: 25
+label_smoothing: 0.02
+use_loss_weights: true
+
+sample_every_epochs: 1
+seed: 42
+device: cuda

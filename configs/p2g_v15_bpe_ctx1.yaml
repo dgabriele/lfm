@@ -1,0 +1,27 @@
+# p2g v15 BPE with ±1 word context
+# 101M training pairs, noise-augmented, inverse-frequency weighted
+
+train_h5: data/datasets/p2g_v15_bpe_ctx1/train.h5
+val_h5: data/datasets/p2g_v15_bpe_ctx1/val.h5
+bpe_vocab_path: data/datasets/p2g_v15_bpe_ctx1/bpe_vocab.json
+output_dir: data/models/p2g_v15_bpe_ctx1
+
+encoder_layers: 5
+decoder_layers: 5
+d_model: 384
+nhead: 6
+max_ipa_len: 96
+max_bpe_len: 8
+dropout: 0.1
+
+batch_size: 256
+lr: 0.0005
+lr_min: 0.00001
+weight_decay: 0.01
+num_epochs: 2
+label_smoothing: 0.1
+use_loss_weights: false
+
+sample_every_epochs: 1
+seed: 42
+device: cuda

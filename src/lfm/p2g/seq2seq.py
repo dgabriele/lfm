@@ -93,6 +93,7 @@ class P2GSeq2Seq(nn.Module):
         spelling_ids: Tensor,
         spelling_lens: Tensor,
         step: int,  # unused, signature-match P2GVAE
+        loss_weight: Tensor | None = None,
     ) -> dict[str, Tensor]:
         memory, src_pad = self._encode(ipa_ids)
 
@@ -108,22 +109,33 @@ class P2GSeq2Seq(nn.Module):
         logits = self._decode_logits(memory, src_pad, dec_in)     # (B, 1+L, V)
         logits = logits[:, :L, :]                                 # align with tgt
         V = logits.size(-1)
-        recon = F.cross_entropy(
-            logits.reshape(-1, V),
-            tgt.reshape(-1),
-            ignore_index=PAD_ID,
-            reduction="mean",
-            label_smoothing=self.cfg.label_smoothing,
-        )
+        if loss_weight is not None:
+            per_token = F.cross_entropy(
+                logits.reshape(-1, V), tgt.reshape(-1),
+                ignore_index=PAD_ID, reduction="none",
+                label_smoothing=self.cfg.label_smoothing,
+            ).reshape(B, L)
+            mask = (tgt != PAD_ID).float()
+            per_sample = (per_token * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+            recon = (per_sample * loss_weight.to(per_sample.device)).mean()
+        else:
+            recon = F.cross_entropy(
+                logits.reshape(-1, V), tgt.reshape(-1),
+                ignore_index=PAD_ID, reduction="mean",
+                label_smoothing=self.cfg.label_smoothing,
+            )
         with torch.no_grad():
             pred = logits.argmax(-1)
             mask = tgt != PAD_ID
             char_acc = ((pred == tgt) & mask).float().sum() / mask.float().sum().clamp_min(1)
+            per_sample_correct = ((pred == tgt) | ~mask).all(dim=-1)
+            word_acc = per_sample_correct.float().mean()
 
         zero = torch.zeros((), device=recon.device)
         return {
             "loss": recon,
             "recon": recon.detach(),
+            "word_acc": word_acc.detach(),
             "length_loss": zero,
             "kl": zero,
             "kl_weight": zero,
