@@ -57,6 +57,9 @@ length_reg_weight: 0.0
 length_reg_target: 80
 length_reg_sigma: 10.0
 
+# Curriculum — ramp hard negatives slowly for clearer gradients
+warmup_steps: 2500
+
 # Training
 batch_size: 256
 gradient_accumulation_steps: 1
