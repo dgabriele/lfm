@@ -7,6 +7,37 @@ import argparse
 from lfm.cli.base import CLICommand
 
 
+class DepTreeVAECommand(CLICommand):
+    """Train DepTreeVAE — dependency-disentangled latent space."""
+
+    @property
+    def name(self) -> str:
+        return "dep-tree-vae"
+
+    @property
+    def help(self) -> str:
+        return "Pretrain DepTreeVAE (syntax/content disentangled latent space)"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("config", help="YAML config file")
+
+    def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
+        from lfm.generator.dep_tree_vae.config import DepTreeVAEConfig
+        from lfm.generator.dep_tree_vae.trainer import train_dep_tree_vae
+
+        with open(args.config) as f:
+            raw = yaml.safe_load(f)
+
+        if "attention_head_windows" in raw:
+            raw["attention_head_windows"] = tuple(raw["attention_head_windows"])
+
+        config = DepTreeVAEConfig(**raw)
+        train_dep_tree_vae(config)
+        return 0
+
+
 class ReconstructionCommand(CLICommand):
     """Train reconstruction model — embedding recovery through the bottleneck."""
 
@@ -65,6 +96,7 @@ def register_train_group(
     )
 
     commands = [
+        DepTreeVAECommand(),
         ReconstructionCommand(),
     ]
 

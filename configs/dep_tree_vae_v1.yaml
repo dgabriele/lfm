@@ -1,0 +1,71 @@
+# DepTreeVAE v1 — dependency-disentangled latent space
+#
+# Trains on 2M English IPA sentences annotated with Universal Dependencies.
+# Latent space split: z_struct (64d) controls syntactic skeleton,
+# z_content (192d) controls lexical filling.
+
+dataset_path: data/datasets/english-dep-trees-v16
+spm_model_path: data/models/v15b_ipa/spm.model
+spm_vocab_size: 8000
+max_seq_len: 160  # interleaved = ~2x word count
+
+# Encoder
+encoder_hidden_dim: 512
+encoder_num_layers: 2
+encoder_num_heads: 8
+encoder_dropout: 0.1
+
+# Latent space split
+latent:
+  total_dim: 256
+  struct_dim: 64
+  content_dim: 192
+
+# Skeleton decoder (role sequence from z_struct)
+skeleton:
+  hidden_dim: 128
+  num_layers: 2
+  num_heads: 4
+  max_roles: 40
+  dropout: 0.1
+
+# Phrase decoder (frozen, from v15b pretrain)
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+pretrained_decoder_path: data/models/v15b_ipa/vae_decoder.pt
+freeze_decoder: true
+
+# Disentanglement losses
+disentanglement:
+  struct_cls_weight: 1.0
+  content_bow_weight: 0.5
+  adversarial_weight: 0.5
+  gradient_reversal_scale: 1.0
+
+# KL
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 5000
+
+# Training
+batch_size: 128
+gradient_accumulation_steps: 2
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 3
+use_amp: true
+seed: 42
+device: cuda
+
+# Logging
+log_every: 50
+checkpoint_every_steps: 2000
+val_fraction: 0.05
+output_dir: data/models/dep_tree_vae_v1
