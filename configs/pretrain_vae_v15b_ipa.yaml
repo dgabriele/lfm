@@ -72,7 +72,7 @@ dip_weight: 0.1
 bow_weight: 0.0
 
 length_boost_threshold: 30
-length_boost_factor: 5.0
+length_boost_factor: 2.0
 
 # Keep unlikelihood + scheduled sampling (proven useful)
 unlikelihood_weight: 0.15
