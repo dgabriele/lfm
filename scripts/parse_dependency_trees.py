@@ -115,6 +115,52 @@ def parse_batch_pretokenized(nlp, sentences: list[str]) -> list:
     return doc.sentences
 
 
+def process_batch_sentences(
+    batch_pairs: list[tuple[str, str]],
+    parsed_sents: list,
+) -> tuple[list[str], list[str]]:
+    """Process a full batch of parsed sentences into JSONL + tagged lines.
+
+    Returns (jsonl_lines, tagged_lines) — pre-serialized strings ready
+    for bulk file write.
+    """
+    try:
+        import orjson
+        _dumps = lambda obj: orjson.dumps(obj, option=orjson.OPT_APPEND_NEWLINE).decode()
+    except ImportError:
+        _dumps = lambda obj: json.dumps(obj, ensure_ascii=False) + "\n"
+
+    jsonl_lines: list[str] = []
+    tagged_lines: list[str] = []
+
+    for (eng, ipa), parsed_sent in zip(batch_pairs, parsed_sents):
+        ipa_words = ipa.split()
+        words = parsed_sent.words
+        n = len(words)
+
+        if n != len(eng.split()) or n != len(ipa_words):
+            continue
+
+        dep_labels = [w.deprel for w in words]
+        dep_heads = [w.head for w in words]
+
+        # Build tagged IPA inline — single join, no intermediate list
+        tagged_ipa = " ".join(
+            f"[{lab}] {iw}" for lab, iw in zip(dep_labels, ipa_words)
+        )
+
+        jsonl_lines.append(_dumps({
+            "english": eng,
+            "ipa": ipa,
+            "dep_labels": dep_labels,
+            "dep_heads": dep_heads,
+            "tagged_ipa": tagged_ipa,
+        }))
+        tagged_lines.append(tagged_ipa + "\n")
+
+    return jsonl_lines, tagged_lines
+
+
 def process_sentence(
     english: str, ipa: str, parsed_sent
 ) -> dict | None:
@@ -126,7 +172,6 @@ def process_sentence(
     eng_words = english.split()
     ipa_words = ipa.split()
 
-    # Extract dependency labels and heads from parsed sentence
     dep_labels: list[str] = []
     dep_heads: list[int] = []
     parsed_words: list[str] = []
@@ -134,24 +179,18 @@ def process_sentence(
     for word in parsed_sent.words:
         parsed_words.append(word.text)
         dep_labels.append(word.deprel)
-        dep_heads.append(word.head)  # 1-indexed, 0 = ROOT
+        dep_heads.append(word.head)
 
-    # Verify alignment: parsed tokens must match input tokens
     if len(parsed_words) != len(eng_words):
         return None
 
-    # Check tokens actually match (Stanza shouldn't change them with
-    # pretokenized input, but verify anyway)
     for pw, ew in zip(parsed_words, eng_words):
         if pw != ew:
             return None
 
-    # Build tagged IPA: interleave [dep_label] before each IPA word
-    tagged_parts = []
-    for label, iw in zip(dep_labels, ipa_words):
-        tagged_parts.append(f"[{label}]")
-        tagged_parts.append(iw)
-    tagged_ipa = " ".join(tagged_parts)
+    tagged_ipa = " ".join(
+        f"[{lab}] {iw}" for lab, iw in zip(dep_labels, ipa_words)
+    )
 
     return {
         "english": english,
@@ -293,16 +332,14 @@ def main():
                     except Exception:
                         failed_count += 1
             else:
-                for (eng, ipa), parsed_sent in zip(batch_pairs, parsed_sents):
-                    result = process_sentence(eng, ipa, parsed_sent)
-                    if result:
-                        jsonl_f.write(
-                            json.dumps(result, ensure_ascii=False) + "\n"
-                        )
-                        tagged_f.write(result["tagged_ipa"] + "\n")
-                        parsed_count += 1
-                    else:
-                        failed_count += 1
+                jsonl_lines, tagged_lines = process_batch_sentences(
+                    batch_pairs, parsed_sents,
+                )
+                if jsonl_lines:
+                    jsonl_f.write("".join(jsonl_lines))
+                    tagged_f.write("".join(tagged_lines))
+                parsed_count += len(jsonl_lines)
+                failed_count += len(batch_pairs) - len(jsonl_lines)
 
             # Log progress every 50K sentences
             if parsed_count - last_log_count >= 50_000:
