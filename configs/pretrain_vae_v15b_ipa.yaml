@@ -31,7 +31,7 @@ attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
 attention_global_every: 7
 use_rope: true
 share_decoder_layers: true
-max_seq_len: 0
+max_seq_len: 80
 encoder_pooling: mean
 
 # KL off
