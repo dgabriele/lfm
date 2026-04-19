@@ -75,7 +75,7 @@ def run_validation(
             with torch.amp.autocast(
                 device_type=device.type, enabled=cfg.use_amp
             ):
-                ce_loss, kl_loss, kl_per_dim, _, dec_hidden_val, _, _, _, _, _ = _vae_forward(
+                ce_loss, kl_loss, kl_per_dim, _, val_logits, _, _, _, _, _ = _vae_forward(
                     batch_tokens,
                     batch_lengths,
                     bos_id=bos_id,
@@ -90,14 +90,13 @@ def run_validation(
             val_count += b
             all_kl_per_dim.append(kl_per_dim.detach().cpu())
 
-            # Bucketed val CE
-            _v_logits = modules["output_head"](dec_hidden_val)
+            # Bucketed val CE (reuses logits from forward pass)
             _v_src_mask = (
                 torch.arange(batch_tokens.size(1), device=device).unsqueeze(0)
                 < batch_lengths.unsqueeze(1)
             )
             _v_per_tok = F.cross_entropy(
-                _v_logits.reshape(-1, full_vocab),
+                val_logits.reshape(-1, full_vocab),
                 batch_tokens.reshape(-1),
                 reduction="none",
             ).reshape(b, -1)
@@ -105,11 +104,13 @@ def run_validation(
                 (_v_per_tok * _v_src_mask.float()).sum(dim=1)
                 / batch_lengths.float().clamp(min=1)
             )
-            for _vi in range(b):
-                _vlen = batch_lengths[_vi].item()
-                _vbkt = 0 if _vlen < 20 else (1 if _vlen <= 50 else 2)
-                _val_bucket_ce_sum[_vbkt] += _v_per_sample[_vi].item()
-                _val_bucket_ce_count[_vbkt] += 1
+            _v_bkt_ids = torch.where(batch_lengths < 20, 0, torch.where(batch_lengths <= 50, 1, 2))
+            for _vbkt in range(3):
+                _vmask = _v_bkt_ids == _vbkt
+                _vcnt = _vmask.sum().item()
+                if _vcnt > 0:
+                    _val_bucket_ce_sum[_vbkt] += _v_per_sample[_vmask].sum().item()
+                    _val_bucket_ce_count[_vbkt] += _vcnt
 
     val_ce = val_ce_sum / max(val_count, 1)
     val_kl = val_kl_sum / max(val_count, 1)

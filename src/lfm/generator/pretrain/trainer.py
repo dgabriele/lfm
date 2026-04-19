@@ -337,6 +337,7 @@ class VAEPretrainer:
             optimizer.zero_grad()
             epoch_start = time.time()
             batch_start = time.time()
+            _window_tokens = 0
 
             _epoch_loader = interleaved_loader if interleaved_loader is not None else train_loader
 
@@ -395,7 +396,7 @@ class VAEPretrainer:
                     ):
                         _do_kl = cfg.kl_weight > 0 or cfg.kl_beta > 0
                         (ce_loss, kl_loss, kl_per_dim_train,
-                         z_batch, dec_hidden, mu_batch, logvar_batch,
+                         z_batch, train_logits, mu_batch, logvar_batch,
                          vq_loss_batch, bow_loss, tag_balance_loss) = (
                             _vae_forward(
                                 batch_tokens,
@@ -499,10 +500,9 @@ class VAEPretrainer:
                     optimizer.zero_grad()
                     global_step += 1
 
-                # Token accuracy
+                # Token accuracy (reuses logits from forward pass)
                 with torch.no_grad():
-                    _logits = modules["output_head"](dec_hidden)
-                    _preds = _logits.argmax(dim=-1)
+                    _preds = train_logits.argmax(dim=-1)
                     _src_mask = (
                         torch.arange(batch_tokens.size(1), device=device).unsqueeze(0)
                         < batch_lengths.unsqueeze(1)
@@ -511,7 +511,7 @@ class VAEPretrainer:
                     _total = _src_mask.sum().item()
                     _batch_acc = _correct / max(_total, 1)
 
-                    _flat_logits = _logits.reshape(-1, full_vocab)
+                    _flat_logits = train_logits.reshape(-1, full_vocab)
                     _flat_targets = batch_tokens.reshape(-1)
                     _per_tok_ce = F.cross_entropy(
                         _flat_logits, _flat_targets, reduction="none",
@@ -520,13 +520,17 @@ class VAEPretrainer:
                         (_per_tok_ce * _src_mask.float()).sum(dim=1)
                         / batch_lengths.float().clamp(min=1)
                     )
-                    for _s_idx in range(b):
-                        _slen = batch_lengths[_s_idx].item()
-                        _bkt = 0 if _slen < 20 else (1 if _slen <= 50 else 2)
-                        _bucket_ce_sum[_bkt] += _per_sample_ce[_s_idx].item()
-                        _bucket_ce_count[_bkt] += 1
-                        _batch_bucket_ce_sum[_bkt] += _per_sample_ce[_s_idx].item()
-                        _batch_bucket_ce_count[_bkt] += 1
+                    _lens = batch_lengths
+                    _bkt_ids = torch.where(_lens < 20, 0, torch.where(_lens <= 50, 1, 2))
+                    for _bkt in range(3):
+                        _mask = _bkt_ids == _bkt
+                        _cnt = _mask.sum().item()
+                        if _cnt > 0:
+                            _ce_sum = _per_sample_ce[_mask].sum().item()
+                            _bucket_ce_sum[_bkt] += _ce_sum
+                            _bucket_ce_count[_bkt] += _cnt
+                            _batch_bucket_ce_sum[_bkt] += _ce_sum
+                            _batch_bucket_ce_count[_bkt] += _cnt
 
                 train_ce_sum += ce_loss.item() * b
                 train_kl_sum += kl_loss.item() * b
@@ -539,13 +543,14 @@ class VAEPretrainer:
                 train_tagbal_sum += tag_balance_loss.item() * b
                 train_acc_correct += _correct
                 train_acc_total += _total
+                _window_tokens += _total
                 train_count += b
 
                 # -- Per-batch logging --
                 if (i + 1) % log_every == 0 or (i + 1) == num_batches:
                     elapsed = time.time() - batch_start
                     tokens_per_sec = (
-                        log_every * b * cfg.max_seq_len / max(elapsed, 0.01)
+                        _window_tokens / max(elapsed, 0.01)
                     )
                     mem_mb = torch.cuda.memory_allocated(device) / 1e6 if device.type == "cuda" else 0.0
                     ppl = min(math.exp(ce_loss.item()), 99999.0)
@@ -601,6 +606,7 @@ class VAEPretrainer:
                     _batch_bucket_ce_sum = [0.0, 0.0, 0.0]
                     _batch_bucket_ce_count = [0, 0, 0]
                     batch_start = time.time()
+                    _window_tokens = 0
 
                 # Mid-epoch diagnostics
                 if (

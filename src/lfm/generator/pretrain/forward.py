@@ -167,7 +167,7 @@ def _vae_forward(
     at long sequence lengths.
 
     Returns:
-        Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, dec_hidden, mu, logvar, vq_loss)``.
+        Tuple of ``(ce_loss, kl_loss, kl_per_dim, z, logits, mu, logvar, vq_loss, ...)``.
     """
     from lfm.generator.layers import PhraseDecoder, multiscale_causal_mask
 
@@ -432,7 +432,7 @@ def _vae_forward(
         tag_balance_loss = torch.tensor(0.0, device=device)
 
     return (
-        ce_loss, kl_loss, kl_per_dim, z, dec_out, mu, logvar,
+        ce_loss, kl_loss, kl_per_dim, z, logits, mu, logvar,
         vq_commitment_loss, bow_loss, tag_balance_loss,
     )
 
