@@ -51,8 +51,16 @@ RE_DIGIT_HEAVY = re.compile(r"\d")
 RE_QUOTED = re.compile(r'["\u201c\u201d\u00ab\u00bb\u2018\u2019]')
 
 
+RE_NUM_SEQ = re.compile(r"\d+")
+RE_SENTENCE_END = re.compile(r"[.!?。！？]$")
+RE_STARTS_WITH_LETTER = re.compile(r"^\s*\w", re.UNICODE)
+RE_BULLET_PREFIX = re.compile(r"^\s*[;•·\-–—►▪▸\*#\d]+[\s:.)]+")
+RE_PARENS_HEAVY = re.compile(r"\([^)]*\)")
+
+
 def filter_sentence(text: str, min_words: int = 5, max_words: int = 30) -> bool:
     """Return True if the sentence passes quality filters."""
+    text = text.strip()
     words = text.split()
     if not (min_words <= len(words) <= max_words):
         return False
@@ -62,13 +70,28 @@ def filter_sentence(text: str, min_words: int = 5, max_words: int = 30) -> bool:
         return False
     if RE_QUOTED.search(text):
         return False
-    # Too many digits (>20% of chars)
-    digit_ratio = sum(1 for c in text if c.isdigit()) / max(len(text), 1)
-    if digit_ratio > 0.2:
+    # Must start with a letter (not bullet, semicolon, number, etc.)
+    if not text[0].isalpha():
         return False
-    # Too many uppercase (>50% — likely acronym soup or header)
+    # Must end with sentence-ending punctuation
+    if not RE_SENTENCE_END.search(text):
+        return False
+    # No bullet/list-like prefixes
+    if RE_BULLET_PREFIX.match(text):
+        return False
+    # Too many digit sequences (>2 = likely a date list or table row)
+    if len(RE_NUM_SEQ.findall(text)) > 2:
+        return False
+    # Too many digits (>15% of chars)
+    digit_ratio = sum(1 for c in text if c.isdigit()) / max(len(text), 1)
+    if digit_ratio > 0.15:
+        return False
+    # Too many uppercase (>40% — likely acronym soup or header)
     upper_ratio = sum(1 for c in text if c.isupper()) / max(len(text), 1)
-    if upper_ratio > 0.5:
+    if upper_ratio > 0.4:
+        return False
+    # Too many parentheses (likely citations/references)
+    if len(RE_PARENS_HEAVY.findall(text)) > 2:
         return False
     return True
 
