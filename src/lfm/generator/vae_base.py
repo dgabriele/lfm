@@ -37,6 +37,59 @@ from lfm.utils.tensor import create_padding_mask, masked_mean
 logger = logging.getLogger(__name__)
 
 
+def _extract_decoder_from_resume(ckpt: dict) -> dict:
+    """Extract decoder-only weights from a full training checkpoint.
+
+    Handles both the original VAE format (enc_token_embedding, etc.)
+    and the DepTreeVAE format (phrase_decoder, dec_token_embedding, etc.).
+    """
+    ms = ckpt["model_state"]
+
+    # DepTreeVAE format
+    if any(k.startswith("phrase_decoder.") for k in ms):
+        def _extract(prefix: str) -> dict:
+            p = prefix + "."
+            return {k[len(p):]: v for k, v in ms.items() if k.startswith(p)}
+
+        spm_size = ms["output_head.weight"].shape[0] - 2  # output dim - BOS - EOS
+        decoder_ckpt = {
+            "decoder": _extract("phrase_decoder"),
+            "output_head": _extract("output_head"),
+            "latent_to_decoder": _extract("phrase_projector"),
+            "token_embedding": _extract("dec_token_embedding"),
+            "latent_dim": ckpt.get("latent_dim", 256),
+            "vocab_size": spm_size,
+        }
+        # Try to extract pos_embedding if not Identity
+        pos_keys = {k: v for k, v in ms.items() if k.startswith("dec_pos_embedding.") and "Identity" not in str(type(v))}
+        if pos_keys:
+            decoder_ckpt["pos_embedding"] = _extract("dec_pos_embedding")
+        # z calibration stats
+        if "latent._z_mean" in ms:
+            decoder_ckpt["z_mean"] = ms["latent._z_mean"]
+        if "latent._z_std" in ms:
+            decoder_ckpt["z_std"] = ms["latent._z_std"]
+        return decoder_ckpt
+
+    # Original VAE format (modules dict)
+    if "modules" in ckpt:
+        m = ckpt["modules"]
+        spm_size = m["output_head"]["weight"].shape[0] - 2
+        return {
+            "decoder": m["decoder"],
+            "output_head": m["output_head"],
+            "latent_to_decoder": m["latent_to_decoder"],
+            "token_embedding": m["dec_token_embedding"],
+            "pos_embedding": m.get("dec_pos_embedding"),
+            "latent_dim": ckpt.get("latent_dim", 256),
+            "vocab_size": spm_size,
+            "z_mean": ckpt.get("z_mean"),
+            "z_std": ckpt.get("z_std"),
+        }
+
+    raise ValueError("Unrecognized checkpoint format — no model_state or modules key")
+
+
 class BaseVAEGenerator(GeneratorModule):
     """Shared implementation of the VAE-with-frozen-decoder architecture.
 
@@ -454,6 +507,12 @@ class BaseVAEGenerator(GeneratorModule):
     def _load_pretrained_decoder(self, path: str) -> None:
         """Load pretrained VAE decoder weights from a checkpoint.
 
+        Accepts either:
+          - A decoder-only checkpoint (keys: decoder, output_head, etc.)
+          - A full training resume checkpoint (keys: model_state, epoch, etc.)
+            → auto-extracts decoder weights and caches as ``_decoder.pt``
+            alongside the original file.
+
         Args:
             path: Path to the ``.pt`` checkpoint file.
 
@@ -463,10 +522,26 @@ class BaseVAEGenerator(GeneratorModule):
         """
         from pathlib import Path as _Path
 
-        if not _Path(path).exists():
+        ckpt_path = _Path(path)
+        if not ckpt_path.exists():
             raise FileNotFoundError(f"Pretrained decoder checkpoint not found: {path}")
 
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        # Check for cached extracted decoder
+        cached_path = ckpt_path.parent / (ckpt_path.stem + "_decoder.pt")
+        if cached_path.exists() and cached_path.stat().st_mtime >= ckpt_path.stat().st_mtime:
+            logger.info("Loading cached decoder from %s", cached_path)
+            checkpoint = torch.load(cached_path, map_location="cpu", weights_only=True)
+        else:
+            raw = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+            if "model_state" in raw:
+                # Full training checkpoint — extract decoder weights
+                logger.info("Extracting decoder from training checkpoint %s", path)
+                checkpoint = _extract_decoder_from_resume(raw)
+                torch.save(checkpoint, cached_path)
+                logger.info("Cached extracted decoder to %s", cached_path)
+            else:
+                checkpoint = raw
 
         if checkpoint["latent_dim"] != self._latent_dim:
             raise ValueError(

@@ -6,7 +6,7 @@
 # so the agent game's z-generator controls both structure (z_struct) and
 # content (z_content) independently.
 
-decoder_path: data/models/dep_tree_vae_v2/best.pt
+decoder_path: data/models/dep_tree_vae_v2/resume.pt
 spm_path: data/models/v15b_ipa/spm.model
 output_dir: data/dialogue_game_dep_tree_local
 embedding_store_dir: data/embeddings_qwen_v2_clean
