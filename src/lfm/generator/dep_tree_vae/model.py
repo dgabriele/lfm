@@ -114,12 +114,13 @@ class DepTreeVAE(nn.Module):
         self.dec_pos_embedding: nn.Module
         if cfg.use_rope:
             self.dec_pos_embedding = nn.Identity()
-            self._rope_freqs = precompute_rope_freqs(
-                h // cfg.decoder_num_heads, cfg.max_seq_len,
+            self.register_buffer(
+                "_rope_freqs",
+                precompute_rope_freqs(h // cfg.decoder_num_heads, cfg.max_seq_len),
             )
         else:
             self.dec_pos_embedding = nn.Embedding(cfg.max_seq_len, h)
-            self._rope_freqs = None
+            self.register_buffer("_rope_freqs", None)
 
         self.output_head = nn.Linear(h, decoder_vocab)
         self._decoder_vocab = decoder_vocab
