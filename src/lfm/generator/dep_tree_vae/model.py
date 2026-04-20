@@ -193,10 +193,8 @@ class DepTreeVAE(nn.Module):
         )
 
         # 4. Build per-position memory from z_content + roles
-        # Extract role ids per IPA token position (every other token
-        # in the interleaved sequence is a role token).
-        content_roles, content_positions = self._extract_content_roles(
-            tokens, lengths,
+        content_tokens, content_lengths, content_roles, content_positions = (
+            self._split_roles_and_content(tokens, lengths)
         )
         memory = self.phrase_projector(
             z_content, content_roles, content_positions,
@@ -229,30 +227,53 @@ class DepTreeVAE(nn.Module):
             logvar=logvar,
         )
 
-    def _extract_content_roles(
+    def _split_roles_and_content(
         self, tokens: Tensor, lengths: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        """Extract per-content-token role ids and positions.
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Split interleaved sequence into role ids and content token ids.
 
-        In the interleaved sequence ``[role] word [role] word ...``,
-        even positions (0, 2, 4...) are roles, odd positions are content.
-        Returns role_id and position for each content token.
+        Role tokens have ids >= role_offset.  Each role token applies
+        to all subsequent content tokens until the next role token.
+
+        Returns:
+            content_tokens: ``(B, max_content)`` IPA token ids.
+            content_lengths: ``(B,)`` number of content tokens per sample.
+            content_roles: ``(B, max_content)`` dep role id per content token.
+            content_positions: ``(B, max_content)`` position indices.
         """
         b, s = tokens.shape
         device = tokens.device
+        role_offset = self.cfg.spm_vocab_size + 3  # where role token ids start
 
-        # Content tokens are at odd positions; their role is the
-        # preceding even position.  For positions beyond the sequence
-        # length, use pad (0).
-        max_content = s // 2
+        # Identify role vs content positions per sample
+        is_role = tokens >= role_offset  # (B, S)
+        is_content = (~is_role) & (tokens > 0)  # non-role, non-pad
+
+        # Extract content tokens and their associated roles
+        max_content = is_content.sum(dim=1).max().item()
+        if max_content == 0:
+            max_content = 1
+
+        content_tokens = torch.zeros(b, max_content, dtype=torch.long, device=device)
         content_roles = torch.zeros(b, max_content, dtype=torch.long, device=device)
+        content_lengths = torch.zeros(b, dtype=torch.long, device=device)
+
+        for i in range(b):
+            current_role = 0
+            ci = 0
+            for j in range(lengths[i].item()):
+                tok = tokens[i, j].item()
+                if tok >= role_offset:
+                    current_role = tok - role_offset
+                elif tok > 0:  # content token (non-pad)
+                    if ci < max_content:
+                        content_tokens[i, ci] = tok
+                        content_roles[i, ci] = min(current_role, NUM_DEP_RELATIONS - 1)
+                        ci += 1
+            content_lengths[i] = ci
+
         positions = torch.arange(max_content, device=device).unsqueeze(0).expand(b, -1)
-
-        for i in range(max_content):
-            role_pos = 2 * i
-            content_roles[:, i] = tokens[:, role_pos].clamp(max=NUM_DEP_RELATIONS - 1)
-
-        return content_roles, positions
+        return content_tokens, content_lengths, content_roles, positions
 
     def _decode_and_loss(
         self,
@@ -260,22 +281,18 @@ class DepTreeVAE(nn.Module):
         lengths: Tensor,
         memory: Tensor,
     ) -> Tensor:
-        """Run phrase decoder on content tokens with per-position memory.
-
-        The decoder sees content tokens (IPA words) and cross-attends
-        to the per-position memory from the projector.
-        """
+        """Run phrase decoder on content tokens with per-position memory."""
         from lfm.generator.layers import multiscale_causal_mask
 
-        b, s = tokens.shape
+        b = tokens.size(0)
         device = tokens.device
 
-        # Extract content tokens (odd positions in interleaved sequence).
-        # Clamp to decoder vocab range — interleaved tokens may include
-        # role IDs beyond the decoder's SPM-only vocabulary.
-        max_content = s // 2
-        content_tokens = tokens[:, 1::2][:, :max_content].clamp(max=self._decoder_vocab - 1)
-        content_lengths = (lengths // 2).clamp(min=1)
+        content_tokens, content_lengths, _, _ = self._split_roles_and_content(
+            tokens, lengths,
+        )
+
+        # Clamp to decoder vocab
+        content_tokens = content_tokens.clamp(max=self._decoder_vocab - 1)
 
         # Teacher forcing: shift right with BOS
         bos = torch.full(
@@ -298,7 +315,7 @@ class DepTreeVAE(nn.Module):
             self.cfg.attention_global_every,
             device=device,
         )
-        rope = self._rope_freqs[:cs].to(device) if self._rope_freqs is not None else None
+        rope = self._rope_freqs[:cs] if self._rope_freqs is not None else None
 
         # Truncate memory to match decoder sequence length
         mem = memory[:, :cs, :]
