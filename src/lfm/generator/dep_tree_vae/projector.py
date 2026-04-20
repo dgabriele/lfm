@@ -1,8 +1,9 @@
-"""Phrase-level z projector for DepTreeVAE.
+"""Role-level memory projector for DepTreeVAE.
 
-Derives a per-word latent from z_content conditioned on the
-dependency role and position.  The frozen PhraseDecoder receives
-this projected latent as its memory/conditioning signal.
+Produces one memory vector per dependency role in the skeleton.
+The PhraseDecoder cross-attends to this role memory during
+autoregressive generation, dynamically selecting which role
+it's currently filling — no forced positional alignment needed.
 """
 
 from __future__ import annotations
@@ -15,27 +16,26 @@ from lfm.generator.dep_tree_vae.config import NUM_DEP_RELATIONS
 
 
 class PhraseZProjector(nn.Module):
-    """Map (z_content, role, position) → per-position decoder memory.
+    """Map (z_content, role_ids) → per-role decoder memory.
 
-    For each token position in the output sequence, the projector
-    combines the global content latent with a role embedding and a
-    position embedding to produce a conditioning vector for the
-    PhraseDecoder's cross-attention.
+    Each role in the skeleton gets a memory vector that combines
+    the global content latent with a role-specific embedding.
+    The decoder cross-attends to these role memories, learning
+    to shift attention as it fills successive roles.
 
-    This allows the same z_content to produce different words
-    depending on syntactic role — a verb in the ROOT slot vs
-    a noun in the nsubj slot.
+    Output shape: ``(B, num_roles, decoder_hidden_dim)`` — one
+    vector per role, not per output token.
     """
 
     def __init__(
         self,
         content_dim: int,
         decoder_hidden_dim: int,
-        max_seq_len: int = 80,
+        max_roles: int = 40,
     ) -> None:
         super().__init__()
         self.role_embedding = nn.Embedding(NUM_DEP_RELATIONS, content_dim)
-        self.pos_embedding = nn.Embedding(max_seq_len, content_dim)
+        self.pos_embedding = nn.Embedding(max_roles, content_dim)
         self.proj = nn.Sequential(
             nn.Linear(content_dim * 3, decoder_hidden_dim),
             nn.GELU(),
@@ -46,25 +46,26 @@ class PhraseZProjector(nn.Module):
         self,
         z_content: Tensor,
         role_ids: Tensor,
-        positions: Tensor,
+        role_mask: Tensor | None = None,
     ) -> Tensor:
-        """Project z_content into per-position decoder memory.
+        """Project z_content into per-role decoder memory.
 
         Args:
             z_content: ``(B, content_dim)`` content latent.
-            role_ids: ``(B, S)`` dependency role id per position.
-            positions: ``(B, S)`` position indices.
+            role_ids: ``(B, R)`` dependency role id per skeleton position.
+            role_mask: ``(B, R)`` optional bool mask (True = valid role).
 
         Returns:
-            memory: ``(B, S, decoder_hidden_dim)`` — cross-attention
-                memory for the PhraseDecoder, one vector per output
-                position.
+            memory: ``(B, R, decoder_hidden_dim)`` — one vector per role
+                for the PhraseDecoder to cross-attend to.
         """
-        b, s = role_ids.shape
+        b, r = role_ids.shape
+        device = role_ids.device
 
-        role_emb = self.role_embedding(role_ids)           # (B, S, content_dim)
-        pos_emb = self.pos_embedding(positions)            # (B, S, content_dim)
-        z_exp = z_content.unsqueeze(1).expand(-1, s, -1)   # (B, S, content_dim)
+        positions = torch.arange(r, device=device).unsqueeze(0).expand(b, -1)
+        role_emb = self.role_embedding(role_ids.clamp(max=NUM_DEP_RELATIONS - 1))
+        pos_emb = self.pos_embedding(positions)
+        z_exp = z_content.unsqueeze(1).expand(-1, r, -1)
 
         combined = torch.cat([z_exp, role_emb, pos_emb], dim=-1)
         return self.proj(combined)

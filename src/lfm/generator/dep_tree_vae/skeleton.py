@@ -145,7 +145,7 @@ class ParallelSkeletonDecoder(SkeletonDecoderBase):
         else:
             length_loss = torch.tensor(0.0, device=device)
 
-        total_loss = role_loss + 0.1 * length_loss
+        total_loss = role_loss + 1.0 * length_loss
         return role_logits, total_loss
 
     @torch.no_grad()

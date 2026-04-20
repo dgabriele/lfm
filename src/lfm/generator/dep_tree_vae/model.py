@@ -91,7 +91,7 @@ class DepTreeVAE(nn.Module):
         self.phrase_projector = PhraseZProjector(
             content_dim=cfg.latent.content_dim,
             decoder_hidden_dim=cfg.decoder_hidden_dim,
-            max_seq_len=cfg.max_seq_len,
+            max_roles=cfg.skeleton.max_roles,
         )
         self.disentanglement = DisentanglementModule(
             cfg.disentanglement,
@@ -192,18 +192,24 @@ class DepTreeVAE(nn.Module):
             z_struct, role_ids, role_lengths,
         )
 
-        # 4. Build per-position memory from z_content + roles
-        content_tokens, content_lengths, content_roles, content_positions = (
+        # 4. Build per-role memory from z_content + skeleton roles
+        content_tokens, content_lengths, content_roles, _ = (
             self._split_roles_and_content(tokens, lengths)
         )
-        # Guard: ensure no zero-length content (would cause NaN in CE)
         content_lengths = content_lengths.clamp(min=1)
-        memory = self.phrase_projector(
-            z_content, content_roles, content_positions,
-        )
+
+        # Get the skeleton role sequence for memory construction.
+        # During training we use the ground-truth roles (teacher forcing).
+        # role_ids has BOS prefix — strip it and extract actual roles.
+        skel_roles = role_ids[:, 1:]  # strip BOS
+        skel_mask = torch.arange(skel_roles.size(1), device=device).unsqueeze(0) < (role_lengths - 1).unsqueeze(1)
+        # Clamp to valid role range
+        skel_roles = skel_roles.clamp(max=NUM_DEP_RELATIONS - 1)
+
+        memory = self.phrase_projector(z_content, skel_roles, skel_mask)
 
         # 5. Reconstruct through the phrase decoder
-        recon_loss = self._decode_and_loss(tokens, lengths, memory)
+        recon_loss = self._decode_and_loss(tokens, lengths, memory, content_tokens, content_lengths)
 
         # 6. KL divergence
         kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
@@ -296,18 +302,21 @@ class DepTreeVAE(nn.Module):
         tokens: Tensor,
         lengths: Tensor,
         memory: Tensor,
+        content_tokens: Tensor,
+        content_lengths: Tensor,
     ) -> Tensor:
-        """Run phrase decoder on content tokens with per-position memory."""
+        """Run phrase decoder on content tokens with role-level memory.
+
+        The decoder cross-attends to ``memory`` (one vector per skeleton
+        role) while autoregressively generating content tokens.  The
+        cross-attention learns to shift focus across roles as it fills
+        successive syntactic slots — no forced positional alignment.
+        """
         from lfm.generator.layers import multiscale_causal_mask
 
-        b = tokens.size(0)
-        device = tokens.device
+        b = content_tokens.size(0)
+        device = content_tokens.device
 
-        content_tokens, content_lengths, _, _ = self._split_roles_and_content(
-            tokens, lengths,
-        )
-
-        # Clamp to decoder vocab
         content_tokens = content_tokens.clamp(max=self._decoder_vocab - 1)
 
         # Teacher forcing: shift right with BOS
@@ -333,16 +342,13 @@ class DepTreeVAE(nn.Module):
         )
         rope = self._rope_freqs[:cs] if self._rope_freqs is not None else None
 
-        # Truncate memory to match decoder sequence length
-        mem = memory[:, :cs, :]
-
+        # memory is (B, num_roles, h) — decoder cross-attends to all roles
         hidden = self.phrase_decoder(
-            dec_input, mem, tgt_mask=tgt_mask, rope_freqs=rope,
+            dec_input, memory, tgt_mask=tgt_mask, rope_freqs=rope,
         )
         logits = self.output_head(hidden)
 
         # Masked CE loss over content tokens
-        content_lengths = content_lengths.clamp(min=1)
         mask = torch.arange(cs, device=device).unsqueeze(0) < content_lengths.unsqueeze(1)
         flat_logits = logits.reshape(-1, logits.size(-1))
         flat_targets = content_tokens[:, :cs].reshape(-1)
