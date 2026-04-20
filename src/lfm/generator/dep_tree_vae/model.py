@@ -77,8 +77,10 @@ class DepTreeVAE(nn.Module):
         self.cfg = cfg
         self.vocab_size = vocab_size
 
-        # Full vocab includes specials: PAD=0, BOS=1, EOS=2
+        # Encoder sees the full interleaved vocab (SPM + specials + role tokens)
         full_vocab = vocab_size + 3
+        # Decoder only generates IPA tokens (SPM + BOS + EOS), not role tokens
+        decoder_vocab = cfg.spm_vocab_size + 2
 
         # Components
         self.encoder = SentenceEncoder(full_vocab, cfg)
@@ -108,7 +110,7 @@ class DepTreeVAE(nn.Module):
             dropout=cfg.decoder_dropout,
             share_layers=cfg.share_decoder_layers,
         )
-        self.dec_token_embedding = nn.Embedding(full_vocab, h)
+        self.dec_token_embedding = nn.Embedding(decoder_vocab, h)
         self.dec_pos_embedding: nn.Module
         if cfg.use_rope:
             self.dec_pos_embedding = nn.Identity()
@@ -119,7 +121,8 @@ class DepTreeVAE(nn.Module):
             self.dec_pos_embedding = nn.Embedding(cfg.max_seq_len, h)
             self._rope_freqs = None
 
-        self.output_head = nn.Linear(h, full_vocab)
+        self.output_head = nn.Linear(h, decoder_vocab)
+        self._decoder_vocab = decoder_vocab
 
         # IDs
         self._pad_id = 0
@@ -266,9 +269,11 @@ class DepTreeVAE(nn.Module):
         b, s = tokens.shape
         device = tokens.device
 
-        # Extract content tokens (odd positions in interleaved sequence)
+        # Extract content tokens (odd positions in interleaved sequence).
+        # Clamp to decoder vocab range — interleaved tokens may include
+        # role IDs beyond the decoder's SPM-only vocabulary.
         max_content = s // 2
-        content_tokens = tokens[:, 1::2][:, :max_content]
+        content_tokens = tokens[:, 1::2][:, :max_content].clamp(max=self._decoder_vocab - 1)
         content_lengths = (lengths // 2).clamp(min=1)
 
         # Teacher forcing: shift right with BOS
@@ -331,8 +336,8 @@ class DepTreeVAE(nn.Module):
     ) -> Tensor:
         """Create multi-hot content word presence vector."""
         b = tokens.size(0)
-        full_vocab = self.output_head.out_features
-        bow = torch.zeros(b, full_vocab, device=device)
+        cv = self.disentanglement.content_predictor[-1].out_features
+        bow = torch.zeros(b, cv, device=device)
         mask = torch.arange(tokens.size(1), device=device).unsqueeze(0) < lengths.unsqueeze(1)
         # Only count content tokens (odd positions)
         content_mask = mask.clone()
