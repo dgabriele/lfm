@@ -236,6 +236,7 @@ class DepTreeVAE(nn.Module):
 
         Role tokens have ids >= role_offset.  Each role token applies
         to all subsequent content tokens until the next role token.
+        Fully vectorized — no Python loops over batch/positions.
 
         Returns:
             content_tokens: ``(B, max_content)`` IPA token ids.
@@ -245,36 +246,49 @@ class DepTreeVAE(nn.Module):
         """
         b, s = tokens.shape
         device = tokens.device
-        role_offset = self.cfg.spm_vocab_size + 2  # role tokens start after SPM + BOS + EOS
+        role_offset = self.cfg.spm_vocab_size + 2
 
-        # Identify role vs content positions per sample
-        is_role = tokens >= role_offset  # (B, S)
-        is_content = (~is_role) & (tokens > 0)  # non-role, non-pad
+        # Masks
+        valid = torch.arange(s, device=device).unsqueeze(0) < lengths.unsqueeze(1)
+        is_role = (tokens >= role_offset) & valid
+        is_content = (~is_role) & (tokens > 0) & valid
 
-        # Extract content tokens and their associated roles
-        max_content = is_content.sum(dim=1).max().item()
-        if max_content == 0:
-            max_content = 1
+        # Propagate role IDs forward: each content token inherits
+        # the most recent role token's ID.
+        # Extract raw role values (0 where not a role token)
+        role_vals = torch.where(is_role, tokens - role_offset, torch.zeros_like(tokens))
+        # cummax trick: at each position, the role ID is the last
+        # non-zero role_vals seen. Use cumsum of is_role as a group
+        # index, then scatter the role values.
+        role_group = is_role.long().cumsum(dim=1)  # (B, S) — increments at each role token
+        # For each group, the role value is at the first position of that group
+        # Broadcast: role_at_pos[i,j] = role_vals[i, position of group start]
+        # Simpler: just use the role_vals * is_role and forward-fill
+        # Forward fill via cummax on (role_group * large_val + role_vals)
+        # Actually simplest: scattered gather
+        role_ids_at_role_pos = role_vals  # only non-zero where is_role
+        # Forward-fill: for each position, take the role_id from the
+        # last role position. Use scatter with role_group as index.
+        max_groups = role_group.max().item() + 1
+        group_role = torch.zeros(b, max_groups, dtype=torch.long, device=device)
+        group_role.scatter_(1, role_group, role_ids_at_role_pos)
+        # Now each content position's role = group_role[sample, role_group[sample, pos]]
+        per_pos_role = group_role.gather(1, role_group).clamp(max=NUM_DEP_RELATIONS - 1)
 
-        content_tokens = torch.zeros(b, max_content, dtype=torch.long, device=device)
-        content_roles = torch.zeros(b, max_content, dtype=torch.long, device=device)
-        content_lengths = torch.zeros(b, dtype=torch.long, device=device)
+        # Extract content tokens into compact form
+        content_counts = is_content.sum(dim=1)  # (B,)
+        max_content = max(content_counts.max().item(), 1)
 
-        for i in range(b):
-            current_role = 0
-            ci = 0
-            for j in range(lengths[i].item()):
-                tok = tokens[i, j].item()
-                if tok >= role_offset:
-                    current_role = tok - role_offset
-                elif tok > 0:  # content token (non-pad)
-                    if ci < max_content:
-                        content_tokens[i, ci] = tok
-                        content_roles[i, ci] = min(current_role, NUM_DEP_RELATIONS - 1)
-                        ci += 1
-            content_lengths[i] = ci
+        # Sort content positions to front per sample using argsort trick
+        # is_content as float, negate so True sorts first
+        sort_keys = (~is_content).long()  # 0 for content, 1 for non-content
+        sorted_indices = sort_keys.argsort(dim=1, stable=True)  # content positions first
 
+        content_tokens = tokens.gather(1, sorted_indices)[:, :max_content]
+        content_roles = per_pos_role.gather(1, sorted_indices)[:, :max_content]
+        content_lengths = content_counts.clamp(min=1)
         positions = torch.arange(max_content, device=device).unsqueeze(0).expand(b, -1)
+
         return content_tokens, content_lengths, content_roles, positions
 
     def _decode_and_loss(
