@@ -46,8 +46,8 @@ freeze_decoder: true
 disentanglement:
   struct_cls_weight: 1.0
   content_bow_weight: 0.5
-  adversarial_weight: 0.5
-  gradient_reversal_scale: 1.0
+  adversarial_weight: 0.0
+  gradient_reversal_scale: 0.0
 
 # KL
 kl_weight: 0.0
