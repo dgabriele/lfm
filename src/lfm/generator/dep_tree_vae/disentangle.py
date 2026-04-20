@@ -36,6 +36,43 @@ def gradient_reversal(x: Tensor, scale: float = 1.0) -> Tensor:
     return _GradientReversal.apply(x, scale)
 
 
+def hsic(x: Tensor, y: Tensor) -> Tensor:
+    """HSIC independence criterion with RBF kernels.
+
+    Measures statistical dependence between x and y.
+    Returns 0 when x and y are independent, positive otherwise.
+    Uses the median heuristic for kernel bandwidth.
+
+    Args:
+        x: ``(B, D1)``
+        y: ``(B, D2)``
+
+    Returns:
+        Scalar HSIC estimate.
+    """
+    n = x.size(0)
+    if n < 4:
+        return torch.tensor(0.0, device=x.device)
+
+    # Pairwise squared distances
+    dx = torch.cdist(x, x).pow(2)
+    dy = torch.cdist(y, y).pow(2)
+
+    # Median heuristic for bandwidth
+    sigma_x = dx.median().clamp(min=1e-5)
+    sigma_y = dy.median().clamp(min=1e-5)
+
+    # RBF kernels
+    kx = (-dx / (2 * sigma_x)).exp()
+    ky = (-dy / (2 * sigma_y)).exp()
+
+    # Centering matrix H = I - 1/n
+    kx_c = kx - kx.mean(dim=0, keepdim=True) - kx.mean(dim=1, keepdim=True) + kx.mean()
+    ky_c = ky - ky.mean(dim=0, keepdim=True) - ky.mean(dim=1, keepdim=True) + ky.mean()
+
+    return (kx_c * ky_c).sum() / (n * n)
+
+
 class DisentanglementModule(nn.Module):
     """Auxiliary heads + losses for struct/content disentanglement.
 
@@ -113,23 +150,39 @@ class DisentanglementModule(nn.Module):
         )
 
         # 3. Adversarial: z_content should NOT predict structure
-        z_content_rev = gradient_reversal(
-            z_content, cfg.gradient_reversal_scale,
-        )
-        adv_logits = self.adversarial_head(z_content_rev)
-        adv_loss = F.binary_cross_entropy_with_logits(
-            adv_logits, role_bow.float(),
+        if cfg.adversarial_weight > 0:
+            z_content_rev = gradient_reversal(
+                z_content, cfg.gradient_reversal_scale,
+            )
+            adv_logits = self.adversarial_head(z_content_rev)
+            adv_loss = F.binary_cross_entropy_with_logits(
+                adv_logits, role_bow.float(),
+            )
+        else:
+            with torch.no_grad():
+                adv_logits = self.adversarial_head(z_content)
+                adv_loss = F.binary_cross_entropy_with_logits(
+                    adv_logits, role_bow.float(),
+                )
+
+        # 4. HSIC: penalize statistical dependence between subspaces
+        hsic_loss = (
+            hsic(z_struct, z_content)
+            if cfg.hsic_weight > 0
+            else torch.tensor(0.0, device=z_struct.device)
         )
 
         total = (
             cfg.struct_cls_weight * struct_loss
             + cfg.content_bow_weight * content_loss
             + cfg.adversarial_weight * adv_loss
+            + cfg.hsic_weight * hsic_loss
         )
 
         return {
             "struct_loss": struct_loss,
             "content_loss": content_loss,
             "adversarial_loss": adv_loss,
+            "hsic_loss": hsic_loss,
             "total": total,
         }

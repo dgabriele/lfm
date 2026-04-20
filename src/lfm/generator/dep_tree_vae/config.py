@@ -100,8 +100,9 @@ class DisentanglementConfig(LFMBaseConfig):
 
     struct_cls_weight: float = 1.0
     content_bow_weight: float = 0.5
-    adversarial_weight: float = 0.5
-    gradient_reversal_scale: float = 1.0
+    adversarial_weight: float = 0.0
+    gradient_reversal_scale: float = 0.0
+    hsic_weight: float = 1.0
 
 
 class DepTreeVAEConfig(LFMBaseConfig):

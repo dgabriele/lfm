@@ -118,7 +118,7 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                     lr = scheduler.get_last_lr()[0]
                     logger.info(
                         "ep%d step=%d  recon=%.3f skel=%.3f kl=%.3f "
-                        "disent=%.3f (s=%.3f c=%.3f a=%.3f)  "
+                        "disent=%.3f (s=%.3f c=%.3f a=%.3f h=%.3f)  "
                         "gnorm=%.2f lr=%.6f  [%.1fs]",
                         epoch, global_step,
                         out.recon_loss.item(),
@@ -128,6 +128,7 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                         out.disentangle["struct_loss"].item(),
                         out.disentangle["content_loss"].item(),
                         out.disentangle["adversarial_loss"].item(),
+                        out.disentangle["hsic_loss"].item(),
                         gnorm, lr, elapsed,
                     )
                     batch_start = time.time()
