@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 import math
+import signal
+import sys
 import time
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 import yaml
-import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -21,11 +22,32 @@ from lfm.generator.dep_tree_vae.model import DepTreeVAE
 logger = logging.getLogger(__name__)
 
 
+def _cleanup_gpu():
+    """Release CUDA memory on exit."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+
 def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
     """Full training loop for DepTreeVAE."""
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Signal handler: save checkpoint + free GPU on SIGTERM/SIGINT
+    _shutdown_requested = False
+
+    def _handle_signal(signum, frame):
+        nonlocal _shutdown_requested
+        sig_name = signal.Signals(signum).name
+        logger.info("Received %s — saving checkpoint and shutting down...", sig_name)
+        _shutdown_requested = True
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+    import atexit
+    atexit.register(_cleanup_gpu)
 
     # Save config snapshot
     with open(out_dir / "config.yaml", "w") as f:
@@ -85,6 +107,13 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
         batch_start = time.time()
 
         for i, batch in enumerate(train_loader):
+            if _shutdown_requested:
+                logger.info("Shutdown requested — saving checkpoint at step %d", global_step)
+                _save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, best_val_loss, out_dir)
+                _cleanup_gpu()
+                logger.info("Clean shutdown complete.")
+                return
+
             batch = {k: v.to(device) for k, v in batch.items()}
 
             kl_weight = _kl_schedule(global_step, cfg)
