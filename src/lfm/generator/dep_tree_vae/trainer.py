@@ -184,6 +184,12 @@ def _validate(
 ) -> float:
     model.eval()
     total_loss = 0.0
+    total_recon = 0.0
+    total_skel = 0.0
+    total_kl = 0.0
+    total_disent = 0.0
+    total_hsic = 0.0
+    total_adv = 0.0
     n = 0
     for batch in val_loader:
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -195,9 +201,22 @@ def _validate(
             kl_weight=_kl_schedule(global_step, cfg),
         )
         total_loss += out.total_loss.item()
+        total_recon += out.recon_loss.item()
+        total_skel += out.skeleton_loss.item()
+        total_kl += out.kl_loss.item()
+        total_disent += out.disentangle["total"].item()
+        total_hsic += out.disentangle["hsic_loss"].item()
+        total_adv += out.disentangle["adversarial_loss"].item()
         n += 1
     model.train()
-    return total_loss / max(n, 1)
+    nm = max(n, 1)
+    logger.info(
+        "  val breakdown: recon=%.4f skel=%.4f kl=%.4f "
+        "disent=%.4f (a=%.4f h=%.4f)",
+        total_recon / nm, total_skel / nm, total_kl / nm,
+        total_disent / nm, total_adv / nm, total_hsic / nm,
+    )
+    return total_loss / nm
 
 
 def _kl_schedule(step: int, cfg: DepTreeVAEConfig) -> float:
