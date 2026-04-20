@@ -296,6 +296,7 @@ class DepTreeVAE(nn.Module):
             self.cfg.decoder_num_heads,
             tuple(self.cfg.attention_head_windows),
             self.cfg.attention_global_every,
+            device=device,
         )
         rope = self._rope_freqs[:cs].to(device) if self._rope_freqs is not None else None
 
