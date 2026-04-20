@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import yaml
-from torch.cuda.amp import GradScaler
+import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -49,7 +49,7 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
 
     total_steps = len(train_loader) * cfg.num_epochs
     scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=cfg.lr_min)
-    scaler = GradScaler(enabled=cfg.use_amp)
+    scaler = torch.amp.GradScaler("cuda", enabled=cfg.use_amp)
 
     # Resume
     global_step = 0

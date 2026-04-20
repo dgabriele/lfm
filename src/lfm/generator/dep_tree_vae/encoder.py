@@ -33,7 +33,9 @@ class SentenceEncoder(nn.Module):
             norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=cfg.encoder_num_layers,
+            encoder_layer,
+            num_layers=cfg.encoder_num_layers,
+            enable_nested_tensor=False,
         )
 
         # Project pooled representation to 2x latent dim (mu + logvar)
