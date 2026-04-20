@@ -1,132 +1,165 @@
-"""Data loading for DepTreeVAE training."""
+"""Data loading for DepTreeVAE training.
+
+Two-phase loading for memory efficiency:
+  1. First run: read JSONL, tokenize with SPM, save as compact binary cache.
+  2. Subsequent runs: load cache directly (fast, low memory).
+
+The cache stores pre-tokenized sequences as contiguous int16 arrays
+with an offset index, avoiding Python object overhead for millions
+of samples.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import struct
 from pathlib import Path
 
+import numpy as np
 import sentencepiece as spm
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Sampler, random_split
 
 from lfm.generator.dep_tree_vae.config import DEP_REL_TO_ID, DepTreeVAEConfig
 from lfm.generator.dep_tree_vae.skeleton import SKEL_BOS, SKEL_EOS
 
 logger = logging.getLogger(__name__)
 
-PAD = 0
-BOS = 1
-EOS = 2
-
 
 class DepTreeDataset(Dataset):
-    """Dataset of dependency-annotated IPA sentences.
+    """Memory-efficient dataset for dependency-annotated IPA sentences.
 
-    Each sample is a parsed sentence from the JSONL file with:
-        - Interleaved token sequence: [role_tok] ipa_tok [role_tok] ipa_tok ...
-        - Role id sequence (for skeleton decoder supervision)
-        - Content token ids (for bag-of-words supervision)
-
-    Role tokens are mapped to vocab ids starting after the IPA SPM vocab
-    so a single embedding table can handle both.
+    Stores all sequences in two flat int16 numpy arrays (interleaved
+    tokens and skeleton roles) with offset/length indices.  Total RAM
+    is ~2 bytes per token — 16M samples × 50 avg tokens ≈ 1.6GB.
     """
 
     def __init__(
         self,
-        jsonl_path: str | Path,
-        sp: spm.SentencePieceProcessor,
-        max_seq_len: int,
+        cache_dir: Path,
         max_samples: int | None = None,
     ) -> None:
-        self.sp = sp
-        self.max_seq_len = max_seq_len
+        cache_dir = Path(cache_dir)
 
-        # The pretrained decoder uses: SPM native IDs (0-7999),
-        # BOS = spm_size (8000), EOS = spm_size + 1 (8001).
-        # No offset — SPM tokens keep their native IDs.
-        spm_size = sp.get_piece_size()
-        self._eos_id = spm_size + 1  # decoder EOS, not SPM's EOS
-        self._bos_id = spm_size      # decoder BOS
-        self._spm_offset = 0         # no offset — use native SPM IDs
-        self._role_offset = spm_size + 2  # role tokens start after BOS/EOS
+        # Load index: (offset_inter, len_inter, offset_skel, len_skel) per sample
+        self._index = np.load(cache_dir / "index.npy")  # (N, 4) int64
+        self._interleaved = np.load(cache_dir / "interleaved.npy")  # flat int16
+        self._skeletons = np.load(cache_dir / "skeletons.npy")  # flat int16
 
-        self.samples: list[dict] = []
-        filtered = 0
-
-        with open(jsonl_path) as f:
-            for line in f:
-                if max_samples and len(self.samples) >= max_samples:
-                    break
-                rec = json.loads(line)
-                sample = self._process(rec)
-                if sample is not None:
-                    self.samples.append(sample)
-                else:
-                    filtered += 1
+        if max_samples and max_samples < len(self._index):
+            self._index = self._index[:max_samples]
 
         logger.info(
-            "Loaded %d samples from %s (filtered %d)",
-            len(self.samples), jsonl_path, filtered,
+            "Loaded cache: %d samples, interleaved=%dM tokens, skeletons=%dM tokens",
+            len(self._index),
+            len(self._interleaved) // 1_000_000,
+            len(self._skeletons) // 1_000_000,
         )
 
-    def _process(self, rec: dict) -> dict | None:
-        """Convert a JSONL record to tensors."""
-        ipa_words = rec["ipa"].split()
-        dep_labels = rec["dep_labels"]
-        dep_heads = rec["dep_heads"]
-
-        if len(ipa_words) != len(dep_labels):
-            return None
-
-        # Tokenize each IPA word with SPM
-        word_token_ids: list[list[int]] = []
-        for word in ipa_words:
-            ids = self.sp.encode(word, out_type=int)
-            word_token_ids.append(ids)
-
-        # Build interleaved sequence: [role] tok1 tok2 ... [role] tok1 ...
-        # Each role token precedes the SPM tokens for that word.
-        interleaved: list[int] = []
-        role_sequence: list[int] = []
-
-        for word_idx, (label, word_ids) in enumerate(
-            zip(dep_labels, word_token_ids)
-        ):
-            role_id = DEP_REL_TO_ID.get(label, DEP_REL_TO_ID.get("dep", 0))
-            role_tok = self._role_offset + role_id
-            interleaved.append(role_tok)
-            for tid in word_ids:
-                interleaved.append(tid + self._spm_offset)
-            role_sequence.append(role_id)
-
-        # Add EOS (decoder convention: spm_size + 1)
-        interleaved.append(self._eos_id)
-
-        if len(interleaved) > self.max_seq_len:
-            return None
-
-        # Skeleton: BOS + role_sequence + EOS
-        skeleton = [SKEL_BOS] + role_sequence + [SKEL_EOS]
-
-        return {
-            "interleaved": interleaved,
-            "skeleton": skeleton,
-            "n_words": len(ipa_words),
-        }
-
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self._index)
 
     def __getitem__(self, idx: int) -> dict:
-        return self.samples[idx]
+        off_i, len_i, off_s, len_s = self._index[idx]
+        return {
+            "interleaved": self._interleaved[off_i : off_i + len_i].astype(np.int64),
+            "skeleton": self._skeletons[off_s : off_s + len_s].astype(np.int64),
+        }
 
     @property
     def interleaved_vocab_size(self) -> int:
-        """Total vocab: SPM tokens + specials + role tokens."""
-        from lfm.generator.dep_tree_vae.config import NUM_DEP_RELATIONS
-        return self.sp.get_piece_size() + 3 + NUM_DEP_RELATIONS
+        """Infer from the max token id in the interleaved data."""
+        return int(self._interleaved.max()) + 1
+
+
+def build_cache(
+    jsonl_path: str | Path,
+    sp: spm.SentencePieceProcessor,
+    max_seq_len: int,
+    cache_dir: str | Path,
+    max_samples: int | None = None,
+) -> None:
+    """Read JSONL, tokenize, and save as compact binary cache."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    spm_size = sp.get_piece_size()
+    eos_id = spm_size + 1
+    role_offset = spm_size + 2
+
+    all_interleaved: list[np.ndarray] = []
+    all_skeletons: list[np.ndarray] = []
+    index: list[tuple[int, int, int, int]] = []  # (off_i, len_i, off_s, len_s)
+
+    inter_offset = 0
+    skel_offset = 0
+    filtered = 0
+    total = 0
+
+    with open(jsonl_path) as f:
+        for line in f:
+            if max_samples and len(index) >= max_samples:
+                break
+            total += 1
+
+            rec = json.loads(line)
+            ipa_words = rec["ipa"].split()
+            dep_labels = rec["dep_labels"]
+
+            if len(ipa_words) != len(dep_labels):
+                filtered += 1
+                continue
+
+            # Build interleaved sequence
+            interleaved: list[int] = []
+            role_sequence: list[int] = []
+
+            for label, word in zip(dep_labels, ipa_words):
+                role_id = DEP_REL_TO_ID.get(label, DEP_REL_TO_ID.get("dep", 0))
+                interleaved.append(role_offset + role_id)
+                for tid in sp.encode(word, out_type=int):
+                    interleaved.append(tid)
+                role_sequence.append(role_id)
+
+            interleaved.append(eos_id)
+
+            if len(interleaved) > max_seq_len:
+                filtered += 1
+                continue
+
+            skeleton = [SKEL_BOS] + role_sequence + [SKEL_EOS]
+
+            inter_arr = np.array(interleaved, dtype=np.int16)
+            skel_arr = np.array(skeleton, dtype=np.int16)
+
+            index.append((inter_offset, len(inter_arr), skel_offset, len(skel_arr)))
+            all_interleaved.append(inter_arr)
+            all_skeletons.append(skel_arr)
+
+            inter_offset += len(inter_arr)
+            skel_offset += len(skel_arr)
+
+            if len(index) % 1_000_000 == 0:
+                logger.info("  cached %dM samples...", len(index) // 1_000_000)
+
+    # Concatenate and save
+    inter_flat = np.concatenate(all_interleaved)
+    skel_flat = np.concatenate(all_skeletons)
+    index_arr = np.array(index, dtype=np.int64)
+
+    np.save(cache_dir / "interleaved.npy", inter_flat)
+    np.save(cache_dir / "skeletons.npy", skel_flat)
+    np.save(cache_dir / "index.npy", index_arr)
+
+    logger.info(
+        "Cache built: %d samples (filtered %d/%d), "
+        "interleaved=%dM tokens (%.1f MB), skeletons=%dM tokens (%.1f MB)",
+        len(index), filtered, total,
+        len(inter_flat) // 1_000_000, inter_flat.nbytes / 1e6,
+        len(skel_flat) // 1_000_000, skel_flat.nbytes / 1e6,
+    )
 
 
 def collate_dep_tree(batch: list[dict]) -> dict[str, Tensor]:
@@ -143,9 +176,9 @@ def collate_dep_tree(batch: list[dict]) -> dict[str, Tensor]:
     for i, s in enumerate(batch):
         inter = s["interleaved"]
         skel = s["skeleton"]
-        tokens[i, : len(inter)] = torch.tensor(inter, dtype=torch.long)
+        tokens[i, : len(inter)] = torch.from_numpy(inter)
         lengths[i] = len(inter)
-        role_ids[i, : len(skel)] = torch.tensor(skel, dtype=torch.long)
+        role_ids[i, : len(skel)] = torch.from_numpy(skel)
         role_lengths[i] = len(skel)
 
     return {
@@ -161,17 +194,30 @@ def build_dataloaders(
 ) -> tuple[DataLoader, DataLoader, spm.SentencePieceProcessor, int]:
     """Build train/val DataLoaders from config.
 
-    Returns:
-        train_loader, val_loader, sp (sentencepiece), vocab_size
+    On first run, builds a binary cache from the JSONL source.
+    Subsequent runs load the cache directly.
     """
     sp = spm.SentencePieceProcessor()
     sp.load(cfg.spm_model_path)
 
-    jsonl_path = Path(cfg.dataset_path) / "sentences.jsonl"
-    dataset = DepTreeDataset(
-        jsonl_path, sp, cfg.max_seq_len, max_samples=cfg.max_samples,
-    )
-    vocab_size = dataset.interleaved_vocab_size
+    dataset_dir = Path(cfg.dataset_path)
+    cache_dir = dataset_dir / "cache"
+    index_path = cache_dir / "index.npy"
+
+    # Build cache if missing
+    if not index_path.exists():
+        jsonl_path = dataset_dir / "sentences.jsonl"
+        logger.info("Building binary cache from %s ...", jsonl_path)
+        build_cache(
+            jsonl_path, sp, cfg.max_seq_len, cache_dir,
+            max_samples=cfg.max_samples,
+        )
+
+    dataset = DepTreeDataset(cache_dir, max_samples=cfg.max_samples)
+
+    # Infer vocab size
+    spm_size = sp.get_piece_size()
+    vocab_size = spm_size + 2 + len(DEP_REL_TO_ID)  # SPM + BOS/EOS + roles
 
     val_size = max(1, int(len(dataset) * cfg.val_fraction))
     train_size = len(dataset) - val_size
@@ -197,9 +243,8 @@ def build_dataloaders(
     )
 
     logger.info(
-        "Data: %d train, %d val, vocab=%d (spm=%d + 3 specials + %d roles)",
+        "Data: %d train, %d val, vocab=%d (spm=%d + 2 specials + %d roles)",
         train_size, val_size, vocab_size,
-        sp.get_piece_size(),
-        len(DEP_REL_TO_ID),
+        spm_size, len(DEP_REL_TO_ID),
     )
     return train_loader, val_loader, sp, vocab_size
