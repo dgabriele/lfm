@@ -14,6 +14,79 @@ from lfm.utils.oom import shrink_on_oom
 
 logger = logging.getLogger(__name__)
 
+# Lazy-loaded p2g model for rendering IPA → English in diagnostic logs.
+_p2g_model = None
+_p2g_vocab = None
+_p2g_ipa_vocab = None
+_p2g_cfg = None
+
+
+def _p2g_render(ipa_text: str) -> str | None:
+    """Render IPA text to English via p2g. Returns None if p2g not available."""
+    global _p2g_model, _p2g_vocab, _p2g_ipa_vocab, _p2g_cfg
+
+    if _p2g_model is False:
+        return None
+
+    if _p2g_model is None:
+        try:
+            import json
+            from lfm.p2g.seq2seq import P2GSeq2Seq, P2GSeq2SeqConfig
+            from lfm.p2g.vocab import CharVocab
+
+            p2g_path = Path("data/models/p2g_v15_bpe/best.pt")
+            if not p2g_path.exists():
+                _p2g_model = False
+                return None
+
+            ckpt = torch.load(p2g_path, map_location="cpu", weights_only=False)
+            _p2g_cfg = ckpt["cfg"]
+            bpe_vocab = json.loads(Path(_p2g_cfg["bpe_vocab_path"]).read_text())
+            _p2g_vocab = bpe_vocab["tokens"]
+            chars = ckpt["ipa_vocab"]
+            _p2g_ipa_vocab = CharVocab(
+                chars=chars, char_to_id={c: i for i, c in enumerate(chars)},
+            )
+            _p2g_model = P2GSeq2Seq(P2GSeq2SeqConfig(
+                input_vocab_size=_p2g_ipa_vocab.size,
+                output_vocab_size=len(_p2g_vocab),
+                d_model=_p2g_cfg["d_model"],
+                encoder_layers=_p2g_cfg["encoder_layers"],
+                decoder_layers=_p2g_cfg["decoder_layers"],
+                nhead=_p2g_cfg["nhead"],
+                max_ipa_len=_p2g_cfg["max_ipa_len"],
+                max_spelling_len=_p2g_cfg["max_bpe_len"],
+                dropout=0.0,
+            ))
+            _p2g_model.load_state_dict(ckpt["model_state"])
+            _p2g_model.eval()
+            logger.info("Loaded p2g model for diagnostic rendering")
+        except Exception:
+            _p2g_model = False
+            return None
+
+    words = ipa_text.split()
+    result = []
+    for w in words:
+        enc = _p2g_ipa_vocab.encode(w)[:_p2g_cfg["max_ipa_len"]]
+        if not enc:
+            result.append(w)
+            continue
+        padded = torch.zeros(1, _p2g_cfg["max_ipa_len"], dtype=torch.long)
+        padded[0, : len(enc)] = torch.tensor(enc)
+        with torch.no_grad():
+            pred = _p2g_model.generate(padded)[0]
+        parts = []
+        for t in pred:
+            if t < 3:
+                continue
+            s = _p2g_vocab[t]
+            if s.startswith("\u0120"):
+                s = " " + s[1:]
+            parts.append(s)
+        result.append("".join(parts).strip())
+    return " ".join(result)
+
 
 class AgentTrainer:
     """Train an agent game with curriculum learning, logging, and checkpointing.
@@ -383,10 +456,17 @@ class AgentTrainer:
                                 surface = game.gen.render_surface(
                                     toks[0:1], mask=mask[0:1],
                                 )[0]
-                                logger.info(
-                                    "  [T%d] %s  (%d tok)",
-                                    turn_i, surface, int(mask[0].sum().item()),
-                                )
+                                eng = _p2g_render(surface)
+                                if eng:
+                                    logger.info(
+                                        "  [T%d] %s  (%d tok)\n        → %s",
+                                        turn_i, surface, int(mask[0].sum().item()), eng,
+                                    )
+                                else:
+                                    logger.info(
+                                        "  [T%d] %s  (%d tok)",
+                                        turn_i, surface, int(mask[0].sum().item()),
+                                    )
                         else:
                             toks = out["_tokens"]
                             mask = out["_gen_mask"]
@@ -395,10 +475,17 @@ class AgentTrainer:
                                 toks[:n], mask=mask[:n],
                             )
                             for j, surface in enumerate(surfaces):
-                                logger.info(
-                                    "  sample[%d]: %s  (%d tok)",
-                                    j, surface, int(mask[j].sum().item()),
-                                )
+                                eng = _p2g_render(surface)
+                                if eng:
+                                    logger.info(
+                                        "  sample[%d]: %s  (%d tok)\n             → %s",
+                                        j, surface, int(mask[j].sum().item()), eng,
+                                    )
+                                else:
+                                    logger.info(
+                                        "  sample[%d]: %s  (%d tok)",
+                                        j, surface, int(mask[j].sum().item()),
+                                    )
                     except Exception:
                         pass
 
