@@ -89,10 +89,11 @@ def build_cache(
     eos_id = spm_size + 1
     role_offset = spm_size + 2
 
-    all_interleaved: list[np.ndarray] = []
-    all_skeletons: list[np.ndarray] = []
-    index: list[tuple[int, int, int, int]] = []  # (off_i, len_i, off_s, len_s)
+    # Two-pass: first pass counts sizes for pre-allocation,
+    # second pass fills.  Avoids holding 14M numpy arrays in memory.
 
+    # Pass 1: scan to count total tokens and build index
+    index: list[tuple[int, int, int, int]] = []
     inter_offset = 0
     skel_offset = 0
     filtered = 0
@@ -112,42 +113,71 @@ def build_cache(
                 filtered += 1
                 continue
 
-            # Build interleaved sequence
+            inter_len = 0
+            n_roles = 0
+            for word in ipa_words:
+                inter_len += 1 + len(sp.encode(word, out_type=int))
+                n_roles += 1
+            inter_len += 1  # EOS
+
+            if inter_len > max_seq_len:
+                filtered += 1
+                continue
+
+            skel_len = n_roles + 2  # BOS + roles + EOS
+            index.append((inter_offset, inter_len, skel_offset, skel_len))
+            inter_offset += inter_len
+            skel_offset += skel_len
+
+            if len(index) % 2_000_000 == 0:
+                logger.info("  pass 1: %dM samples scanned...", len(index) // 1_000_000)
+
+    logger.info(
+        "  pass 1 done: %d samples, %dM inter tokens, %dM skel tokens",
+        len(index), inter_offset // 1_000_000, skel_offset // 1_000_000,
+    )
+
+    # Pre-allocate flat arrays
+    inter_flat = np.zeros(inter_offset, dtype=np.int16)
+    skel_flat = np.zeros(skel_offset, dtype=np.int16)
+    index_arr = np.array(index, dtype=np.int64)
+
+    # Pass 2: fill arrays
+    sample_idx = 0
+    with open(jsonl_path) as f:
+        for line in f:
+            if sample_idx >= len(index):
+                break
+            total_p2 = 0
+            rec = json.loads(line)
+            ipa_words = rec["ipa"].split()
+            dep_labels = rec["dep_labels"]
+
+            if len(ipa_words) != len(dep_labels):
+                continue
+
             interleaved: list[int] = []
             role_sequence: list[int] = []
-
             for label, word in zip(dep_labels, ipa_words):
                 role_id = DEP_REL_TO_ID.get(label, DEP_REL_TO_ID.get("dep", 0))
                 interleaved.append(role_offset + role_id)
                 for tid in sp.encode(word, out_type=int):
                     interleaved.append(tid)
                 role_sequence.append(role_id)
-
             interleaved.append(eos_id)
 
             if len(interleaved) > max_seq_len:
-                filtered += 1
                 continue
 
             skeleton = [SKEL_BOS] + role_sequence + [SKEL_EOS]
 
-            inter_arr = np.array(interleaved, dtype=np.int16)
-            skel_arr = np.array(skeleton, dtype=np.int16)
+            off_i, len_i, off_s, len_s = index[sample_idx]
+            inter_flat[off_i : off_i + len_i] = interleaved
+            skel_flat[off_s : off_s + len_s] = skeleton
+            sample_idx += 1
 
-            index.append((inter_offset, len(inter_arr), skel_offset, len(skel_arr)))
-            all_interleaved.append(inter_arr)
-            all_skeletons.append(skel_arr)
-
-            inter_offset += len(inter_arr)
-            skel_offset += len(skel_arr)
-
-            if len(index) % 1_000_000 == 0:
-                logger.info("  cached %dM samples...", len(index) // 1_000_000)
-
-    # Concatenate and save
-    inter_flat = np.concatenate(all_interleaved)
-    skel_flat = np.concatenate(all_skeletons)
-    index_arr = np.array(index, dtype=np.int64)
+            if sample_idx % 2_000_000 == 0:
+                logger.info("  pass 2: %dM samples filled...", sample_idx // 1_000_000)
 
     np.save(cache_dir / "interleaved.npy", inter_flat)
     np.save(cache_dir / "skeletons.npy", skel_flat)
