@@ -96,8 +96,30 @@ def filter_sentence(text: str, min_words: int = 5, max_words: int = 30) -> bool:
     return True
 
 
-def load_leipzig_sentences(lang_iso3: str) -> list[str]:
-    """Load sentences from Leipzig corpus files in data/corpora/{lang}/."""
+# Source registry — maps filename patterns to human-readable source names + URLs
+SOURCE_REGISTRY = {
+    "newscrawl": ("Leipzig Newscrawl", "https://wortschatz-leipzig.de/en/download"),
+    "news_": ("Leipzig News", "https://wortschatz-leipzig.de/en/download"),
+    "wikipedia": ("Wikipedia", "https://dumps.wikimedia.org/"),
+    "europarl": ("Europarl", "https://opus.nlpl.eu/Europarl.php"),
+    "wikimatrix": ("WikiMatrix", "https://opus.nlpl.eu/WikiMatrix.php"),
+}
+
+
+def classify_source(filename: str) -> str:
+    """Map a corpus filename to a source key."""
+    fn = filename.lower()
+    for key in SOURCE_REGISTRY:
+        if key in fn:
+            return key
+    return "other"
+
+
+def load_leipzig_sentences(lang_iso3: str) -> list[tuple[str, str]]:
+    """Load sentences with source tags from corpus files.
+
+    Returns list of (sentence, source_key) tuples.
+    """
     corpus_dir = Path(f"data/corpora/{lang_iso3}")
     if not corpus_dir.exists():
         logger.warning(
@@ -107,53 +129,63 @@ def load_leipzig_sentences(lang_iso3: str) -> list[str]:
         )
         return []
 
-    sentences = []
+    sentences: list[tuple[str, str]] = []
     for f in sorted(corpus_dir.glob("*-sentences.txt")):
-        logger.info("  loading %s ...", f.name)
+        source_key = classify_source(f.name)
+        logger.info("  loading %s (source: %s) ...", f.name, source_key)
+        count = 0
         with open(f) as fh:
             for line in fh:
                 parts = line.strip().split("\t")
-                if len(parts) >= 2:
-                    sentences.append(parts[1])  # Leipzig format: id\tsentence
-                elif parts:
-                    sentences.append(parts[0])
+                text = parts[1] if len(parts) >= 2 else parts[0]
+                if text:
+                    sentences.append((text, source_key))
+                    count += 1
+        logger.info("    %d sentences", count)
     logger.info("  loaded %d raw sentences for %s", len(sentences), lang_iso3)
     return sentences
 
 
 def ipa_convert_batch(
-    sentences: list[str], epitran_code: str,
-) -> list[tuple[str, str]]:
-    """Convert sentences to IPA via epitran. Returns (original, ipa) pairs."""
+    sentences: list[tuple[str, str]], epitran_code: str,
+) -> list[tuple[str, str, str]]:
+    """Convert sentences to IPA via epitran.
+
+    Input: list of (sentence, source_key) tuples.
+    Returns: list of (original, ipa, source_key) tuples.
+    """
     import epitran
 
     epi = epitran.Epitran(epitran_code)
-    pairs = []
+    results = []
     failed = 0
-    for sent in sentences:
+    for sent, source_key in sentences:
         try:
             ipa = epi.transliterate(sent)
             if ipa and len(ipa.split()) == len(sent.split()):
-                pairs.append((sent, ipa))
+                results.append((sent, ipa, source_key))
             else:
                 failed += 1
         except Exception:
             failed += 1
     if failed:
         logger.info("  IPA conversion: %d failed out of %d", failed, len(sentences))
-    return pairs
+    return results
 
 
 def dep_parse_and_write(
-    pairs: list[tuple[str, str]],
+    triples: list[tuple[str, str, str]],
     stanza_code: str,
     lang_id: int,
-    source_id: int,
     out_path: Path,
     batch_size: int = 128,
     device: str = "gpu",
 ) -> int:
-    """Dep-parse sentences and write JSONL."""
+    """Dep-parse sentences and write JSONL.
+
+    Args:
+        triples: list of (original, ipa, source_key) tuples.
+    """
     import stanza
 
     try:
@@ -179,9 +211,9 @@ def dep_parse_and_write(
     t0 = time.time()
 
     with open(out_path, "w") as f:
-        for i in range(0, len(pairs), batch_size):
-            batch = pairs[i : i + batch_size]
-            originals = [orig for orig, _ in batch]
+        for i in range(0, len(triples), batch_size):
+            batch = triples[i : i + batch_size]
+            originals = [orig for orig, _, _ in batch]
             word_lists = [orig.split() for orig in originals]
 
             try:
@@ -196,7 +228,7 @@ def dep_parse_and_write(
                 continue
 
             lines = []
-            for (orig, ipa), sent in zip(batch, doc.sentences):
+            for (orig, ipa, source_key), sent in zip(batch, doc.sentences):
                 ipa_words = ipa.split()
                 words = sent.words
                 if len(words) != len(ipa_words):
@@ -209,13 +241,13 @@ def dep_parse_and_write(
                     f"[{lab}] {iw}" for lab, iw in zip(dep_labels, ipa_words)
                 )
                 lines.append(dumps({
-                    "original": orig,
+                    "raw": orig,
                     "ipa": ipa,
                     "dep_labels": dep_labels,
                     "dep_heads": dep_heads,
                     "tagged_ipa": tagged_ipa,
                     "lang_id": lang_id,
-                    "source_id": source_id,
+                    "source": source_key,
                 }))
                 parsed += 1
 
@@ -225,7 +257,7 @@ def dep_parse_and_write(
             if parsed > 0 and parsed % 50_000 < batch_size:
                 elapsed = time.time() - t0
                 rate = parsed / max(elapsed, 1)
-                remaining = (len(pairs) - i) / max(rate, 1)
+                remaining = (len(triples) - i) / max(rate, 1)
                 logger.info(
                     "  [%s] %d/%d parsed (%d failed) %.0f sent/sec ETA %.0fm",
                     stanza_code, parsed, len(pairs), failed, rate, remaining / 60,
@@ -255,16 +287,23 @@ def main():
         cfg["name"], args.lang, args.target,
     )
 
-    # 1. Load raw sentences
-    sentences = load_leipzig_sentences(args.lang)
-    if not sentences:
+    # 1. Load raw sentences with source tags
+    tagged_sentences = load_leipzig_sentences(args.lang)
+    if not tagged_sentences:
         logger.error("No sentences found. Download Leipzig corpora first.")
         return
 
-    # 2. Filter
-    filtered = [s for s in sentences if filter_sentence(s)]
-    logger.info("Filtered: %d → %d (%.1f%% kept)", len(sentences), len(filtered),
-                100 * len(filtered) / max(len(sentences), 1))
+    # 2. Filter (on text only, carry source through)
+    filtered = [(s, src) for s, src in tagged_sentences if filter_sentence(s)]
+    logger.info("Filtered: %d → %d (%.1f%% kept)", len(tagged_sentences), len(filtered),
+                100 * len(filtered) / max(len(tagged_sentences), 1))
+
+    # Log source distribution
+    from collections import Counter
+    src_counts = Counter(src for _, src in filtered)
+    for src, cnt in src_counts.most_common():
+        name = SOURCE_REGISTRY.get(src, (src,))[0]
+        logger.info("  source %s: %d (%.1f%%)", name, cnt, 100 * cnt / len(filtered))
 
     # 3. Sample if we have more than target
     random.seed(args.seed)
@@ -275,9 +314,9 @@ def main():
 
     # 4. IPA conversion
     logger.info("Converting to IPA via epitran (%s)...", cfg["epitran"])
-    pairs = ipa_convert_batch(filtered, cfg["epitran"])
-    logger.info("IPA pairs: %d (%.1f%% aligned)", len(pairs),
-                100 * len(pairs) / max(len(filtered), 1))
+    triples = ipa_convert_batch(filtered, cfg["epitran"])
+    logger.info("IPA triples: %d (%.1f%% aligned)", len(triples),
+                100 * len(triples) / max(len(filtered), 1))
 
     # 5. Dep parse + write
     out_dir = OUT_BASE / args.lang
@@ -285,7 +324,7 @@ def main():
     out_path = out_dir / "sentences.jsonl"
 
     n = dep_parse_and_write(
-        pairs, cfg["stanza"], lang_id, source_id=0,
+        triples, cfg["stanza"], lang_id,
         out_path=out_path, batch_size=args.batch_size, device=args.device,
     )
     logger.info("Final: %d sentences written to %s", n, out_path)
