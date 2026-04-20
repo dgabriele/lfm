@@ -145,10 +145,11 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                 if global_step % cfg.log_every == 0:
                     elapsed = time.time() - batch_start
                     lr = scheduler.get_last_lr()[0]
+                    z_std_mean = (0.5 * out.logvar).exp().mean().item()
                     logger.info(
                         "ep%d step=%d  recon=%.3f skel=%.3f kl=%.3f "
                         "disent=%.3f (s=%.3f c=%.3f a=%.3f h=%.3f)  "
-                        "gnorm=%.2f lr=%.6f  [%.1fs]",
+                        "z_std=%.4f gnorm=%.2f lr=%.6f  [%.1fs]",
                         epoch, global_step,
                         out.recon_loss.item(),
                         out.skeleton_loss.item(),
@@ -158,7 +159,7 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                         out.disentangle["content_loss"].item(),
                         out.disentangle["adversarial_loss"].item(),
                         out.disentangle["hsic_loss"].item(),
-                        gnorm, lr, elapsed,
+                        z_std_mean, gnorm, lr, elapsed,
                     )
                     batch_start = time.time()
 
