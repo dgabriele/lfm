@@ -196,6 +196,8 @@ class DepTreeVAE(nn.Module):
         content_tokens, content_lengths, content_roles, content_positions = (
             self._split_roles_and_content(tokens, lengths)
         )
+        # Guard: ensure no zero-length content (would cause NaN in CE)
+        content_lengths = content_lengths.clamp(min=1)
         memory = self.phrase_projector(
             z_content, content_roles, content_positions,
         )
@@ -326,6 +328,7 @@ class DepTreeVAE(nn.Module):
         logits = self.output_head(hidden)
 
         # Masked CE loss over content tokens
+        content_lengths = content_lengths.clamp(min=1)
         mask = torch.arange(cs, device=device).unsqueeze(0) < content_lengths.unsqueeze(1)
         flat_logits = logits.reshape(-1, logits.size(-1))
         flat_targets = content_tokens[:, :cs].reshape(-1)
