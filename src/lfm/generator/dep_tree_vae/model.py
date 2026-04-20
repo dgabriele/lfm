@@ -125,10 +125,10 @@ class DepTreeVAE(nn.Module):
         self.output_head = nn.Linear(h, decoder_vocab)
         self._decoder_vocab = decoder_vocab
 
-        # IDs
+        # IDs (match pretrained decoder convention)
         self._pad_id = 0
-        self._bos_id = 1
-        self._eos_id = 2
+        self._bos_id = cfg.spm_vocab_size      # 8000
+        self._eos_id = cfg.spm_vocab_size + 1   # 8001
 
         # Load pretrained decoder if configured
         if cfg.pretrained_decoder_path:
@@ -243,7 +243,7 @@ class DepTreeVAE(nn.Module):
         """
         b, s = tokens.shape
         device = tokens.device
-        role_offset = self.cfg.spm_vocab_size + 3  # where role token ids start
+        role_offset = self.cfg.spm_vocab_size + 2  # role tokens start after SPM + BOS + EOS
 
         # Identify role vs content positions per sample
         is_role = tokens >= role_offset  # (B, S)

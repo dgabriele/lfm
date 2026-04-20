@@ -160,6 +160,9 @@ class DepTreeVAEConfig(LFMBaseConfig):
     seed: int = 42
     device: str = "cuda"
 
+    # Data
+    max_samples: int | None = None
+
     # Logging / checkpoints
     log_every: int = 50
     checkpoint_every_steps: int = 5000

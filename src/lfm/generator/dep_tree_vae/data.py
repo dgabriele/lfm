@@ -42,12 +42,15 @@ class DepTreeDataset(Dataset):
     ) -> None:
         self.sp = sp
         self.max_seq_len = max_seq_len
-        self._eos_id = sp.eos_id()
 
-        # Role tokens get ids after the SPM vocab
+        # The pretrained decoder uses: SPM native IDs (0-7999),
+        # BOS = spm_size (8000), EOS = spm_size + 1 (8001).
+        # No offset — SPM tokens keep their native IDs.
         spm_size = sp.get_piece_size()
-        self._role_offset = spm_size + 3  # +3 for PAD/BOS/EOS
-        self._spm_offset = 3  # IPA token ids shifted by 3 for specials
+        self._eos_id = spm_size + 1  # decoder EOS, not SPM's EOS
+        self._bos_id = spm_size      # decoder BOS
+        self._spm_offset = 0         # no offset — use native SPM IDs
+        self._role_offset = spm_size + 2  # role tokens start after BOS/EOS
 
         self.samples: list[dict] = []
         filtered = 0
@@ -98,8 +101,8 @@ class DepTreeDataset(Dataset):
                 interleaved.append(tid + self._spm_offset)
             role_sequence.append(role_id)
 
-        # Add EOS
-        interleaved.append(EOS)
+        # Add EOS (decoder convention: spm_size + 1)
+        interleaved.append(self._eos_id)
 
         if len(interleaved) > self.max_seq_len:
             return None
@@ -165,7 +168,9 @@ def build_dataloaders(
     sp.load(cfg.spm_model_path)
 
     jsonl_path = Path(cfg.dataset_path) / "sentences.jsonl"
-    dataset = DepTreeDataset(jsonl_path, sp, cfg.max_seq_len)
+    dataset = DepTreeDataset(
+        jsonl_path, sp, cfg.max_seq_len, max_samples=cfg.max_samples,
+    )
     vocab_size = dataset.interleaved_vocab_size
 
     val_size = max(1, int(len(dataset) * cfg.val_fraction))
