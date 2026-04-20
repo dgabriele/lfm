@@ -138,7 +138,7 @@ def main():
                 return
 
             lines = []
-            for (eng, ipa, _), sent in zip(
+            for (eng, ipa, idx), sent in zip(
                 zip(batch_eng, batch_ipa, batch_idx), doc.sentences
             ):
                 ipa_words = ipa.split()
@@ -152,6 +152,7 @@ def main():
                     f"[{lab}] {iw}" for lab, iw in zip(dep_labels, ipa_words)
                 )
                 lines.append(dumps({
+                    "raw_english": originals[idx],
                     "english": eng,
                     "ipa": ipa,
                     "dep_labels": dep_labels,
