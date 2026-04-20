@@ -260,7 +260,7 @@ def dep_parse_and_write(
                 remaining = (len(triples) - i) / max(rate, 1)
                 logger.info(
                     "  [%s] %d/%d parsed (%d failed) %.0f sent/sec ETA %.0fm",
-                    stanza_code, parsed, len(pairs), failed, rate, remaining / 60,
+                    stanza_code, parsed, len(triples), failed, rate, remaining / 60,
                 )
 
     elapsed = time.time() - t0
