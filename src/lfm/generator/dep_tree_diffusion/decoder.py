@@ -21,6 +21,90 @@ from torch import Tensor
 
 from lfm.generator.dep_tree_vae.config import NUM_DEP_RELATIONS
 
+# Empirical per-role mean token counts (from 50K sample analysis)
+ROLE_MEAN_TOKENS = {
+    "det": 1.0, "cc": 1.0, "aux": 1.0, "cop": 1.0, "aux:pass": 1.0,
+    "case": 1.1, "mark": 1.1, "expl": 1.1,
+    "nsubj": 1.6, "nsubj:pass": 1.6, "nmod:poss": 1.1,
+    "root": 2.0, "obj": 2.1, "obl": 2.1, "advmod": 2.0,
+    "amod": 2.6, "compound": 2.4, "nmod": 2.4, "conj": 2.4,
+    "advcl": 2.1, "xcomp": 2.0, "acl": 2.3, "acl:relcl": 1.9,
+    "ccomp": 2.0, "csubj": 2.0, "flat": 2.0,
+}
+_DEFAULT_MEAN = 1.8
+
+
+class RoleLengthPredictor(nn.Module):
+    """Predict number of content tokens per dependency role.
+
+    A small transformer that sees the full skeleton context (all roles
+    in the sentence) cross-attending to z. Each role's predicted length
+    is conditioned on neighboring roles and the semantic content of z.
+
+    Trained with Poisson NLL against actual token counts from data.
+    At generation time, predicts per-role lengths to allocate positions.
+    """
+
+    def __init__(
+        self, z_dim: int, hidden_dim: int = 128, num_heads: int = 4,
+        num_layers: int = 2, max_len: int = 12,
+    ) -> None:
+        super().__init__()
+        self.role_embedding = nn.Embedding(NUM_DEP_RELATIONS, hidden_dim)
+        self.pos_embedding = nn.Embedding(64, hidden_dim)
+        self.z_proj = nn.Linear(z_dim, hidden_dim)
+
+        self.layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=hidden_dim, nhead=num_heads,
+                dim_feedforward=hidden_dim * 2,
+                dropout=0.1, batch_first=True, norm_first=True,
+            )
+            for _ in range(num_layers)
+        ])
+        self.out_head = nn.Linear(hidden_dim, 1)
+        self.max_len = max_len
+
+    def forward(self, z: Tensor, role_ids: Tensor, role_mask: Tensor | None = None) -> Tensor:
+        """Predict log-rate per role, conditioned on full skeleton + z.
+
+        Args:
+            z: (B, z_dim) latent vector.
+            role_ids: (B, R) role ids for the skeleton.
+            role_mask: (B, R) True = valid role.
+
+        Returns:
+            log_rate: (B, R) predicted log token count.
+        """
+        b, r = role_ids.shape
+        device = role_ids.device
+
+        pos = torch.arange(r, device=device).unsqueeze(0)
+        h = self.role_embedding(role_ids.clamp(max=NUM_DEP_RELATIONS - 1))
+        h = h + self.pos_embedding(pos.clamp(max=63))
+        h = h + self.z_proj(z).unsqueeze(1)
+
+        padding_mask = ~role_mask if role_mask is not None else None
+        for layer in self.layers:
+            h = layer(h, src_key_padding_mask=padding_mask)
+
+        return self.out_head(h).squeeze(-1)
+
+    def predict_lengths(self, z: Tensor, role_ids: Tensor, role_mask: Tensor | None = None) -> Tensor:
+        """Predict integer lengths for generation."""
+        log_rate = self.forward(z, role_ids, role_mask)
+        return log_rate.exp().round().long().clamp(min=1, max=self.max_len)
+
+    def loss(
+        self, z: Tensor, role_ids: Tensor,
+        target_lengths: Tensor, role_mask: Tensor,
+    ) -> Tensor:
+        """Poisson NLL loss against actual token counts per role."""
+        log_rate = self.forward(z, role_ids, role_mask)
+        rate = log_rate.exp().clamp(min=1e-6)
+        nll = rate - target_lengths.float() * torch.log(rate + 1e-8)
+        return (nll * role_mask.float()).sum() / role_mask.float().sum().clamp(min=1)
+
 
 class TimestepEmbedding(nn.Module):
     """Sinusoidal timestep embedding → MLP projection."""
@@ -153,23 +237,29 @@ class TreeDiffusionDecoder(nn.Module):
         self.output_head = nn.Linear(d_model, vocab_size)
 
     def tree_noise_schedule(
-        self, t_global: Tensor, depths: Tensor, depth_scale: float = 1.0,
+        self, t_global: Tensor, depths: Tensor,
+        depth_scale: float = 1.0, min_noise: float = 0.3,
     ) -> Tensor:
         """Compute per-position noise level from global t and tree depth.
+
+        All positions get at least ``min_noise`` fraction of the full
+        schedule, ensuring the model trains on meaningful denoising at
+        every position. Depth modulates on top: root positions get
+        ``min_noise``, leaf positions get the full schedule.
 
         Args:
             t_global: (B,) global diffusion time in [0, 1].
             depths: (B, S) integer depth per position.
             depth_scale: exponent controlling depth→noise mapping.
+            min_noise: minimum noise fraction for root positions.
 
         Returns:
             t_per_pos: (B, S) noise level per position in [0, 1].
         """
         normalized_depth = depths.float() / max(self.max_depth, 1)
         depth_factor = normalized_depth.pow(depth_scale)
-        # Root (depth=0): t_pos = 0 (always clean)
-        # Max depth: t_pos = t_global (full schedule)
-        return t_global.unsqueeze(1) * depth_factor
+        noise_factor = min_noise + (1.0 - min_noise) * depth_factor
+        return t_global.unsqueeze(1) * noise_factor
 
     def add_noise(
         self, x0: Tensor, t_per_pos: Tensor, noise: Tensor | None = None,
@@ -241,6 +331,7 @@ class TreeDiffusionDecoder(nn.Module):
         memory: Tensor,
         num_steps: int = 8,
         depth_scale: float = 1.0,
+        min_noise: float = 0.3,
         padding_mask: Tensor | None = None,
     ) -> Tensor:
         """Generate tokens via iterative denoising from pure noise.
@@ -257,14 +348,14 @@ class TreeDiffusionDecoder(nn.Module):
         # Reverse diffusion: t goes from 1 → 0
         for step in range(num_steps):
             t_global = torch.full((b,), 1.0 - step / num_steps, device=device)
-            t_per_pos = self.tree_noise_schedule(t_global, depths, depth_scale)
+            t_per_pos = self.tree_noise_schedule(t_global, depths, depth_scale, min_noise)
 
             x0_pred = self(x_t, t_per_pos, role_ids, depths, memory, padding_mask)
 
             if step < num_steps - 1:
                 # Re-noise to next step level
                 t_next = torch.full((b,), 1.0 - (step + 1) / num_steps, device=device)
-                t_per_pos_next = self.tree_noise_schedule(t_next, depths, depth_scale)
+                t_per_pos_next = self.tree_noise_schedule(t_next, depths, depth_scale, min_noise)
                 noise = torch.randn_like(x0_pred)
                 t_n = t_per_pos_next.unsqueeze(-1)
                 x_t = (1 - t_n) * x0_pred + t_n * noise

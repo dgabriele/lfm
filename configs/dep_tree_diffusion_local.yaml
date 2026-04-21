@@ -40,14 +40,15 @@ diffusion:
   num_diffusion_steps: 8
   max_tokens_per_role: 6
   depth_scale: 1.0
+  min_noise: 1.0  # 1.0 = uniform noise (all positions equal); <1.0 = tree-structured
 
-# Disentanglement
+# Disentanglement — disabled for diffusion decoder (handles full sequence)
 disentanglement:
-  struct_cls_weight: 1.0
-  content_bow_weight: 0.5
+  struct_cls_weight: 0.0
+  content_bow_weight: 0.0
   adversarial_weight: 0.0
   gradient_reversal_scale: 0.0
-  hsic_weight: 1.0
+  hsic_weight: 0.0
 
 # These exist in DepTreeVAEConfig but aren't used by diffusion decoder
 decoder_hidden_dim: 512
@@ -72,16 +73,16 @@ word_dropout: 0.3
 word_dropout_min: 0.05
 word_dropout_anneal_epochs: 3
 
-# Training — local GPU
-batch_size: 32
-gradient_accumulation_steps: 2
+# Training — local GPU (5.3GB peak at batch=128)
+batch_size: 128
+gradient_accumulation_steps: 1
 lr: 0.0005
 lr_min: 0.0001
-num_epochs: 1
+num_epochs: 5
 use_amp: true
 seed: 42
 device: cuda
 
-log_every: 10
-checkpoint_every_steps: 50
+log_every: 50
+checkpoint_every_steps: 1000
 val_fraction: 0.02

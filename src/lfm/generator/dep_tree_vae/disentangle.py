@@ -177,7 +177,7 @@ class DisentanglementModule(nn.Module):
             + cfg.content_bow_weight * content_loss
             + cfg.adversarial_weight * adv_loss
             + cfg.hsic_weight * hsic_loss
-        )
+        ).clamp(min=-100, max=100)
 
         return {
             "struct_loss": struct_loss,

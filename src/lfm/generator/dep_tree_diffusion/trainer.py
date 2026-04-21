@@ -53,9 +53,9 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
     with open(out_dir / "config.yaml", "w") as f:
         yaml.dump(cfg.model_dump(), f, default_flow_style=False)
 
-    # Data — reuse the dep tree dataset + collation
-    from lfm.generator.dep_tree_vae.data import build_dataloaders
-    train_loader, val_loader, sp, vocab_size = build_dataloaders(cfg)
+    # Data — extended pipeline with per-token tree depths
+    from lfm.generator.dep_tree_diffusion.data import build_diffusion_dataloaders
+    train_loader, val_loader, sp, vocab_size = build_diffusion_dataloaders(cfg)
 
     # Model
     model = DepTreeDiffusionVAE(cfg, vocab_size).to(device)
@@ -88,7 +88,10 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
-        scheduler.load_state_dict(ckpt["scheduler_state"])
+        # Update optimizer LR to match config (may have changed)
+        for pg in optimizer.param_groups:
+            pg["lr"] = cfg.lr
+        scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=cfg.lr_min)
         scaler.load_state_dict(ckpt["scaler_state"])
         start_epoch = ckpt.get("epoch", 0)
         global_step = ckpt.get("global_step", 0)
@@ -118,19 +121,15 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
             batch = {k: v.to(device) for k, v in batch.items()}
             kl_weight = _kl_schedule(global_step, cfg)
 
-            # Need dep_depths — for now, use uniform depth=1 as placeholder
-            # TODO: add real dep tree depths to the dataset
-            content_len = batch["tokens"].size(1)
-            dep_depths = torch.ones(batch["tokens"].size(0), content_len, dtype=torch.long, device=device)
-
             with torch.amp.autocast(device_type=device.type, enabled=cfg.use_amp):
                 out = model(
                     tokens=batch["tokens"],
                     lengths=batch["lengths"],
+                    depths=batch["depths"],
                     role_ids=batch["role_ids"],
                     role_lengths=batch["role_lengths"],
-                    dep_depths=dep_depths,
                     kl_weight=kl_weight,
+                    role_token_counts=batch["role_token_counts"],
                 )
 
                 z_var_loss = torch.tensor(0.0, device=device)
@@ -156,13 +155,14 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
                 if global_step % cfg.log_every == 0:
                     elapsed = time.time() - batch_start
                     z_std = (0.5 * out.logvar).exp().mean().item()
+                    len_str = f" len={out.length_loss.item():.3f}" if out.length_loss.item() > 0 else ""
                     logger.info(
-                        "ep%d step=%d  recon=%.3f skel=%.3f kl=%.3f "
-                        "disent=%.3f z_std=%.4f gnorm=%.2f lr=%.6f  [%.1fs]",
+                        "ep%d step=%d  recon=%.3f kl=%.3f "
+                        "disent=%.3f%s z_std=%.4f gnorm=%.2f lr=%.6f  [%.1fs]",
                         epoch, global_step,
-                        out.recon_loss.item(), out.skeleton_loss.item(),
+                        out.recon_loss.item(),
                         out.kl_loss.item(), out.disentangle["total"].item(),
-                        z_std, gnorm, scheduler.get_last_lr()[0], elapsed,
+                        len_str, z_std, gnorm, scheduler.get_last_lr()[0], elapsed,
                     )
                     batch_start = time.time()
 
@@ -190,69 +190,75 @@ def _kl_schedule(step: int, cfg: DepTreeDiffusionConfig) -> float:
     return cfg.kl_weight * min(step / warmup, 1.0)
 
 
+_diag_loader = None
+
+
 @torch.no_grad()
 def _prior_diagnostic(
     model: DepTreeDiffusionVAE, sp, device: torch.device,
     cfg: DepTreeDiffusionConfig, n_samples: int = 32,
 ) -> None:
-    """Sample z ~ N(0,1), generate via diffusion, log quality metrics."""
-    from lfm.generator.dep_tree_vae.config import DEP_RELATIONS
-    from lfm.generator.dep_tree_vae.skeleton import SKEL_BOS, SKEL_EOS
+    """Sample z ~ N(0,1) but use real skeletons/depths from training data.
+
+    The diffusion decoder generates content conditioned on real dependency
+    structures. This tests whether prior z produces coherent content for
+    realistic sentence frames.
+    """
+    global _diag_loader
+    from lfm.generator.dep_tree_diffusion.data import (
+        DiffusionDepTreeDataset, collate_diffusion,
+    )
+    from pathlib import Path as _P
 
     model.eval()
-    z = torch.randn(n_samples, cfg.latent.total_dim, device=device)
-    z_struct, z_content = model.latent.split(z)
 
-    skel_tokens = model.skeleton_decoder(z_struct)[0]
+    # Lazy-load a small diagnostic dataloader
+    if _diag_loader is None:
+        cache_dir = _P(cfg.dataset_path) / "diffusion_cache"
+        ds = DiffusionDepTreeDataset(cache_dir)
+        _diag_loader = torch.utils.data.DataLoader(
+            ds, batch_size=n_samples, shuffle=True,
+            collate_fn=collate_diffusion, num_workers=0,
+        )
+
+    # Get real skeletons/depths from training data
+    batch = next(iter(_diag_loader))
+    real_tokens = batch["tokens"].to(device)
+    real_depths = batch["depths"].to(device)
+    real_lengths = batch["lengths"].to(device)
+    b = min(real_tokens.size(0), n_samples)
+
+    # Extract per-token roles from real data
+    per_token_roles = model._extract_per_token_roles(real_tokens[:b], real_lengths[:b])
+
+    # Sample z from prior, project to memory
+    z = torch.randn(b, cfg.latent.total_dim, device=device)
+    z_memory = model._z_to_memory(z)
+
+    # Generate via diffusion using real structure + prior z
+    seq_len = real_tokens.size(1)
+    tok_ids = model.diffusion_decoder.sample(
+        seq_len, per_token_roles[:b], real_depths[:b], z_memory,
+        num_steps=cfg.diffusion.num_diffusion_steps,
+        depth_scale=cfg.diffusion.depth_scale,
+    )
 
     surfaces = []
     lengths = []
-
-    for i in range(n_samples):
-        roles = []
-        for t in skel_tokens[i]:
-            v = t.item()
-            if v == SKEL_BOS:
-                continue
-            if v == SKEL_EOS:
-                break
-            if v < len(DEP_RELATIONS):
-                roles.append(v)
-        if not roles:
-            roles = [DEP_RELATIONS.index("root")]
-
-        num_roles = len(roles)
-        seq_len = num_roles * cfg.diffusion.max_tokens_per_role
-
-        role_ids = torch.tensor(roles, device=device).unsqueeze(0)
-        role_mask = torch.ones(1, num_roles, dtype=torch.bool, device=device)
-        memory = model.phrase_projector(z_content[i:i+1], role_ids, role_mask)
-
-        # Expand role_ids to per-token
-        per_tok_roles = role_ids.repeat_interleave(cfg.diffusion.max_tokens_per_role, dim=1)
-        # Depth = role index (simple proxy for tree depth)
-        per_tok_depths = torch.arange(num_roles, device=device).repeat_interleave(
-            cfg.diffusion.max_tokens_per_role,
-        ).unsqueeze(0)
-
-        tok_ids = model.diffusion_decoder.sample(
-            seq_len, per_tok_roles, per_tok_depths, memory,
-            num_steps=cfg.diffusion.num_diffusion_steps,
-            depth_scale=cfg.diffusion.depth_scale,
-        )
-
-        ids = tok_ids[0].tolist()
-        ids = [t for t in ids if 0 < t < sp.GetPieceSize()]
-        surface = sp.DecodeIds(ids)
-        surfaces.append(surface)
+    spm_size = sp.get_piece_size()
+    for i in range(b):
+        n_tok = real_lengths[i].item()
+        ids = tok_ids[i, :n_tok].tolist()
+        ids = [t for t in ids if 0 < t < spm_size]
+        surfaces.append(sp.DecodeIds(ids))
         lengths.append(len(ids))
 
-    avg_len = sum(lengths) / len(lengths)
-    len_std = (sum((l - avg_len)**2 for l in lengths) / len(lengths)) ** 0.5
+    avg_len = sum(lengths) / max(len(lengths), 1)
+    len_std = (sum((l - avg_len)**2 for l in lengths) / max(len(lengths), 1)) ** 0.5
 
     logger.info(
         "PRIOR DIAGNOSTIC (diffusion): avg_len=%.1f±%.1f (n=%d)",
-        avg_len, len_std, n_samples,
+        avg_len, len_std, b,
     )
     for j, s in enumerate(surfaces[:4]):
         logger.info("  prior[%d]: %s", j, s[:120])

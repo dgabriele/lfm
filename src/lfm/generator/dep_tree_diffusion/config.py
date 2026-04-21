@@ -18,6 +18,7 @@ class DiffusionDecoderConfig(LFMBaseConfig):
     num_diffusion_steps: int = 8
     max_tokens_per_role: int = 6
     depth_scale: float = 1.0
+    min_noise: float = 0.3
 
 
 class DepTreeDiffusionConfig(DepTreeVAEConfig):
