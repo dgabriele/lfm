@@ -221,44 +221,33 @@ class DepTreeDialogueGame(nn.Module):
         return results
 
     @torch.no_grad()
-    def _decode_turn(
-        self, z_struct: Tensor, z_content: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, list[list[str]]]:
-        """Decode one turn: skeleton + projector + PhraseDecoder.
-
-        Fully batched — all samples decoded in parallel.
+    def _parse_skeleton(
+        self, z_struct: Tensor,
+    ) -> tuple[Tensor, Tensor, list[list[str]]]:
+        """Parse skeleton from z_struct into padded role tensors.
 
         Returns:
-            hidden: (B, S, H) decoder hidden states for contrastive scoring.
-            valid_mask: (B, S) bool mask of valid positions.
-            tokens: (B, S) generated token IDs.
-            token_mask: (B, S) bool mask for tokens.
-            skeletons: list of role name lists per sample (for logging).
+            padded_roles: (B, max_R) role IDs.
+            role_mask: (B, max_R) bool mask.
+            skeletons: list of role name lists per sample.
         """
         b = z_struct.size(0)
         device = z_struct.device
-        vae = self.vae
-        cfg = self.vae_cfg
         num_dep = len(DEP_RELATIONS)
         root_id = DEP_RELATIONS.index("root")
 
-        # 1. Batch skeleton decode
-        skel_tokens = vae.skeleton_decoder(z_struct)[0]  # (B, max_roles+2)
+        skel_tokens = self.vae.skeleton_decoder(z_struct)[0]
 
-        # 2. Parse roles from skeleton tokens — vectorized
         is_bos = skel_tokens == SKEL_BOS
         is_eos = skel_tokens == SKEL_EOS
         is_valid = (~is_bos) & (~is_eos) & (skel_tokens < num_dep)
 
-        # Find first EOS per sample to mask everything after it
         eos_positions = torch.where(is_eos, torch.arange(skel_tokens.size(1), device=device), skel_tokens.size(1))
-        first_eos = eos_positions.min(dim=1).values  # (B,)
+        first_eos = eos_positions.min(dim=1).values
         position_idx = torch.arange(skel_tokens.size(1), device=device).unsqueeze(0)
-        before_eos = position_idx < first_eos.unsqueeze(1)
-        is_valid = is_valid & before_eos
+        is_valid = is_valid & (position_idx < first_eos.unsqueeze(1))
 
-        # Compact valid roles into padded (B, max_R) tensor
-        role_counts = is_valid.sum(dim=1)  # (B,)
+        role_counts = is_valid.sum(dim=1)
         max_r = max(role_counts.max().item(), 1)
 
         padded_roles = torch.full((b, max_r), root_id, dtype=torch.long, device=device)
@@ -277,7 +266,40 @@ class DepTreeDialogueGame(nn.Module):
                 role_mask[i, :n] = True
                 all_skeletons.append([DEP_RELATIONS[t.item()] for t in skel_tokens[i, valid_idx]])
 
-        # 3. Batch phrase projection
+        return padded_roles, role_mask, all_skeletons
+
+    def _project_memory(
+        self, z_content: Tensor, padded_roles: Tensor, role_mask: Tensor,
+    ) -> Tensor:
+        """Project z_content into role-conditioned decoder memory (WITH gradients).
+
+        Returns:
+            memory: (B, max_R, H) — pooled to (B, H) for scoring.
+        """
+        memory = self.vae.phrase_projector(z_content, padded_roles, role_mask)
+        masked = memory * role_mask.unsqueeze(-1).float()
+        lengths = role_mask.float().sum(dim=1, keepdim=True).clamp(min=1)
+        return masked.sum(dim=1) / lengths  # (B, H)
+
+    @torch.no_grad()
+    def _decode_turn(
+        self, z_struct: Tensor, z_content: Tensor,
+    ) -> tuple[Tensor, Tensor, list[list[str]]]:
+        """Autoregressive decode for diagnostic rendering (no gradients).
+
+        Returns:
+            tokens: (B, S) generated token IDs.
+            token_mask: (B, S) bool mask.
+            skeletons: list of role name lists per sample.
+        """
+        b = z_struct.size(0)
+        device = z_struct.device
+        vae = self.vae
+        cfg = self.vae_cfg
+
+        padded_roles, role_mask, all_skeletons = self._parse_skeleton(z_struct)
+
+        # Batch phrase projection
         memory = vae.phrase_projector(z_content, padded_roles, role_mask)  # (B, max_R, H)
 
         # Cross-attention mask: block padded memory positions
@@ -318,8 +340,6 @@ class DepTreeDialogueGame(nn.Module):
         )
         kv_cache.advance()
 
-        # Collect hidden states for contrastive scoring
-        all_hidden = [out]
         tokens_list = []
         finished = torch.zeros(b, dtype=torch.bool, device=device)
 
@@ -343,31 +363,16 @@ class DepTreeDialogueGame(nn.Module):
                 rope_freqs=rope, tgt_mask_row=mask_row, xattn_mask=xattn_mask,
             )
             kv_cache.advance()
-            all_hidden.append(out)
 
-        # 5. Stack hidden states and build validity mask
-        hidden = torch.cat(all_hidden, dim=1)  # (B, seq_len, H) — includes BOS
-        hidden = hidden[:, 1:, :]  # strip BOS position
-
+        # 5. Build token tensor and mask
         if tokens_list:
-            gen_tokens = torch.stack(tokens_list, dim=1)  # (B, seq_len)
+            gen_tokens = torch.stack(tokens_list, dim=1)
             valid_mask = (gen_tokens != vae._pad_id) & (gen_tokens != vae._eos_id)
         else:
             gen_tokens = torch.zeros(b, 0, dtype=torch.long, device=device)
             valid_mask = torch.zeros(b, 0, dtype=torch.bool, device=device)
 
-        # Align lengths
-        seq_len = hidden.size(1)
-        if valid_mask.size(1) > seq_len:
-            valid_mask = valid_mask[:, :seq_len]
-            gen_tokens = gen_tokens[:, :seq_len]
-        elif valid_mask.size(1) < seq_len:
-            pad_m = torch.zeros(b, seq_len - valid_mask.size(1), dtype=torch.bool, device=device)
-            pad_t = torch.zeros(b, seq_len - gen_tokens.size(1), dtype=torch.long, device=device)
-            valid_mask = torch.cat([valid_mask, pad_m], dim=1)
-            gen_tokens = torch.cat([gen_tokens, pad_t], dim=1)
-
-        return hidden, valid_mask, gen_tokens, valid_mask, all_skeletons
+        return gen_tokens, valid_mask, all_skeletons
 
     def forward(
         self, anchor: Tensor, distractors: Tensor | None = None,
@@ -387,12 +392,15 @@ class DepTreeDialogueGame(nn.Module):
         device = anchor.device
         cfg = self.config
 
-        # 1. Structure: shared across all turns
-        z_struct = self.struct_gen(anchor)  # (B, struct_dim)
+        step = kwargs.get("step", 0)
+        do_decode = (step % cfg.checkpoint_every == 0)
 
-        # 2. Per-turn content generation + decode
-        turn_surfaces: list[Tensor] = []  # pooled hidden per turn
-        turn_skeletons: list[list[list[str]]] = []
+        # 1. Structure: shared across all turns (skeleton parsed once, no grad)
+        z_struct = self.struct_gen(anchor)  # (B, struct_dim)
+        padded_roles, role_mask, skeletons = self._parse_skeleton(z_struct)
+
+        # 2. Per-turn: generate z_content, project to memory (WITH gradients)
+        turn_memories: list[Tensor] = []
         turn_tokens: list[Tensor] = []
         turn_masks: list[Tensor] = []
         all_z: list[Tensor] = [z_struct]
@@ -400,35 +408,31 @@ class DepTreeDialogueGame(nn.Module):
         context = torch.zeros(b, d, device=device)
 
         for t in range(cfg.num_turns):
-            # Condition content gen on target + turn embedding + context
             turn_emb = self.turn_embeddings[t].unsqueeze(0).expand(b, -1)
             cond = self.context_proj(torch.cat([anchor + turn_emb, context], dim=-1))
 
-            # Generate z_content for this turn
             z_content_raw, _, _ = self.content_gen(cond)
             z_content = z_content_raw[:, 0, :]  # (B, content_dim)
             all_z.append(z_content)
 
-            # Decode
-            hidden, mask, tokens, token_mask, skeletons = self._decode_turn(z_struct, z_content)
-            turn_skeletons.append(skeletons)
-            turn_tokens.append(tokens)
-            turn_masks.append(token_mask)
+            # Memory projection — differentiable path to z
+            pooled_mem = self._project_memory(z_content, padded_roles, role_mask)
+            turn_memories.append(pooled_mem)
 
-            # Pool hidden states (mean over valid positions)
-            masked_h = hidden * mask.unsqueeze(-1).float()
-            lengths = mask.float().sum(dim=1, keepdim=True).clamp(min=1)
-            pooled = masked_h.sum(dim=1) / lengths.squeeze(-1).unsqueeze(-1)
-            turn_surfaces.append(pooled)
+            # Context update from memory (not from decode)
+            context = context + self.hidden_to_context(pooled_mem).detach()
 
-            # Update context (project decoder hidden → embedding space)
-            context = context + self.hidden_to_context(pooled).detach()
+            # Autoregressive decode only at checkpoint steps for diagnostics
+            if do_decode:
+                tokens, token_mask, _ = self._decode_turn(z_struct, z_content)
+                turn_tokens.append(tokens)
+                turn_masks.append(token_mask)
 
         # 3. Aggregate turns
         weights = F.softmax(self.turn_agg_logits[: cfg.num_turns], dim=0)
-        agg = sum(w * s for w, s in zip(weights, turn_surfaces))
+        agg = sum(w * s for w, s in zip(weights, turn_memories))
 
-        # 4. Contrastive scoring
+        # 4. Contrastive scoring on memory (direct gradient to z-generators)
         msg = F.normalize(self.message_projector(agg), dim=-1)
         tgt = F.normalize(anchor.detach(), dim=-1)
         temperature = self.log_temperature.exp().clamp(min=0.01, max=100.0)
@@ -438,9 +442,7 @@ class DepTreeDialogueGame(nn.Module):
         contrastive_loss = F.cross_entropy(logits, labels)
         accuracy = (logits.argmax(dim=-1) == labels).float().mean()
 
-        # 5. Topology loss — differentiable Pearson ρ between pairwise
-        # message cosine similarities and pairwise target cosine similarities.
-        # Pushes message space to preserve embedding-space distance structure.
+        # 5. Topology loss
         idx = torch.triu_indices(b, b, offset=1, device=device)
         tgt_sim = (tgt @ tgt.t())[idx[0], idx[1]]
         msg_sim = sim[idx[0], idx[1]]
@@ -455,26 +457,25 @@ class DepTreeDialogueGame(nn.Module):
             rho = torch.tensor(0.0, device=device)
             topo_loss = torch.tensor(0.0, device=device)
 
-        # 6. KL prior penalty — keep z on the VAE's learned manifold.
-        # The VAE was trained with KL toward N(0,1), so z near the prior
-        # produces coherent surface forms. Penalty = 0.5 * (mu^2 + sigma^2 - 1)
-        # simplified to 0.5 * ||z||^2 since we have point estimates, not distributions.
-        z_all = torch.cat(all_z, dim=-1)  # (B, struct_dim + num_turns * content_dim)
+        # 6. KL prior penalty
+        z_all = torch.cat(all_z, dim=-1)
         z_kl = 0.5 * (z_all ** 2).mean()
 
         loss = contrastive_loss + cfg.topo_weight * topo_loss + cfg.z_kl_weight * z_kl
 
-        return {
+        result = {
             "loss": loss,
             "accuracy": accuracy,
             "topo_loss": rho,
             "z_kl": z_kl,
             "msg_lengths": torch.tensor(float(cfg.max_decode_len)),
-            "_tokens": turn_tokens[0],
-            "_dialogue_tokens": turn_tokens,
-            "_dialogue_masks": turn_masks,
-            "_dialogue_skeletons": turn_skeletons,
+            "_dialogue_skeletons": [skeletons] * cfg.num_turns,
         }
+        if turn_tokens:
+            result["_tokens"] = turn_tokens[0]
+            result["_dialogue_tokens"] = turn_tokens
+            result["_dialogue_masks"] = turn_masks
+        return result
 
     def trainable_param_groups(self) -> list[dict]:
         cfg = self.config

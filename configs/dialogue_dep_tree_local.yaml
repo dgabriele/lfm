@@ -34,7 +34,7 @@ contrastive_temperature: 0.07
 topo_weight: 1.0
 
 # KL prior — keeps z on VAE manifold for coherent surface forms
-z_kl_weight: 0.0
+z_kl_weight: 0.1
 
 # Decode
 max_decode_len: 60
