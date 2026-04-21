@@ -6,6 +6,7 @@
 
 vae_checkpoint: data/models/dep_tree_vae_v2/resume.pt
 spm_path: data/models/v15b_ipa/spm.model
+vae_dataset_path: data/datasets/english-dep-trees-v16
 output_dir: data/dialogue_game_dep_tree_local
 embedding_store_dir: data/embeddings_qwen_v2_clean
 

@@ -45,6 +45,7 @@ class DepTreeDialogueConfig(LFMBaseConfig):
     # Paths
     vae_checkpoint: str = ""
     spm_path: str = ""
+    vae_dataset_path: str = ""
     output_dir: str = ""
     embedding_store_dir: str = ""
     embedding_dim: int = 896
@@ -211,7 +212,7 @@ class DepTreeDialogueGame(nn.Module):
         self.vae = DepTreeVAE(
             self.vae_cfg, cfg.spm_vocab_size + 2 + len(DEP_RELATIONS),
         )
-        self.vae.load_state_dict(ckpt["model_state"])
+        self.vae.load_state_dict(ckpt["model_state"], strict=False)
         self.vae.eval()
         for p in self.vae.parameters():
             p.requires_grad = False
@@ -220,6 +221,91 @@ class DepTreeDialogueGame(nn.Module):
         self._sp = spm.SentencePieceProcessor()
         self._sp.Load(cfg.spm_path)
         logger.info("Loaded frozen DepTreeVAE from %s", cfg.vae_checkpoint)
+
+        self._init_z_calibration(cfg)
+
+    # ---- Z calibration ----
+
+    def _init_z_calibration(self, cfg: DepTreeDialogueConfig) -> None:
+        """Load z distribution stats from the VAE checkpoint or compute them.
+
+        The decoder expects z from the encoder's distribution. These stats
+        let _calibrate_z normalize the z-generators' output to match.
+        """
+        vae = self.vae
+
+        # Try checkpoint buffers first (stored during VAE training).
+        # Uninitialized buffers have std=1.0 and mean=0.0 — skip them.
+        has_stats = (
+            hasattr(vae, "_z_struct_mean")
+            and vae._z_struct_mean.abs().sum().item() > 0.01
+        )
+        if has_stats:
+            self.register_buffer("_z_struct_mean", vae._z_struct_mean.clone())
+            self.register_buffer("_z_struct_std", vae._z_struct_std.clone())
+            self.register_buffer("_z_content_mean", vae._z_content_mean.clone())
+            self.register_buffer("_z_content_std", vae._z_content_std.clone())
+            logger.info("Z calibration from checkpoint buffers")
+        elif cfg.vae_dataset_path:
+            self._compute_z_stats_from_data(cfg)
+        else:
+            logger.warning("No z stats available — calibration uses N(0,1) defaults")
+            self.register_buffer("_z_struct_mean", torch.zeros(cfg.latent_struct_dim))
+            self.register_buffer("_z_struct_std", torch.ones(cfg.latent_struct_dim))
+            self.register_buffer("_z_content_mean", torch.zeros(cfg.latent_content_dim))
+            self.register_buffer("_z_content_std", torch.ones(cfg.latent_content_dim))
+
+        logger.info(
+            "Z stats: struct_norm=%.2f struct_std=%.4f, content_norm=%.2f content_std=%.4f",
+            self._z_struct_mean.norm(), self._z_struct_std.mean(),
+            self._z_content_mean.norm(), self._z_content_std.mean(),
+        )
+
+    @torch.no_grad()
+    def _compute_z_stats_from_data(self, cfg: DepTreeDialogueConfig) -> None:
+        """Fallback: compute z stats by encoding a sample of real sentences."""
+        from pathlib import Path as _P
+        from lfm.generator.dep_tree_vae.data import DepTreeDataset
+
+        cache_dir = _P(cfg.vae_dataset_path) / "cache"
+        if not cache_dir.exists():
+            logger.warning("No cache at %s — using N(0,1) defaults", cache_dir)
+            self.register_buffer("_z_struct_mean", torch.zeros(cfg.latent_struct_dim))
+            self.register_buffer("_z_struct_std", torch.ones(cfg.latent_struct_dim))
+            self.register_buffer("_z_content_mean", torch.zeros(cfg.latent_content_dim))
+            self.register_buffer("_z_content_std", torch.ones(cfg.latent_content_dim))
+            return
+
+        ds = DepTreeDataset(cache_dir)
+        n = min(512, len(ds))
+        samples = [ds[i] for i in range(n)]
+
+        # Pad interleaved sequences into a batch
+        max_len = min(max(len(s["interleaved"]) for s in samples), cfg.vae_max_seq_len)
+        tokens = torch.zeros(n, max_len, dtype=torch.long)
+        lengths = torch.zeros(n, dtype=torch.long)
+        for i, s in enumerate(samples):
+            seq = torch.tensor(s["interleaved"][:max_len])
+            tokens[i, :len(seq)] = seq
+            lengths[i] = len(seq)
+
+        mu, logvar = self.vae.encoder(tokens, lengths)
+        z = self.vae.latent.reparameterize(mu, logvar)
+        z_struct, z_content = self.vae.latent.split(z)
+
+        self.register_buffer("_z_struct_mean", z_struct.mean(dim=0))
+        self.register_buffer("_z_struct_std", z_struct.std(dim=0).clamp(min=1e-6))
+        self.register_buffer("_z_content_mean", z_content.mean(dim=0))
+        self.register_buffer("_z_content_std", z_content.std(dim=0).clamp(min=1e-6))
+        logger.info("Z calibration computed from %d samples", n)
+
+    def _calibrate_z(self, z: Tensor, target_mean: Tensor, target_std: Tensor) -> Tensor:
+        """Per-dimension calibration: match z's marginals to encoder distribution."""
+        if z.size(0) < 2:
+            return z
+        obs_mean = z.mean(dim=0, keepdim=True)
+        obs_std = z.std(dim=0, keepdim=True).clamp(min=1e-6)
+        return (z - obs_mean) / obs_std * target_std + target_mean
 
     # ---- Skeleton parsing ----
 
@@ -422,7 +508,8 @@ class DepTreeDialogueGame(nn.Module):
         do_decode = (step % cfg.checkpoint_every == 0)
 
         # 1. Structure (shared across turns)
-        z_struct = self.struct_gen(anchor)
+        z_struct_raw = self.struct_gen(anchor)
+        z_struct = self._calibrate_z(z_struct_raw, self._z_struct_mean, self._z_struct_std)
         padded_roles, role_mask, skeletons = self._parse_skeleton(z_struct)
 
         # 2. Per-turn content generation + memory scoring
@@ -435,7 +522,8 @@ class DepTreeDialogueGame(nn.Module):
             turn_emb = self.turn_embeddings[t].unsqueeze(0).expand(b, -1)
             cond = self.context_proj(torch.cat([anchor + turn_emb, context], dim=-1))
 
-            z_content = self.content_gen(cond)[0][:, 0, :]  # (B, content_dim)
+            z_content_raw = self.content_gen(cond)[0][:, 0, :]  # (B, content_dim)
+            z_content = self._calibrate_z(z_content_raw, self._z_content_mean, self._z_content_std)
 
             # Score on attention-pooled memory (direct gradient to both z-generators)
             pooled = self._project_and_pool(z_struct, z_content, padded_roles, role_mask)

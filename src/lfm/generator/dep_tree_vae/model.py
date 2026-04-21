@@ -130,6 +130,12 @@ class DepTreeVAE(nn.Module):
         self._bos_id = cfg.spm_vocab_size      # 8000
         self._eos_id = cfg.spm_vocab_size + 1   # 8001
 
+        # Z distribution stats (updated during training for downstream calibration)
+        self.register_buffer("_z_struct_mean", torch.zeros(cfg.latent.struct_dim))
+        self.register_buffer("_z_struct_std", torch.ones(cfg.latent.struct_dim))
+        self.register_buffer("_z_content_mean", torch.zeros(cfg.latent.content_dim))
+        self.register_buffer("_z_content_std", torch.ones(cfg.latent.content_dim))
+
         # Load pretrained decoder if configured
         if cfg.pretrained_decoder_path:
             self._load_pretrained_decoder(cfg.pretrained_decoder_path)
@@ -186,6 +192,15 @@ class DepTreeVAE(nn.Module):
 
         # 2. Reparameterize + split
         z_struct, z_content, z = self.latent(mu, logvar)
+
+        # Track running z stats for downstream calibration
+        if self.training:
+            with torch.no_grad():
+                momentum = 0.01
+                self._z_struct_mean.lerp_(z_struct.mean(dim=0), momentum)
+                self._z_struct_std.lerp_(z_struct.std(dim=0).clamp(min=1e-6), momentum)
+                self._z_content_mean.lerp_(z_content.mean(dim=0), momentum)
+                self._z_content_std.lerp_(z_content.std(dim=0).clamp(min=1e-6), momentum)
 
         # 3. Skeleton decoder (teacher-forced on role sequence)
         _, skeleton_loss = self.skeleton_decoder(
