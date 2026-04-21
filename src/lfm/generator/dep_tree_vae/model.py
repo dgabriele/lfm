@@ -36,6 +36,7 @@ class DepTreeVAEOutput:
     recon_loss: Tensor
     skeleton_loss: Tensor
     kl_loss: Tensor
+    dip_loss: Tensor
     disentangle: dict[str, Tensor]
     z_struct: Tensor
     z_content: Tensor
@@ -48,6 +49,7 @@ class DepTreeVAEOutput:
             self.recon_loss
             + self.skeleton_loss
             + self.kl_loss
+            + self.dip_loss
             + self.disentangle["total"]
         )
 
@@ -129,6 +131,9 @@ class DepTreeVAE(nn.Module):
         self._pad_id = 0
         self._bos_id = cfg.spm_vocab_size      # 8000
         self._eos_id = cfg.spm_vocab_size + 1   # 8001
+
+        # Word dropout rate (set by trainer per step via annealing schedule)
+        self._word_dropout_p: float = 0.0
 
         # Z distribution stats (updated during training for downstream calibration)
         self.register_buffer("_z_struct_mean", torch.zeros(cfg.latent.struct_dim))
@@ -232,6 +237,14 @@ class DepTreeVAE(nn.Module):
             kl_per_dim = kl_per_dim.clamp(min=self.cfg.kl_free_bits)
         kl_loss = kl_weight * kl_per_dim.sum(dim=-1).mean()
 
+        # 6b. DIP-VAE: off-diagonal covariance penalty on aggregate posterior
+        dip_loss = torch.tensor(0.0, device=device)
+        if self.cfg.dip_weight > 0 and z.size(0) >= 4:
+            z_centered = (z - z.mean(dim=0)).float()
+            cov = (z_centered.T @ z_centered) / max(z.size(0) - 1, 1)
+            off_diag = cov - torch.diag(cov.diag())
+            dip_loss = self.cfg.dip_weight * off_diag.pow(2).sum() / z.size(1) ** 2
+
         # 7. Disentanglement losses
         role_bow = self._make_role_bow(role_ids, role_lengths, device)
         content_bow = self._make_content_bow(tokens, lengths, device)
@@ -243,6 +256,7 @@ class DepTreeVAE(nn.Module):
             recon_loss=recon_loss,
             skeleton_loss=skeleton_loss,
             kl_loss=kl_loss,
+            dip_loss=dip_loss,
             disentangle=disent,
             z_struct=z_struct,
             z_content=z_content,
@@ -344,6 +358,13 @@ class DepTreeVAE(nn.Module):
 
         cs = decoder_input_ids.size(1)
         dec_input = self.dec_token_embedding(decoder_input_ids)
+
+        # Word dropout: zero out random token embeddings to force
+        # the decoder to rely on z (cross-attention memory)
+        if self.training and self._word_dropout_p > 0:
+            drop_mask = torch.rand(b, cs, 1, device=device) < self._word_dropout_p
+            drop_mask[:, 0] = False  # never drop BOS
+            dec_input = dec_input.masked_fill(drop_mask, 0.0)
         if not isinstance(self.dec_pos_embedding, nn.Identity):
             pos = torch.arange(cs, device=device).unsqueeze(0)
             dec_input = dec_input + self.dec_pos_embedding(pos)

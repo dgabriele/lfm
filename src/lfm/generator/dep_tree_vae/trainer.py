@@ -118,6 +118,13 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
 
             kl_weight = _kl_schedule(global_step, cfg)
 
+            # Word dropout annealing
+            if cfg.word_dropout > 0:
+                anneal_frac = min(epoch / max(cfg.word_dropout_anneal_epochs, 1), 1.0)
+                model._word_dropout_p = cfg.word_dropout + anneal_frac * (cfg.word_dropout_min - cfg.word_dropout)
+            else:
+                model._word_dropout_p = 0.0
+
             with torch.amp.autocast(device_type=device.type, enabled=cfg.use_amp):
                 out = model(
                     tokens=batch["tokens"],
@@ -126,7 +133,15 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                     role_lengths=batch["role_lengths"],
                     kl_weight=kl_weight,
                 )
-                loss = out.total_loss / accum
+
+                # Z variance regularizer
+                z_var_loss = torch.tensor(0.0, device=device)
+                if cfg.z_var_weight > 0:
+                    z = torch.cat([out.z_struct, out.z_content], dim=-1)
+                    per_dim_var = z.var(dim=0)
+                    z_var_loss = cfg.z_var_weight * (per_dim_var - cfg.z_var_target).pow(2).mean()
+
+                loss = (out.total_loss + z_var_loss) / accum
 
             scaler.scale(loss).backward()
 
@@ -146,10 +161,11 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                     elapsed = time.time() - batch_start
                     lr = scheduler.get_last_lr()[0]
                     z_std_mean = (0.5 * out.logvar).exp().mean().item()
+                    dip_str = f" dip={out.dip_loss.item():.4f}" if out.dip_loss.item() > 0 else ""
                     logger.info(
                         "ep%d step=%d  recon=%.3f skel=%.3f kl=%.3f "
                         "disent=%.3f (s=%.3f c=%.3f a=%.3f h=%.3f)  "
-                        "z_std=%.4f gnorm=%.2f lr=%.6f  [%.1fs]",
+                        "z_std=%.4f%s gnorm=%.2f lr=%.6f  [%.1fs]",
                         epoch, global_step,
                         out.recon_loss.item(),
                         out.skeleton_loss.item(),
@@ -159,16 +175,17 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                         out.disentangle["content_loss"].item(),
                         out.disentangle["adversarial_loss"].item(),
                         out.disentangle["hsic_loss"].item(),
-                        z_std_mean, gnorm, lr, elapsed,
+                        z_std_mean, dip_str, gnorm, lr, elapsed,
                     )
                     batch_start = time.time()
 
-                # Checkpoint
+                # Checkpoint + prior diagnostic
                 if global_step % cfg.checkpoint_every_steps == 0:
                     _save_checkpoint(
                         model, optimizer, scheduler, scaler,
                         epoch, global_step, best_val_loss, out_dir,
                     )
+                    _prior_diagnostic(model, sp, device, cfg)
 
             epoch_loss += out.total_loss.item()
             epoch_recon += out.recon_loss.item()
@@ -254,6 +271,92 @@ def _kl_schedule(step: int, cfg: DepTreeVAEConfig) -> float:
         return 0.0
     warmup = max(cfg.kl_warmup_steps, 1)
     return cfg.kl_weight * min(step / warmup, 1.0)
+
+
+@torch.no_grad()
+def _prior_diagnostic(
+    model: DepTreeVAE, sp, device: torch.device, cfg: DepTreeVAEConfig,
+    n_samples: int = 32, max_len: int = 80,
+) -> None:
+    """Sample z ~ N(0,1), decode, and log coherence diagnostics.
+
+    This is the key indicator for downstream game usability: if the
+    prior region doesn't produce coherent, naturally-terminating
+    sentences, the agent game's z-generators won't work.
+    """
+    from lfm.generator.dep_tree_vae.config import DEP_RELATIONS
+    from lfm.generator.dep_tree_vae.skeleton import SKEL_BOS, SKEL_EOS
+    from lfm.generator.layers import multiscale_causal_mask
+
+    model.eval()
+    z = torch.randn(n_samples, cfg.latent.total_dim, device=device)
+    z_struct, z_content = model.latent.split(z)
+
+    # Skeleton from prior z_struct
+    skel_tokens = model.skeleton_decoder(z_struct)[0]
+
+    eos_count = 0
+    total_tokens = 0
+    lengths = []
+    surfaces = []
+
+    for i in range(n_samples):
+        roles = []
+        for t in skel_tokens[i]:
+            t_val = t.item()
+            if t_val == SKEL_BOS:
+                continue
+            if t_val == SKEL_EOS:
+                break
+            if t_val < len(DEP_RELATIONS):
+                roles.append(t_val)
+        if not roles:
+            roles = [DEP_RELATIONS.index("root")]
+
+        role_ids = torch.tensor(roles, device=device).unsqueeze(0)
+        memory = model.phrase_projector(z_content[i:i+1], role_ids)
+
+        tokens = torch.full((1, 1), model._bos_id, dtype=torch.long, device=device)
+        hit_eos = False
+        for _ in range(max_len):
+            seq_len = tokens.size(1)
+            tok_emb = model.dec_token_embedding(tokens)
+            tgt_mask = multiscale_causal_mask(
+                seq_len, cfg.decoder_num_heads,
+                tuple(cfg.attention_head_windows),
+                cfg.attention_global_every, device=device,
+            )
+            rope = model._rope_freqs[:seq_len] if model._rope_freqs is not None else None
+            hidden = model.phrase_decoder(tok_emb, memory, tgt_mask=tgt_mask, rope_freqs=rope)
+            next_tok = model.output_head(hidden[:, -1:]).argmax(dim=-1)
+            if next_tok.item() == model._eos_id:
+                hit_eos = True
+                break
+            tokens = torch.cat([tokens, next_tok], dim=1)
+
+        n_tok = tokens.size(1) - 1  # exclude BOS
+        lengths.append(n_tok)
+        total_tokens += n_tok
+        if hit_eos:
+            eos_count += 1
+
+        if len(surfaces) < 4:
+            ids = tokens[0, 1:].tolist()
+            ids = [t for t in ids if 0 < t < sp.GetPieceSize()]
+            surfaces.append(sp.DecodeIds(ids))
+
+    avg_len = sum(lengths) / len(lengths)
+    eos_rate = eos_count / n_samples
+    len_std = (sum((l - avg_len)**2 for l in lengths) / len(lengths)) ** 0.5
+
+    logger.info(
+        "PRIOR DIAGNOSTIC: eos_rate=%.0f%% avg_len=%.1f±%.1f (n=%d)",
+        eos_rate * 100, avg_len, len_std, n_samples,
+    )
+    for j, s in enumerate(surfaces):
+        logger.info("  prior[%d]: %s", j, s[:120])
+
+    model.train()
 
 
 def _save_checkpoint(

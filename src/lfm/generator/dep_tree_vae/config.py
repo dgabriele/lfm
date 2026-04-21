@@ -151,6 +151,23 @@ class DepTreeVAEConfig(LFMBaseConfig):
     kl_free_bits: float = 0.5
     kl_warmup_steps: int = 5000
 
+    # DIP-VAE: off-diagonal covariance penalty on z.
+    dip_weight: float = 0.0
+
+    # Z variance regularizer: pulls per-dim z variance toward target.
+    # Prevents the decoder from ignoring z by ensuring it carries
+    # consistent information across dimensions.
+    z_var_weight: float = 0.0
+    z_var_target: float = 0.05
+
+    # Word dropout: randomly zero out decoder input token embeddings.
+    # Forces the decoder to rely on z (cross-attention) rather than
+    # just copying from autoregressive context. Annealed from
+    # word_dropout → word_dropout_min over word_dropout_anneal_epochs.
+    word_dropout: float = 0.0
+    word_dropout_min: float = 0.05
+    word_dropout_anneal_epochs: int = 3
+
     # Training
     batch_size: int = 128
     gradient_accumulation_steps: int = 2

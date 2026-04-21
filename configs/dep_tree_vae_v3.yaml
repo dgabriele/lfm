@@ -1,9 +1,9 @@
-# DepTreeVAE v3 — no KL, dependency-tree-disentangled latent space
+# DepTreeVAE v3 — β-VAE with aggressive KL + free bits
 #
-# Same architecture as v2 but kl_weight=0. The encoder is free to
-# organize the latent space purely for reconstruction. The decoder
-# learns EOS behavior from the encoder's natural distribution, not
-# from a forced N(0,1) prior.
+# Designed for downstream agent games: the prior region N(0,1) must
+# produce coherent, naturally-terminating sentences. High KL weight
+# forces the posterior close to the prior; free bits prevent collapse
+# by guaranteeing minimum information rate per latent dimension.
 #
 # Training on 10.4M English dep-parsed IPA sentences.
 
@@ -55,10 +55,23 @@ disentanglement:
   gradient_reversal_scale: 0.0
   hsic_weight: 1.0
 
-# KL — disabled, encoder free to organize latent space for reconstruction
-kl_weight: 0.0
+# KL — aggressive for game-friendly prior
+kl_weight: 0.1
 kl_free_bits: 0.5
-kl_warmup_steps: 5000
+kl_warmup_steps: 10000
+
+# DIP-VAE — disabled (β-VAE already decorrelates)
+dip_weight: 0.0
+
+# Z variance regularizer — keeps z informative across all dimensions
+z_var_weight: 5.0
+z_var_target: 0.05
+
+# Word dropout — forces decoder to use z, not just copy from context
+# Annealed from 0.3 → 0.05 over 3 epochs
+word_dropout: 0.3
+word_dropout_min: 0.05
+word_dropout_anneal_epochs: 3
 
 # Training
 batch_size: 512
@@ -72,5 +85,5 @@ device: cuda
 
 # Logging / checkpoints
 log_every: 50
-checkpoint_every_steps: 5000
+checkpoint_every_steps: 1000
 val_fraction: 0.02
