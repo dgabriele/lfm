@@ -103,6 +103,28 @@ class DepTreeDialogueConfig(LFMBaseConfig):
 # Submodules
 # ---------------------------------------------------------------------------
 
+class ZCalibrator(nn.Module):
+    """Fixed affine transform that maps standardized z to the encoder's distribution.
+
+    Initialized from precomputed encoder z stats (mean, std per dimension).
+    The upstream z-generator learns useful directions in standardized space;
+    this layer maps them to the scale/location the decoder expects.
+
+    At step 0: upstream outputs ~N(0, small) → calibrator outputs ≈ encoder_mean
+    → decoder's default region → coherent output.
+    During training: upstream learns discriminative directions → calibrator maps
+    them to different points within the encoder's distribution.
+    """
+
+    def __init__(self, dim: int, mean: Tensor | None = None, std: Tensor | None = None) -> None:
+        super().__init__()
+        self.register_buffer("mean", mean if mean is not None else torch.zeros(dim))
+        self.register_buffer("std", std if std is not None else torch.ones(dim))
+
+    def forward(self, z: Tensor) -> Tensor:
+        return z * self.std + self.mean
+
+
 class StructureGen(nn.Module):
     """Embedding → z_struct (one shot per dialogue, determines grammar)."""
 
@@ -164,8 +186,16 @@ class DepTreeDialogueGame(nn.Module):
 
         hdim = self.vae_cfg.decoder_hidden_dim
 
+        # Z generators + calibrators (affine maps to encoder distribution)
+        z_stats = self._load_z_stats(cfg)
         self.struct_gen = StructureGen(
             cfg.embedding_dim, cfg.latent_struct_dim, cfg.struct_gen_hidden,
+        )
+        self.struct_calibrator = ZCalibrator(
+            cfg.latent_struct_dim, z_stats["z_struct_mean"], z_stats["z_struct_std"],
+        )
+        self.content_calibrator = ZCalibrator(
+            cfg.latent_content_dim, z_stats["z_content_mean"], z_stats["z_content_std"],
         )
         self.content_gen = DiffusionZGenerator(
             input_dim=cfg.embedding_dim,
@@ -222,90 +252,36 @@ class DepTreeDialogueGame(nn.Module):
         self._sp.Load(cfg.spm_path)
         logger.info("Loaded frozen DepTreeVAE from %s", cfg.vae_checkpoint)
 
-        self._init_z_calibration(cfg)
+    # ---- Z stats ----
 
-    # ---- Z calibration ----
+    @staticmethod
+    def _load_z_stats(cfg: DepTreeDialogueConfig) -> dict[str, Tensor]:
+        """Load precomputed encoder z stats for calibrator initialization.
 
-    def _init_z_calibration(self, cfg: DepTreeDialogueConfig) -> None:
-        """Load z distribution stats from the VAE checkpoint or compute them.
-
-        The decoder expects z from the encoder's distribution. These stats
-        let _calibrate_z normalize the z-generators' output to match.
+        Tries (in order): z_stats.pt alongside checkpoint, VAE checkpoint
+        buffers, N(0,1) defaults.
         """
-        vae = self.vae
-
-        # Try checkpoint buffers first (stored during VAE training).
-        # Uninitialized buffers have std=1.0 and mean=0.0 — skip them.
-        has_stats = (
-            hasattr(vae, "_z_struct_mean")
-            and vae._z_struct_mean.abs().sum().item() > 0.01
-        )
-        if has_stats:
-            self.register_buffer("_z_struct_mean", vae._z_struct_mean.clone())
-            self.register_buffer("_z_struct_std", vae._z_struct_std.clone())
-            self.register_buffer("_z_content_mean", vae._z_content_mean.clone())
-            self.register_buffer("_z_content_std", vae._z_content_std.clone())
-            logger.info("Z calibration from checkpoint buffers")
-        elif cfg.vae_dataset_path:
-            self._compute_z_stats_from_data(cfg)
-        else:
-            logger.warning("No z stats available — calibration uses N(0,1) defaults")
-            self.register_buffer("_z_struct_mean", torch.zeros(cfg.latent_struct_dim))
-            self.register_buffer("_z_struct_std", torch.ones(cfg.latent_struct_dim))
-            self.register_buffer("_z_content_mean", torch.zeros(cfg.latent_content_dim))
-            self.register_buffer("_z_content_std", torch.ones(cfg.latent_content_dim))
-
-        logger.info(
-            "Z stats: struct_norm=%.2f struct_std=%.4f, content_norm=%.2f content_std=%.4f",
-            self._z_struct_mean.norm(), self._z_struct_std.mean(),
-            self._z_content_mean.norm(), self._z_content_std.mean(),
-        )
-
-    @torch.no_grad()
-    def _compute_z_stats_from_data(self, cfg: DepTreeDialogueConfig) -> None:
-        """Fallback: compute z stats by encoding a sample of real sentences."""
         from pathlib import Path as _P
-        from lfm.generator.dep_tree_vae.data import DepTreeDataset
 
-        cache_dir = _P(cfg.vae_dataset_path) / "cache"
-        if not cache_dir.exists():
-            logger.warning("No cache at %s — using N(0,1) defaults", cache_dir)
-            self.register_buffer("_z_struct_mean", torch.zeros(cfg.latent_struct_dim))
-            self.register_buffer("_z_struct_std", torch.ones(cfg.latent_struct_dim))
-            self.register_buffer("_z_content_mean", torch.zeros(cfg.latent_content_dim))
-            self.register_buffer("_z_content_std", torch.ones(cfg.latent_content_dim))
-            return
+        # 1. Dedicated z_stats file (precomputed from encoder)
+        stats_path = _P(cfg.vae_checkpoint).parent / "z_stats.pt"
+        if stats_path.exists():
+            stats = torch.load(stats_path, map_location="cpu", weights_only=True)
+            logger.info(
+                "Z stats from %s (%d samples): struct_std=%.4f content_std=%.4f",
+                stats_path, stats.get("n_samples", 0),
+                stats["z_struct_std"].mean(), stats["z_content_std"].mean(),
+            )
+            return stats
 
-        ds = DepTreeDataset(cache_dir)
-        n = min(512, len(ds))
-        samples = [ds[i] for i in range(n)]
-
-        # Pad interleaved sequences into a batch
-        max_len = min(max(len(s["interleaved"]) for s in samples), cfg.vae_max_seq_len)
-        tokens = torch.zeros(n, max_len, dtype=torch.long)
-        lengths = torch.zeros(n, dtype=torch.long)
-        for i, s in enumerate(samples):
-            seq = torch.tensor(s["interleaved"][:max_len])
-            tokens[i, :len(seq)] = seq
-            lengths[i] = len(seq)
-
-        mu, logvar = self.vae.encoder(tokens, lengths)
-        z = self.vae.latent.reparameterize(mu, logvar)
-        z_struct, z_content = self.vae.latent.split(z)
-
-        self.register_buffer("_z_struct_mean", z_struct.mean(dim=0))
-        self.register_buffer("_z_struct_std", z_struct.std(dim=0).clamp(min=1e-6))
-        self.register_buffer("_z_content_mean", z_content.mean(dim=0))
-        self.register_buffer("_z_content_std", z_content.std(dim=0).clamp(min=1e-6))
-        logger.info("Z calibration computed from %d samples", n)
-
-    def _calibrate_z(self, z: Tensor, target_mean: Tensor, target_std: Tensor) -> Tensor:
-        """Per-dimension calibration: match z's marginals to encoder distribution."""
-        if z.size(0) < 2:
-            return z
-        obs_mean = z.mean(dim=0, keepdim=True)
-        obs_std = z.std(dim=0, keepdim=True).clamp(min=1e-6)
-        return (z - obs_mean) / obs_std * target_std + target_mean
+        # 2. Defaults
+        logger.warning("No z_stats.pt found — calibrators use N(0,1)")
+        return {
+            "z_struct_mean": torch.zeros(cfg.latent_struct_dim),
+            "z_struct_std": torch.ones(cfg.latent_struct_dim),
+            "z_content_mean": torch.zeros(cfg.latent_content_dim),
+            "z_content_std": torch.ones(cfg.latent_content_dim),
+        }
 
     # ---- Skeleton parsing ----
 
@@ -508,8 +484,7 @@ class DepTreeDialogueGame(nn.Module):
         do_decode = (step % cfg.checkpoint_every == 0)
 
         # 1. Structure (shared across turns)
-        z_struct_raw = self.struct_gen(anchor)
-        z_struct = self._calibrate_z(z_struct_raw, self._z_struct_mean, self._z_struct_std)
+        z_struct = self.struct_calibrator(self.struct_gen(anchor))
         padded_roles, role_mask, skeletons = self._parse_skeleton(z_struct)
 
         # 2. Per-turn content generation + memory scoring
@@ -522,8 +497,7 @@ class DepTreeDialogueGame(nn.Module):
             turn_emb = self.turn_embeddings[t].unsqueeze(0).expand(b, -1)
             cond = self.context_proj(torch.cat([anchor + turn_emb, context], dim=-1))
 
-            z_content_raw = self.content_gen(cond)[0][:, 0, :]  # (B, content_dim)
-            z_content = self._calibrate_z(z_content_raw, self._z_content_mean, self._z_content_std)
+            z_content = self.content_calibrator(self.content_gen(cond)[0][:, 0, :])  # (B, content_dim)
 
             # Score on attention-pooled memory (direct gradient to both z-generators)
             pooled = self._project_and_pool(z_struct, z_content, padded_roles, role_mask)
