@@ -80,8 +80,8 @@ def main() -> None:
     bpe_vocab_meta = json.loads(
         Path(cfg["bpe_vocab_path"]).read_text(),
     )
-    id_to_token_str: list[str] = bpe_vocab_meta["tokens"]
-    output_vocab_size = len(id_to_token_str)
+    id_to_token_str = bpe_vocab_meta["tokens"]
+    output_vocab_size = bpe_vocab_meta["vocab_size"]
     logger.info(f"BPE output vocab: {output_vocab_size:,}")
 
     ipa_vocab = build_ipa_vocab_from_bpe_h5(cfg["train_h5"])

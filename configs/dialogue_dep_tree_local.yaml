@@ -1,65 +1,58 @@
-# Small-scale contrastive dialogue game with DepTreeVAE decoder
+# DepTree Dialogue Game — disentangled structure/content z-generation
 # Local 8GB GPU — conservative batch size
 #
-# Uses the dep-tree-disentangled decoder trained on 10.4M English sentences.
-# The frozen decoder receives role-level cross-attention memory from z_content,
-# so the agent game's z-generator controls both structure (z_struct) and
-# content (z_content) independently.
+# Uses the frozen DepTreeVAE v2 decoder trained on 10.4M English dep-parsed
+# sentences. Structure gen produces z_struct once per dialogue (shared grammar),
+# content gen produces z_content per turn via diffusion flow-matching.
 
-decoder_path: data/models/dep_tree_vae_v2/resume.pt
+vae_checkpoint: data/models/dep_tree_vae_v2/resume.pt
 spm_path: data/models/v15b_ipa/spm.model
 output_dir: data/dialogue_game_dep_tree_local
 embedding_store_dir: data/embeddings_qwen_v2_clean
 
-generator_name: multilingual_vae
-generator_vocab_size: 8000
+# VAE architecture (must match checkpoint)
+latent_total_dim: 256
+latent_struct_dim: 64
+latent_content_dim: 192
+spm_vocab_size: 8000
 
 # Dialogue structure
 num_turns: 4
-context_hidden_dim: 512
-context_heads: 4
 
-# Diffusion z-generator
+# Content z-generator (diffusion flow-matching, per turn)
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
-max_phrases: 2
-variable_phrases: true
-target_phrases: 1.5
-length_weight: 0.5
-z_diversity_weight: 0.3
+content_gen_hidden: 512
 
-# CLIP-style contrastive scoring
+# Structure z-generator (MLP, once per dialogue)
+struct_gen_hidden: 256
+
+# Contrastive scoring (batch-wide InfoNCE) + topology preservation
 contrastive_scoring: true
 contrastive_temperature: 0.07
-contrastive_pooling: mean
+topo_weight: 1.0
 
-# Other losses off
-per_turn_weight: 0.0
-ce_weight: 0.0
-topo_weight: 0.0
-independent_turns: false
+# KL prior — keeps z on VAE manifold for coherent surface forms
+z_kl_weight: 0.0
 
-# No constrained close
-constrained_close: false
-max_tokens_per_phrase: 80
+# Decode
+max_decode_len: 60
 
-# No length reg (caused collapse before)
-length_reg_weight: 0.0
-length_reg_target: 80
-length_reg_sigma: 10.0
-
-# Training — 8GB GPU constraint
-batch_size: 64
-gradient_accumulation_steps: 4
+# Training — 4GB GPU constraint
+batch_size: 512
+gradient_accumulation_steps: 1
 steps: 6000
-gru_lr: 0.00005
+struct_lr: 0.00005
+content_lr: 0.00005
 receiver_lr: 0.0003
+max_grad_norm: 1.0
+num_distractors: 15
 min_targets: 1
 max_targets: 1
 
-# Slow curriculum (proven effective)
-warmup_steps: 2500
+# Curriculum (25% faster than default)
+warmup_steps: 1875
 
 # Runtime
 device: cuda

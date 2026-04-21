@@ -591,6 +591,66 @@ class DocumentCommand(CLICommand):
         return 0
 
 
+class DepTreeDialogueCommand(CLICommand):
+    """Train the DepTree dialogue game with disentangled structure/content."""
+
+    @property
+    def name(self) -> str:
+        return "dep-tree-dialogue"
+
+    @property
+    def help(self) -> str:
+        return "Train DepTree dialogue game with disentangled z_struct/z_content"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("config", nargs="?", default=None,
+                            help="YAML config file")
+        parser.add_argument("--resume", default=None)
+        parser.add_argument("--batch-size", type=int, default=None)
+        parser.add_argument("--steps", type=int, default=None)
+        parser.add_argument("--device", default=None)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
+        from lfm.agents.config import CurriculumConfig
+        from lfm.agents.games.dep_tree_dialogue import (
+            DepTreeDialogueConfig,
+            DepTreeDialogueGame,
+        )
+        from lfm.agents.trainer import AgentTrainer
+
+        cfg_dict: dict = {}
+        if args.config is not None:
+            with open(args.config) as f:
+                cfg_dict = yaml.safe_load(f) or {}
+
+        # Handle curriculum from YAML
+        curriculum_kwargs = {}
+        for ck in ("enabled", "warmup_steps", "start_hard_ratio",
+                    "end_hard_ratio", "medium_ratio"):
+            if ck in cfg_dict:
+                curriculum_kwargs[ck] = cfg_dict.pop(ck)
+        if "no_curriculum" in cfg_dict:
+            curriculum_kwargs["enabled"] = not cfg_dict.pop("no_curriculum")
+        if curriculum_kwargs:
+            cfg_dict["curriculum"] = CurriculumConfig(**curriculum_kwargs)
+
+        for key in ("batch_size", "steps", "device"):
+            val = getattr(args, key, None)
+            if val is not None:
+                cfg_dict[key] = val
+
+        import torch
+        cfg_dict = _auto_detect_embedding_dim(cfg_dict)
+        config = DepTreeDialogueConfig(**cfg_dict)
+        device = torch.device(config.device)
+        game = DepTreeDialogueGame(config).to(device)
+        trainer = AgentTrainer(game, config)
+        trainer.train(resume=args.resume)
+        return 0
+
+
 def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
     """Register the ``lfm agent`` subcommand group."""
     agent_parser = parent_subparsers.add_parser(
@@ -610,6 +670,7 @@ def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
         MultiViewCommand(),
         DialogueCommand(),
         DocumentCommand(),
+        DepTreeDialogueCommand(),
     ]
 
     for cmd in commands:

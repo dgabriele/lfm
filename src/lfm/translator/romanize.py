@@ -26,7 +26,8 @@ _REPLACEMENTS: list[tuple[str, str]] = [
     ("ɕ", "sh"), ("ɖ", "d"), ("ɡ", "g"), ("ɢ", "g"), ("ʔ", "'"),
     ("ɦ", "h"), ("ɣ", "gh"), ("χ", "kh"), ("ʕ", "'"), ("ʋ", "v"),
     ("ɬ", "l"), ("ɮ", "l"), ("ɭ", "l"), ("ɳ", "n"), ("ʈ", "t"),
-    ("β", "b"), ("ɸ", "f"), ("ç", "h"),
+    ("β", "b"), ("ɸ", "f"), ("ç", "h"), ("ɰ", "w"), ("ɟ", "j"),
+    ("ʁ", "r"), ("ʑ", "z"), ("ħ", "h"),
     ("æ", "a"), ("ɛ", "e"), ("ɪ", "i"), ("ɔ", "o"), ("ʊ", "u"),
     ("ʌ", "u"), ("ə", "e"), ("ɯ", "u"), ("ɨ", "i"), ("ɑ", "a"),
     ("ɐ", "a"), ("ɤ", "o"), ("ø", "o"), ("œ", "o"), ("ɵ", "o"),
@@ -176,6 +177,128 @@ def syllable_hyphenate(ipa_text: str) -> str:
         parts.append("-".join(word_syls))
 
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# English-phonetic respelling — IPA → maximally natural English orthography
+# ---------------------------------------------------------------------------
+
+# Multi-char sequences (affricates, diphthongs) — matched first, longest wins
+_RESPELL_MULTI: list[tuple[str, str]] = [
+    # Affricates — with tie bar
+    ("t͡ʃ", "ch"),  ("d͡ʒ", "j"),  ("t͡ɕ", "ch"),  ("d͡ʑ", "j"),
+    ("t͡s", "ts"),  ("d͡z", "dz"),
+    # Affricates — without tie bar (common in tool output)
+    ("tʃ", "ch"),  ("dʒ", "j"),  ("tɕ", "ch"),  ("dʑ", "j"),
+    # Fortis
+    ("t͈", "tt"),   ("k͈", "kk"),  ("p͈", "pp"),
+    # Diphthongs (with and without non-syllabic marker)
+    ("aɪ̯", "ai"),  ("aʊ̯", "au"),
+    ("aɪ", "ai"),  ("aʊ", "au"),  ("eɪ", "ei"),  ("oʊ", "ou"),  ("ɔɪ", "oi"),
+    # R-colored vowels (decompose to schwa + r)
+    ("ɝ", "ër"),   ("ɜ", "ër"),
+]
+
+# Vowels — 5 cardinal vowels as plain letters, diacritical marks for
+# non-cardinal vowels. Uses established orthographic conventions from
+# real languages so LLMs have correct inductive bias:
+#   German/Swedish: ä≈/æ/, ö=/ø/, ü=/y/
+#   French/Italian: è=/ɛ/, ò=/ɔ/, à=/ɑ/, ì=/ɪ/
+#   Turkish: ı=/ɯ/     Romanian: î=/ɨ/    Albanian: ë=/ə/
+_RESPELL_VOWELS: list[tuple[str, str]] = [
+    # Cardinal (plain — universal romanization)
+    ("i", "i"),    ("e", "e"),    ("a", "a"),    ("o", "o"),    ("u", "u"),
+    # Lax/open variants (grave accent = open, matching Italian/French)
+    ("ɪ", "ì"),    ("ɛ", "è"),    ("ʌ", "ù"),    ("ɔ", "ò"),
+    # Schwa and near-open central
+    ("ə", "ë"),    ("ɐ", "ë"),
+    # Open back
+    ("ɑ", "à"),    ("ɒ", "ò"),    ("æ", "ä"),
+    # Close rounded (exact orthographic matches)
+    ("ʊ", "û"),    ("y", "ü"),    ("ø", "ö"),    ("ɯ", "ı"),    ("ɨ", "î"),
+    # Remaining (merge to nearest marked vowel)
+    ("œ", "ö"),    ("ɵ", "ö"),    ("ʉ", "ü"),    ("ɤ", "ë"),
+    ("ɘ", "ë"),    ("ʏ", "ü"),    ("ɶ", "ä"),
+]
+
+# Consonants — transparent where possible, familiar digraphs otherwise.
+# IPA /j/ → y (English "yes"), /dʒ/ → j (English "judge").
+# All r-like sounds merge to `r` for readability.
+_RESPELL_CONSONANTS: list[tuple[str, str]] = [
+    ("ʃ", "sh"),   ("ʒ", "zh"),   ("ŋ", "ng"),   ("ɲ", "ny"),
+    ("θ", "th"),   ("ð", "th"),
+    ("ɹ", "r"),    ("ɾ", "r"),    ("ɽ", "r"),    ("ʁ", "r"),
+    ("ʂ", "sh"),   ("ɕ", "sh"),
+    ("ɖ", "d"),    ("ɡ", "g"),    ("ɢ", "g"),
+    ("ʔ", "'"),    ("ɦ", "h"),    ("ɣ", "gh"),   ("χ", "kh"),
+    ("ʕ", "'"),    ("ʋ", "v"),    ("ɬ", "lh"),   ("ɮ", "l"),
+    ("ɭ", "l"),    ("ɳ", "n"),    ("ʈ", "t"),
+    ("β", "b"),    ("ɸ", "f"),    ("ç", "h"),
+    ("ɰ", "w"),    ("ɟ", "gy"),   ("ʑ", "zh"),   ("ħ", "h"),
+    ("j", "y"),
+]
+
+# Build combined replacement list (longest IPA source first for greedy match)
+_RESPELL_ALL: list[tuple[str, str]] = sorted(
+    _RESPELL_MULTI + _RESPELL_VOWELS + _RESPELL_CONSONANTS,
+    key=lambda pair: -len(pair[0]),
+)
+
+
+_RESPELL_DROP = set("ːˈˌ\u0361\u032F\u032A\u0324\u0307\u0329\u0303\u0348")
+
+# Build sorted lookup by length (longest first) for greedy matching
+_RESPELL_MAP: dict[str, str] = {}
+for _ipa, _spell in _RESPELL_MULTI + _RESPELL_VOWELS + _RESPELL_CONSONANTS:
+    _RESPELL_MAP[_ipa] = _spell
+_RESPELL_MAX_LEN = max(len(k) for k in _RESPELL_MAP)
+
+
+def respell(ipa_text: str) -> str:
+    """English-phonetic respelling of IPA text.
+
+    Produces ASCII text that an English speaker can sound out to
+    approximate the original pronunciation. Near-lossless — vowel
+    length (ː) is dropped, stress marks are dropped.
+
+    Uses greedy left-to-right matching: at each position, tries the
+    longest IPA key first. Output is never re-processed.
+
+    Args:
+        ipa_text: IPA string (may contain Unicode).
+
+    Returns:
+        English-phonetic ASCII respelling.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(ipa_text)
+
+    while i < n:
+        ch = ipa_text[i]
+
+        # Skip dropped characters
+        if ch in _RESPELL_DROP:
+            i += 1
+            continue
+
+        # Greedy longest match
+        matched = False
+        for length in range(min(_RESPELL_MAX_LEN, n - i), 0, -1):
+            candidate = ipa_text[i:i + length]
+            if candidate in _RESPELL_MAP:
+                out.append(_RESPELL_MAP[candidate])
+                i += length
+                matched = True
+                break
+
+        if not matched:
+            # Pass through ASCII, skip non-ASCII unknowns
+            if ord(ch) < 128:
+                out.append(ch)
+            i += 1
+
+    return "".join(out)
 
 
 def romanize(ipa_text: str) -> str:

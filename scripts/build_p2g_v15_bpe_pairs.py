@@ -21,7 +21,7 @@ import h5py
 import numpy as np
 
 
-_IPA_CHARS = set("aɑæbdðeɛəɝfɡhiɪjklmnŋoɔpɹsʃtθuʊʌvwzʒ-")
+_IPA_CHARS = set("aɑæbdðeɛəɝfɡhiɪjklmnŋoɔpɹsʃtθuʊʌvwzʒ")
 
 
 def _is_ipa(word: str) -> bool:
@@ -83,6 +83,7 @@ def main():
             if len(eng_words) != len(ipa_words):
                 continue
             for e, i in zip(eng_words, ipa_words):
+                e = e.replace("-", "")
                 if len(i) >= 1 and len(e) >= 2 and len(i) <= args.max_ipa_len:
                     pair_counts[(i, e)] += 1
 
@@ -160,7 +161,7 @@ def main():
             grp.create_dataset("spelling", data=[d[1] for d in data], dtype=dt)
             # Store BPE ids as variable-length int arrays
             bpe_dt = h5py.vlen_dtype(np.int32)
-            bpe_ds = grp.create_dataset("bpe_ids", shape=(len(data),), dtype=bpe_dt)
+            bpe_ds = grp.create_dataset("token_ids", shape=(len(data),), dtype=bpe_dt)
             for i, (_, _, bpe, _) in enumerate(data):
                 bpe_ds[i] = np.array(bpe, dtype=np.int32)
             grp.create_dataset("word_freq", data=np.array([d[3] for d in data], dtype=np.int32))

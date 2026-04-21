@@ -14,78 +14,13 @@ from lfm.utils.oom import shrink_on_oom
 
 logger = logging.getLogger(__name__)
 
-# Lazy-loaded p2g model for rendering IPA → English in diagnostic logs.
-_p2g_model = None
-_p2g_vocab = None
-_p2g_ipa_vocab = None
-_p2g_cfg = None
-
-
-def _p2g_render(ipa_text: str) -> str | None:
-    """Render IPA text to English via p2g. Returns None if p2g not available."""
-    global _p2g_model, _p2g_vocab, _p2g_ipa_vocab, _p2g_cfg
-
-    if _p2g_model is False:
+def _respell_ipa(ipa_text: str) -> str | None:
+    """Respell IPA as diacritical Latin for diagnostic logs."""
+    try:
+        from lfm.translator.romanize import respell
+        return respell(ipa_text)
+    except Exception:
         return None
-
-    if _p2g_model is None:
-        try:
-            import json
-            from lfm.p2g.seq2seq import P2GSeq2Seq, P2GSeq2SeqConfig
-            from lfm.p2g.vocab import CharVocab
-
-            p2g_path = Path("data/models/p2g_v15_bpe/best.pt")
-            if not p2g_path.exists():
-                _p2g_model = False
-                return None
-
-            ckpt = torch.load(p2g_path, map_location="cpu", weights_only=False)
-            _p2g_cfg = ckpt["cfg"]
-            bpe_vocab = json.loads(Path(_p2g_cfg["bpe_vocab_path"]).read_text())
-            _p2g_vocab = bpe_vocab["tokens"]
-            chars = ckpt["ipa_vocab"]
-            _p2g_ipa_vocab = CharVocab(
-                chars=chars, char_to_id={c: i for i, c in enumerate(chars)},
-            )
-            _p2g_model = P2GSeq2Seq(P2GSeq2SeqConfig(
-                input_vocab_size=_p2g_ipa_vocab.size,
-                output_vocab_size=len(_p2g_vocab),
-                d_model=_p2g_cfg["d_model"],
-                encoder_layers=_p2g_cfg["encoder_layers"],
-                decoder_layers=_p2g_cfg["decoder_layers"],
-                nhead=_p2g_cfg["nhead"],
-                max_ipa_len=_p2g_cfg["max_ipa_len"],
-                max_spelling_len=_p2g_cfg["max_bpe_len"],
-                dropout=0.0,
-            ))
-            _p2g_model.load_state_dict(ckpt["model_state"])
-            _p2g_model.eval()
-            logger.info("Loaded p2g model for diagnostic rendering")
-        except Exception:
-            _p2g_model = False
-            return None
-
-    words = ipa_text.split()
-    result = []
-    for w in words:
-        enc = _p2g_ipa_vocab.encode(w)[:_p2g_cfg["max_ipa_len"]]
-        if not enc:
-            result.append(w)
-            continue
-        padded = torch.zeros(1, _p2g_cfg["max_ipa_len"], dtype=torch.long)
-        padded[0, : len(enc)] = torch.tensor(enc)
-        with torch.no_grad():
-            pred = _p2g_model.generate(padded)[0]
-        parts = []
-        for t in pred:
-            if t < 3:
-                continue
-            s = _p2g_vocab[t]
-            if s.startswith("\u0120"):
-                s = " " + s[1:]
-            parts.append(s)
-        result.append("".join(parts).strip())
-    return " ".join(result)
 
 
 class AgentTrainer:
@@ -425,7 +360,7 @@ class AgentTrainer:
                 if "qwen_roundtrip" in out and out["qwen_roundtrip"].item() != 0:
                     extra += f"  rt_cos={out['qwen_roundtrip'].item():.4f}"
                 if "topo_loss" in out and out["topo_loss"].item() != 0:
-                    extra += f"  ρ={out['topo_loss'].item():.4f}"
+                    extra += f"  topo={out['topo_loss'].item():.4f}"
                 if "hs_weight" in out:
                     extra += f"  hs={out['hs_weight'].item():.2f}"
                 if torch.cuda.is_available():
@@ -448,15 +383,22 @@ class AgentTrainer:
 
                 if "_tokens" in out and step % cfg.checkpoint_every == 0:
                     try:
-                        if "_dialogue_tokens" in out:
+                        # Resolve renderer: game.gen.render_surface or game.render_surface
+                        _renderer = None
+                        if hasattr(game, "gen") and hasattr(game.gen, "render_surface"):
+                            _renderer = game.gen.render_surface
+                        elif hasattr(game, "render_surface"):
+                            _renderer = game.render_surface
+
+                        if _renderer and "_dialogue_tokens" in out:
                             logger.info("  --- monologue (sample 0) ---")
                             for turn_i, (toks, mask) in enumerate(
                                 zip(out["_dialogue_tokens"], out["_dialogue_masks"]),
                             ):
-                                surface = game.gen.render_surface(
+                                surface = _renderer(
                                     toks[0:1], mask=mask[0:1],
                                 )[0]
-                                eng = _p2g_render(surface)
+                                eng = _respell_ipa(surface)
                                 if eng:
                                     logger.info(
                                         "  [T%d] %s  (%d tok)\n        → %s",
@@ -467,15 +409,15 @@ class AgentTrainer:
                                         "  [T%d] %s  (%d tok)",
                                         turn_i, surface, int(mask[0].sum().item()),
                                     )
-                        else:
+                        elif _renderer and "_gen_mask" in out:
                             toks = out["_tokens"]
                             mask = out["_gen_mask"]
                             n = min(5, toks.size(0))
-                            surfaces = game.gen.render_surface(
+                            surfaces = _renderer(
                                 toks[:n], mask=mask[:n],
                             )
                             for j, surface in enumerate(surfaces):
-                                eng = _p2g_render(surface)
+                                eng = _respell_ipa(surface)
                                 if eng:
                                     logger.info(
                                         "  sample[%d]: %s  (%d tok)\n             → %s",

@@ -377,6 +377,7 @@ class PhraseDecoderLayer(nn.Module):
         app_idx: int,
         rope_freqs: Tensor | None = None,
         tgt_mask_row: Tensor | None = None,
+        xattn_mask: Tensor | None = None,
     ) -> Tensor:
         """Cached forward pass: process only the newest token.
 
@@ -392,6 +393,8 @@ class PhraseDecoderLayer(nn.Module):
             tgt_mask_row: Attention mask row for current position
                 ``(num_heads, 1, seq_len)`` — which past positions
                 this token can attend to.
+            xattn_mask: Optional cross-attention mask
+                ``(batch * num_heads, 1, mem_len)``.
 
         Returns:
             Output for the new position ``(batch, 1, d_model)``.
@@ -431,7 +434,7 @@ class PhraseDecoderLayer(nn.Module):
 
         # --- Cross-attention (to latent — same every step) ---
         x = self.norm2(tgt)
-        cross_out, _ = self.cross_attn(x, memory, memory)
+        cross_out, _ = self.cross_attn(x, memory, memory, attn_mask=xattn_mask)
         tgt = tgt + cross_out
 
         # --- FFN ---
@@ -552,6 +555,7 @@ class PhraseDecoder(nn.Module):
         kv_cache: KVCache,
         rope_freqs: Tensor | None = None,
         tgt_mask_row: Tensor | None = None,
+        xattn_mask: Tensor | None = None,
     ) -> Tensor:
         """Cached forward: process one new token through all layers.
 
@@ -562,6 +566,8 @@ class PhraseDecoder(nn.Module):
             rope_freqs: Full precomputed RoPE frequencies.
             tgt_mask_row: Mask row for current position
                 ``(num_heads, 1, past_len+1)``.
+            xattn_mask: Optional cross-attention mask
+                ``(batch * num_heads, 1, mem_len)``.
 
         Returns:
             Output for the new token ``(batch, 1, d_model)``.
@@ -574,5 +580,6 @@ class PhraseDecoder(nn.Module):
                 app_idx=app_idx,
                 rope_freqs=rope_freqs,
                 tgt_mask_row=tgt_mask_row,
+                xattn_mask=xattn_mask,
             )
         return self.final_norm(x)
