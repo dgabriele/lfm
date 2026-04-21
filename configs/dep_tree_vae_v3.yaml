@@ -1,0 +1,76 @@
+# DepTreeVAE v3 — no KL, dependency-tree-disentangled latent space
+#
+# Same architecture as v2 but kl_weight=0. The encoder is free to
+# organize the latent space purely for reconstruction. The decoder
+# learns EOS behavior from the encoder's natural distribution, not
+# from a forced N(0,1) prior.
+#
+# Training on 10.4M English dep-parsed IPA sentences.
+
+dataset_path: /workspace/lfm/data/datasets/english-dep-trees-v16
+spm_model_path: /workspace/lfm/data/models/v15b_ipa/spm.model
+output_dir: /workspace/lfm/data/models/dep_tree_vae_v3
+
+spm_vocab_size: 8000
+max_seq_len: 160
+
+# Encoder
+encoder_hidden_dim: 512
+encoder_num_layers: 2
+encoder_num_heads: 8
+encoder_dropout: 0.1
+
+# Latent space
+latent:
+  total_dim: 256
+  struct_dim: 64
+  content_dim: 192
+
+# Skeleton decoder
+skeleton:
+  mode: parallel
+  hidden_dim: 128
+  max_roles: 40
+  num_layers: 2
+  num_heads: 4
+  dropout: 0.1
+
+# Phrase decoder
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+freeze_decoder: false
+
+# Disentanglement
+disentanglement:
+  struct_cls_weight: 1.0
+  content_bow_weight: 0.5
+  adversarial_weight: 0.0
+  gradient_reversal_scale: 0.0
+  hsic_weight: 1.0
+
+# KL — disabled, encoder free to organize latent space for reconstruction
+kl_weight: 0.0
+kl_free_bits: 0.5
+kl_warmup_steps: 5000
+
+# Training
+batch_size: 512
+gradient_accumulation_steps: 2
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 5
+use_amp: true
+seed: 42
+device: cuda
+
+# Logging / checkpoints
+log_every: 50
+checkpoint_every_steps: 5000
+val_fraction: 0.02

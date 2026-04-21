@@ -1,9 +1,8 @@
 # DepTree Dialogue Game — disentangled structure/content z-generation
-# Local 8GB GPU — conservative batch size
 #
-# Uses the frozen DepTreeVAE v2 decoder trained on 10.4M English dep-parsed
-# sentences. Structure gen produces z_struct once per dialogue (shared grammar),
-# content gen produces z_content per turn via diffusion flow-matching.
+# Frozen DepTreeVAE v2 decoder (10.4M English dep-parsed IPA, kl=0.01).
+# Multi-role decode: one short phrase per skeleton role, KV cache across
+# roles for cross-role coherence, natural EOS per role.
 
 vae_checkpoint: data/models/dep_tree_vae_v2/resume.pt
 spm_path: data/models/v15b_ipa/spm.model
@@ -15,32 +14,28 @@ latent_total_dim: 256
 latent_struct_dim: 64
 latent_content_dim: 192
 spm_vocab_size: 8000
+vae_max_seq_len: 160
 
-# Dialogue structure
+# Dialogue
 num_turns: 4
 
-# Content z-generator (diffusion flow-matching, per turn)
+# z-generators
 diffusion_steps: 4
 diffusion_layers: 4
 diffusion_heads: 8
 content_gen_hidden: 512
-
-# Structure z-generator (MLP, once per dialogue)
 struct_gen_hidden: 256
 
-# Contrastive scoring (batch-wide InfoNCE) + topology preservation
+# Contrastive scoring + topology
 contrastive_scoring: true
 contrastive_temperature: 0.07
 topo_weight: 1.0
 
-# KL prior — keeps z on VAE manifold for coherent surface forms
-z_kl_weight: 0.1
+# Multi-role decode (one short phrase per skeleton role)
+max_tokens_per_role: 20
 
-# Decode
-max_decode_len: 60
-
-# Training — 4GB GPU constraint
-batch_size: 512
+# Training
+batch_size: 196
 gradient_accumulation_steps: 1
 steps: 6000
 struct_lr: 0.00005
@@ -51,7 +46,7 @@ num_distractors: 15
 min_targets: 1
 max_targets: 1
 
-# Curriculum (25% faster than default)
+# Curriculum
 warmup_steps: 1875
 
 # Runtime
