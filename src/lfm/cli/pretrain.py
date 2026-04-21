@@ -26,14 +26,32 @@ class PretrainCommand(CLICommand):
     def execute(self, args: argparse.Namespace) -> int:
         import yaml
 
-        from lfm.generator.pretrain import VAEPretrainConfig, pretrain_vae_decoder
-
         with open(args.config) as f:
             raw = yaml.safe_load(f)
 
         if "attention_head_windows" in raw:
             raw["attention_head_windows"] = tuple(raw["attention_head_windows"])
 
-        config = VAEPretrainConfig(**raw)
-        pretrain_vae_decoder(config)
+        model_type = raw.pop("model_type", "phrase_vae")
+
+        if model_type == "phrase_vae":
+            from lfm.generator.pretrain import VAEPretrainConfig, pretrain_vae_decoder
+            config = VAEPretrainConfig(**raw)
+            pretrain_vae_decoder(config)
+        elif model_type == "dep_tree_vae":
+            from lfm.generator.dep_tree_vae.config import DepTreeVAEConfig
+            from lfm.generator.dep_tree_vae.trainer import train_dep_tree_vae
+            config = DepTreeVAEConfig(**raw)
+            train_dep_tree_vae(config)
+        elif model_type == "dep_tree_diffusion":
+            from lfm.generator.dep_tree_diffusion.config import DepTreeDiffusionConfig
+            from lfm.generator.dep_tree_diffusion.trainer import train_dep_tree_diffusion
+            config = DepTreeDiffusionConfig(**raw)
+            train_dep_tree_diffusion(config)
+        else:
+            raise ValueError(
+                f"Unknown model_type: {raw.get('model_type')!r}. "
+                f"Expected: phrase_vae, dep_tree_vae, dep_tree_diffusion"
+            )
+
         return 0

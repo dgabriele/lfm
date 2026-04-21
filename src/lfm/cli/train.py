@@ -38,6 +38,37 @@ class DepTreeVAECommand(CLICommand):
         return 0
 
 
+class DepTreeDiffusionCommand(CLICommand):
+    """Train DepTree Diffusion VAE — tree-structured diffusion decoder."""
+
+    @property
+    def name(self) -> str:
+        return "dep-tree-diffusion"
+
+    @property
+    def help(self) -> str:
+        return "Pretrain DepTree Diffusion VAE (non-autoregressive tree-structured decoder)"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("config", help="YAML config file")
+
+    def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
+        from lfm.generator.dep_tree_diffusion.config import DepTreeDiffusionConfig
+        from lfm.generator.dep_tree_diffusion.trainer import train_dep_tree_diffusion
+
+        with open(args.config) as f:
+            raw = yaml.safe_load(f)
+
+        if "attention_head_windows" in raw:
+            raw["attention_head_windows"] = tuple(raw["attention_head_windows"])
+
+        config = DepTreeDiffusionConfig(**raw)
+        train_dep_tree_diffusion(config)
+        return 0
+
+
 class ReconstructionCommand(CLICommand):
     """Train reconstruction model — embedding recovery through the bottleneck."""
 
