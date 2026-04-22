@@ -40,6 +40,8 @@ diffusion:
 
 # Topology — z distances preserve decoded-output distances
 topo_weight: 1.0
+# Interpolation smoothness — midpoints between endpoints in output space
+interp_weight: 0.5
 
 # Completeness scorer
 completeness_scorer_path: /workspace/lfm/data/models/completeness_scorer/best.pt

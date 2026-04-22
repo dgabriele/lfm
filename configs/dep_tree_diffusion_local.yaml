@@ -65,6 +65,7 @@ freeze_decoder: false
 # Regularization
 # Completeness scorer — frozen structural coherence discriminator
 topo_weight: 1.0
+interp_weight: 0.5
 completeness_scorer_path: data/models/completeness_scorer/best.pt
 completeness_weight: 0.1
 

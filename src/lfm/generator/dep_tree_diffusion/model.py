@@ -43,6 +43,8 @@ class DiffusionVAEOutput:
     mu: Tensor
     logvar: Tensor
 
+    interp_loss: Tensor = torch.tensor(0.0)
+
     @property
     def total_loss(self) -> Tensor:
         return (
@@ -52,6 +54,7 @@ class DiffusionVAEOutput:
             + self.kl_loss
             + self.dip_loss
             + self.topo_loss
+            + self.interp_loss
             + self.disentangle["total"]
         )
 
@@ -246,7 +249,39 @@ class DepTreeDiffusionVAE(nn.Module):
                 topo_rho = (zc * oc).sum() / denom
                 topo_loss = cfg.topo_weight * (1.0 - topo_rho)
 
-        # 8. Disentanglement (disabled for diffusion — zeroed in config)
+        # 8. Interpolation smoothness — midpoint decoding should be
+        # between the two endpoints, not in a random direction.
+        interp_loss = torch.tensor(0.0, device=device)
+        if cfg.interp_weight > 0 and z.size(0) >= 4:
+            n_pairs = z.size(0) // 2
+            z_a = z[:n_pairs]
+            z_b = z[n_pairs:2 * n_pairs]
+            z_mid = 0.5 * z_a + 0.5 * z_b
+
+            # Decode all three at low noise
+            t_low_i = torch.full((n_pairs, tokens.size(1)), 0.1, device=device)
+            x0_i = self.diffusion_decoder.token_embedding(
+                tokens[:n_pairs].clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
+            )
+            roles_i = per_token_roles[:n_pairs]
+            depths_i = depths[:n_pairs]
+            pad_i = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths[:n_pairs].unsqueeze(1)
+            valid_i = (~pad_i).unsqueeze(-1).float()
+
+            def _pool_decode(z_vec):
+                mem = self._z_to_memory(z_vec)
+                x_t, _ = self.diffusion_decoder.add_noise(x0_i, t_low_i)
+                pred = self.diffusion_decoder(x_t, t_low_i, roles_i, depths_i, mem, pad_i)
+                return (pred * valid_i).sum(dim=1) / valid_i.sum(dim=1).clamp(min=1)
+
+            repr_a = _pool_decode(z_a)
+            repr_b = _pool_decode(z_b)
+            repr_mid = _pool_decode(z_mid)
+            expected_mid = 0.5 * (repr_a + repr_b)
+
+            interp_loss = cfg.interp_weight * F.mse_loss(repr_mid, expected_mid)
+
+        # 9. Disentanglement (disabled for diffusion — zeroed in config)
         disent = self.disentanglement(z_struct, z_content,
             self._make_role_bow(role_ids, role_lengths, device),
             self._make_content_bow(tokens, lengths, device),
@@ -260,6 +295,7 @@ class DepTreeDiffusionVAE(nn.Module):
             dip_loss=dip_loss,
             topo_rho=topo_rho,
             topo_loss=topo_loss,
+            interp_loss=interp_loss,
             disentangle=disent,
             z_struct=z_struct,
             z_content=z_content,

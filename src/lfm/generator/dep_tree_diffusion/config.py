@@ -36,6 +36,10 @@ class DepTreeDiffusionConfig(DepTreeVAEConfig):
     # Topology — z distances preserve decoded-output distances
     topo_weight: float = 1.0
 
+    # Interpolation smoothness — midpoint decoded output should be
+    # between the endpoints' decoded outputs, not in a random direction
+    interp_weight: float = 0.5
+
     # Completeness scorer — frozen discriminator for structural coherence
     completeness_scorer_path: str = ""
     completeness_weight: float = 0.1
