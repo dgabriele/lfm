@@ -63,6 +63,10 @@ share_decoder_layers: true
 freeze_decoder: false
 
 # Regularization
+# Completeness scorer — frozen structural coherence discriminator
+completeness_scorer_path: data/models/completeness_scorer/best.pt
+completeness_weight: 0.1
+
 kl_weight: 0.1
 kl_free_bits: 0.5
 kl_warmup_steps: 5000
@@ -74,8 +78,8 @@ word_dropout_min: 0.05
 word_dropout_anneal_epochs: 3
 
 # Training — local GPU (5.3GB peak at batch=128)
-batch_size: 128
-gradient_accumulation_steps: 1
+batch_size: 32
+gradient_accumulation_steps: 4
 lr: 0.0005
 lr_min: 0.0001
 num_epochs: 5

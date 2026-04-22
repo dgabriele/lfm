@@ -57,6 +57,19 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
     from lfm.generator.dep_tree_diffusion.data import build_diffusion_dataloaders
     train_loader, val_loader, sp, vocab_size = build_diffusion_dataloaders(cfg)
 
+    # Completeness scorer (frozen, for auxiliary loss)
+    completeness_scorer = None
+    if cfg.completeness_scorer_path:
+        from lfm.generator.completeness_scorer.model import CompletenessScorer, CompletenessConfig
+        scorer_ckpt = torch.load(cfg.completeness_scorer_path, map_location=device, weights_only=False)
+        scorer_cfg = CompletenessConfig(**scorer_ckpt["config"])
+        completeness_scorer = CompletenessScorer(scorer_cfg).to(device)
+        completeness_scorer.load_state_dict(scorer_ckpt["model_state"])
+        completeness_scorer.eval()
+        for p in completeness_scorer.parameters():
+            p.requires_grad = False
+        logger.info("Loaded frozen completeness scorer (val_acc=%.1f%%)", scorer_ckpt.get("val_acc", 0) * 100)
+
     # Model
     model = DepTreeDiffusionVAE(cfg, vocab_size).to(device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -137,7 +150,34 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
                     z = torch.cat([out.z_struct, out.z_content], dim=-1)
                     z_var_loss = cfg.z_var_weight * (z.var(dim=0) - cfg.z_var_target).pow(2).mean()
 
-                loss = (out.total_loss + z_var_loss) / accum
+                # Completeness loss: frozen scorer on decoder's soft-token output.
+                # Rewards structurally complete thoughts, penalizes word salad/loops.
+                completeness_loss = torch.tensor(0.0, device=device)
+                if completeness_scorer is not None and cfg.completeness_weight > 0:
+                    # Get decoder logits from a low-noise forward pass (t≈0.1)
+                    # so the output is close to what generation produces.
+                    with torch.amp.autocast(device_type=device.type, enabled=False):
+                        t_low = torch.full((batch["tokens"].size(0),), 0.1, device=device)
+                        depths_b = batch["depths"]
+                        x0 = model.diffusion_decoder.token_embedding(
+                            batch["tokens"].clamp(max=model.diffusion_decoder.token_embedding.num_embeddings - 1)
+                        )
+                        x_t, _ = model.diffusion_decoder.add_noise(x0, t_low.unsqueeze(1).expand_as(depths_b))
+                        per_token_roles = model._extract_per_token_roles(batch["tokens"], batch["lengths"])
+                        z_mem = model._z_to_memory(torch.cat([out.z_struct, out.z_content], dim=-1))
+                        padding = torch.arange(batch["tokens"].size(1), device=device).unsqueeze(0) >= batch["lengths"].unsqueeze(1)
+                        x0_pred = model.diffusion_decoder(
+                            x_t, t_low.unsqueeze(1).expand_as(depths_b),
+                            per_token_roles, depths_b, z_mem, padding,
+                        )
+                        logits = model.diffusion_decoder.output_head(x0_pred)
+                        # Truncate to scorer's vocab size (SPM tokens only)
+                        scorer_vocab = completeness_scorer.cfg.vocab_size
+                        scores = completeness_scorer.score_soft(logits[:, :, :scorer_vocab].float(), batch["lengths"])
+                        # Maximize score (complete thoughts) → minimize -score
+                        completeness_loss = -cfg.completeness_weight * scores.mean()
+
+                loss = (out.total_loss + z_var_loss + completeness_loss) / accum
 
             scaler.scale(loss).backward()
 

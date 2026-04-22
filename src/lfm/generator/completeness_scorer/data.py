@@ -29,22 +29,33 @@ def _is_content_token(token_id: int, spm_size: int) -> bool:
     return 0 < token_id < spm_size
 
 
-def _corrupt_shuffle(tokens: list[int], rng: random.Random) -> list[int]:
-    """Shuffle word order (preserving token groups)."""
-    result = list(tokens)
-    if len(result) > 3:
-        n_swaps = rng.randint(2, max(2, len(result) // 2))
-        for _ in range(n_swaps):
-            i, j = rng.sample(range(len(result)), 2)
-            result[i], result[j] = result[j], result[i]
-    return result
+def _tokenize_words(
+    ipa: str, sp: spm.SentencePieceProcessor,
+) -> list[list[int]]:
+    """Tokenize IPA text into word groups (list of token-id lists)."""
+    return [sp.Encode(w, out_type=int) for w in ipa.split() if w]
+
+
+def _flatten_words(word_groups: list[list[int]]) -> list[int]:
+    """Flatten word groups back to a flat token list."""
+    return [t for group in word_groups for t in group]
+
+
+def _corrupt_word_shuffle(word_groups: list[list[int]], rng: random.Random) -> list[int]:
+    """Shuffle whole words, keeping each word's tokens intact.
+
+    This is the key corruption for detecting word salad —
+    individual words are valid but their arrangement isn't.
+    """
+    groups = list(word_groups)
+    rng.shuffle(groups)
+    return _flatten_words(groups)
 
 
 def _corrupt_repeat(tokens: list[int], rng: random.Random) -> list[int]:
     """Insert repetition loops — the main diffusion failure mode."""
     if len(tokens) < 3:
         return tokens
-    # Pick a span and repeat it
     start = rng.randint(0, len(tokens) - 2)
     span_len = rng.randint(1, min(3, len(tokens) - start))
     span = tokens[start:start + span_len]
@@ -60,48 +71,75 @@ def _corrupt_truncate(tokens: list[int], rng: random.Random) -> list[int]:
     return tokens[:cut]
 
 
-def _corrupt_splice(tokens_a: list[int], tokens_b: list[int], rng: random.Random) -> list[int]:
-    """Splice two unrelated sentences together (topic incoherence)."""
-    cut_a = rng.randint(len(tokens_a) // 3, 2 * len(tokens_a) // 3) if len(tokens_a) > 3 else len(tokens_a)
-    cut_b = rng.randint(len(tokens_b) // 3, 2 * len(tokens_b) // 3) if len(tokens_b) > 3 else 0
-    return tokens_a[:cut_a] + tokens_b[cut_b:]
+def _corrupt_clause_swap(word_groups: list[list[int]], rng: random.Random) -> list[int]:
+    """Swap first and second half of the sentence at a word boundary."""
+    if len(word_groups) < 4:
+        return _flatten_words(word_groups)
+    mid = len(word_groups) // 2
+    jitter = rng.randint(-1, 1)
+    cut = max(1, min(len(word_groups) - 1, mid + jitter))
+    return _flatten_words(word_groups[cut:] + word_groups[:cut])
+
+
+def _corrupt_word_insert(
+    word_groups: list[list[int]], donor_groups: list[list[int]],
+    rng: random.Random,
+) -> list[int]:
+    """Insert random words from another sentence into this one."""
+    result = list(word_groups)
+    n_insert = rng.randint(2, max(2, len(result) // 3))
+    for _ in range(n_insert):
+        if donor_groups:
+            word = rng.choice(donor_groups)
+            pos = rng.randint(0, len(result))
+            result.insert(pos, word)
+    return _flatten_words(result)
+
+
+def _corrupt_splice(
+    words_a: list[list[int]], words_b: list[list[int]], rng: random.Random,
+) -> list[int]:
+    """Splice two unrelated sentences at word boundaries (topic incoherence)."""
+    cut_a = rng.randint(len(words_a) // 3, 2 * len(words_a) // 3) if len(words_a) > 3 else len(words_a)
+    cut_b = rng.randint(len(words_b) // 3, 2 * len(words_b) // 3) if len(words_b) > 3 else 0
+    return _flatten_words(words_a[:cut_a] + words_b[cut_b:])
 
 
 def _corrupt_drop_function_words(
-    tokens: list[int], sp: spm.SentencePieceProcessor, rng: random.Random,
+    word_groups: list[list[int]], sp: spm.SentencePieceProcessor,
+    rng: random.Random,
 ) -> list[int]:
-    """Drop short tokens (likely function words) — breaks grammatical glue."""
+    """Drop short words (likely function words) — breaks grammatical glue."""
     result = []
-    for t in tokens:
-        piece = sp.IdToPiece(t) if 0 < t < sp.GetPieceSize() else ""
-        # Short pieces (1-2 chars, excluding ▁) are likely function words
-        clean = piece.replace("▁", "")
-        if len(clean) <= 2 and rng.random() < 0.7:
-            continue  # drop
-        result.append(t)
-    return result if len(result) > 2 else tokens
+    for group in word_groups:
+        text = sp.Decode(group)
+        if len(text.strip()) <= 3 and rng.random() < 0.7:
+            continue
+        result.append(group)
+    return _flatten_words(result) if len(result) > 2 else _flatten_words(word_groups)
 
 
 def _alienize_content(
-    tokens: list[int], sp: spm.SentencePieceProcessor,
+    word_groups: list[list[int]], sp: spm.SentencePieceProcessor,
     rng: random.Random, alien_rate: float = 0.5,
 ) -> list[int]:
-    """Replace content tokens with random SPM tokens (alien vocabulary).
+    """Replace content words with random token sequences (alien vocabulary).
 
-    The resulting sentence has the same structure but unfamiliar words.
+    Preserves function words and word boundaries. The resulting sentence
+    has the same structure but unfamiliar content words.
     This is a POSITIVE example — the scorer should accept it.
     """
     spm_size = sp.GetPieceSize()
     result = []
-    for t in tokens:
-        piece = sp.IdToPiece(t) if 0 < t < spm_size else ""
-        clean = piece.replace("▁", "")
-        # Replace longer tokens (content words) with random tokens
-        if len(clean) > 2 and rng.random() < alien_rate:
-            result.append(rng.randint(1, spm_size - 1))
+    for group in word_groups:
+        text = sp.Decode(group)
+        if len(text.strip()) > 3 and rng.random() < alien_rate:
+            # Replace with random tokens of similar length
+            n = max(1, len(group))
+            result.append([rng.randint(1, spm_size - 1) for _ in range(n)])
         else:
-            result.append(t)
-    return result
+            result.append(group)
+    return _flatten_words(result)
 
 
 def build_scorer_dataset(
@@ -129,37 +167,41 @@ def build_scorer_dataset(
     all_tokens: list[list[int]] = []
     all_labels: list[int] = []
 
-    # Load sentences
-    logger.info("Loading sentences from %s...", jsonl_path)
-    sentences: list[list[int]] = []
+    # Load sentences as word groups — pure IPA, word-level operations.
+    logger.info("Loading IPA sentences from %s...", jsonl_path)
+    sentences: list[tuple[list[int], list[list[int]]]] = []  # (flat_tokens, word_groups)
     with open(jsonl_path) as f:
         for i, line in enumerate(f):
             if max_samples and len(sentences) >= max_samples:
                 break
             rec = json.loads(line)
             ipa = rec["ipa"]
-            tids = sp.Encode(ipa, out_type=int)
-            if 3 <= len(tids) <= max_seq_len:
-                sentences.append(tids)
+            words = _tokenize_words(ipa, sp)
+            flat = _flatten_words(words)
+            if 3 <= len(flat) <= max_seq_len and len(words) >= 3:
+                sentences.append((flat, words))
 
     logger.info("  %d sentences loaded", len(sentences))
 
-    for idx, tids in enumerate(sentences):
+    for idx, (tids, words) in enumerate(sentences):
         # Positive: original sentence
         all_tokens.append(tids)
         all_labels.append(1)
 
-        # Positive: alien vocabulary version
-        alien = _alienize_content(tids, sp, rng)
-        all_tokens.append(alien)
+        # Positive: alien vocabulary (structure preserved, content replaced)
+        all_tokens.append(_alienize_content(words, sp, rng))
         all_labels.append(1)
 
-        # Negative: shuffled word order
-        all_tokens.append(_corrupt_shuffle(tids, rng))
+        # Negative: word-order shuffle (intact words, broken arrangement)
+        all_tokens.append(_corrupt_word_shuffle(words, rng))
         all_labels.append(0)
 
         # Negative: repetition loop
         all_tokens.append(_corrupt_repeat(tids, rng))
+        all_labels.append(0)
+
+        # Negative: clause swap
+        all_tokens.append(_corrupt_clause_swap(words, rng))
         all_labels.append(0)
 
         # Negative: random truncation (50% chance)
@@ -167,15 +209,21 @@ def build_scorer_dataset(
             all_tokens.append(_corrupt_truncate(tids, rng))
             all_labels.append(0)
 
+        # Negative: word insertion from another sentence (50% chance)
+        if rng.random() < 0.5 and idx > 0:
+            donor = sentences[rng.randint(0, len(sentences) - 1)][1]
+            all_tokens.append(_corrupt_word_insert(words, donor, rng))
+            all_labels.append(0)
+
         # Negative: cross-sentence splice (50% chance)
         if rng.random() < 0.5 and idx > 0:
-            other = sentences[rng.randint(0, len(sentences) - 1)]
-            all_tokens.append(_corrupt_splice(tids, other, rng))
+            other_words = sentences[rng.randint(0, len(sentences) - 1)][1]
+            all_tokens.append(_corrupt_splice(words, other_words, rng))
             all_labels.append(0)
 
         # Negative: function word dropout (50% chance)
         if rng.random() < 0.5:
-            all_tokens.append(_corrupt_drop_function_words(tids, sp, rng))
+            all_tokens.append(_corrupt_drop_function_words(words, sp, rng))
             all_labels.append(0)
 
         if (idx + 1) % 100_000 == 0:

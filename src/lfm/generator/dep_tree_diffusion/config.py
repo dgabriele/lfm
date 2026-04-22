@@ -33,4 +33,8 @@ class DepTreeDiffusionConfig(DepTreeVAEConfig):
         default_factory=DiffusionDecoderConfig,
     )
 
+    # Completeness scorer — frozen discriminator for structural coherence
+    completeness_scorer_path: str = ""
+    completeness_weight: float = 0.1
+
     output_dir: str = "data/models/dep_tree_diffusion_v1"
