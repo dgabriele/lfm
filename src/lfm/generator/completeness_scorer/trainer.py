@@ -53,7 +53,7 @@ def train_scorer(
         correct = 0
         total = 0
 
-        for batch in train_loader:
+        for step, batch in enumerate(train_loader):
             tokens = batch["tokens"].to(device)
             lengths = batch["lengths"].to(device)
             labels = batch["labels"].to(device)
@@ -70,6 +70,13 @@ def train_scorer(
             preds = (scores > 0).float()
             correct += (preds == labels).sum().item()
             total += labels.size(0)
+
+            if step % 100 == 0:
+                batch_acc = (preds == labels).float().mean().item()
+                logger.info(
+                    "  ep%d step=%d  loss=%.4f  batch_acc=%.1f%%  running_acc=%.1f%%",
+                    epoch, step, loss.item(), batch_acc * 100, correct / max(total, 1) * 100,
+                )
 
         train_acc = correct / max(total, 1)
         train_loss = total_loss / max(total, 1)

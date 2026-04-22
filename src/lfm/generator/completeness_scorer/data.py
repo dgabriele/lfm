@@ -134,7 +134,7 @@ def build_scorer_dataset(
     sentences: list[list[int]] = []
     with open(jsonl_path) as f:
         for i, line in enumerate(f):
-            if len(sentences) >= max_samples:
+            if max_samples and len(sentences) >= max_samples:
                 break
             rec = json.loads(line)
             ipa = rec["ipa"]
