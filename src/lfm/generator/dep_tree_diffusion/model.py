@@ -35,6 +35,8 @@ class DiffusionVAEOutput:
     length_loss: Tensor
     kl_loss: Tensor
     dip_loss: Tensor
+    topo_rho: Tensor
+    topo_loss: Tensor
     disentangle: dict[str, Tensor]
     z_struct: Tensor
     z_content: Tensor
@@ -49,6 +51,7 @@ class DiffusionVAEOutput:
             + self.length_loss
             + self.kl_loss
             + self.dip_loss
+            + self.topo_loss
             + self.disentangle["total"]
         )
 
@@ -211,10 +214,43 @@ class DepTreeDiffusionVAE(nn.Module):
             off = cov - torch.diag(cov.diag())
             dip_loss = cfg.dip_weight * off.pow(2).sum() / z.size(1) ** 2
 
-        # 7. Disentanglement
-        role_bow = self._make_role_bow(role_ids, role_lengths, device)
-        content_bow = self._make_content_bow(tokens, lengths, device)
-        disent = self.disentanglement(z_struct, z_content, role_bow, content_bow)
+        # 7. Topology loss — z distances should preserve decoded-output distances.
+        # Decode at low noise (t≈0.1) to get near-clean output representations,
+        # pool them, and correlate pairwise distances with z-space distances.
+        topo_rho = torch.tensor(0.0, device=device)
+        topo_loss = torch.tensor(0.0, device=device)
+        if cfg.topo_weight > 0 and z.size(0) >= 4:
+            b_topo = z.size(0)
+            t_low = torch.full((b_topo, tokens.size(1)), 0.1, device=device)
+            x0_clean = self.diffusion_decoder.token_embedding(
+                tokens.clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
+            )
+            x_t_low, _ = self.diffusion_decoder.add_noise(x0_clean, t_low)
+            padding = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths.unsqueeze(1)
+            x0_pred = self.diffusion_decoder(
+                x_t_low, t_low, per_token_roles, depths, z_memory, padding,
+            )
+            # Pool decoded representation
+            valid = (~padding).unsqueeze(-1).float()
+            decoded_repr = (x0_pred * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+
+            # Pairwise distances in z-space and decoded-output space
+            idx = torch.triu_indices(b_topo, b_topo, offset=1, device=device)
+            z_dists = torch.cdist(z, z)[idx[0], idx[1]]
+            out_dists = torch.cdist(decoded_repr, decoded_repr)[idx[0], idx[1]]
+
+            if z_dists.numel() > 2:
+                zc = z_dists - z_dists.mean()
+                oc = out_dists - out_dists.mean()
+                denom = (zc.norm() * oc.norm()).clamp(min=1e-8)
+                topo_rho = (zc * oc).sum() / denom
+                topo_loss = cfg.topo_weight * (1.0 - topo_rho)
+
+        # 8. Disentanglement (disabled for diffusion — zeroed in config)
+        disent = self.disentanglement(z_struct, z_content,
+            self._make_role_bow(role_ids, role_lengths, device),
+            self._make_content_bow(tokens, lengths, device),
+        )
 
         return DiffusionVAEOutput(
             recon_loss=recon_loss,
@@ -222,6 +258,8 @@ class DepTreeDiffusionVAE(nn.Module):
             length_loss=length_loss,
             kl_loss=kl_loss,
             dip_loss=dip_loss,
+            topo_rho=topo_rho,
+            topo_loss=topo_loss,
             disentangle=disent,
             z_struct=z_struct,
             z_content=z_content,

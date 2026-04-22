@@ -33,6 +33,9 @@ class DepTreeDiffusionConfig(DepTreeVAEConfig):
         default_factory=DiffusionDecoderConfig,
     )
 
+    # Topology — z distances preserve decoded-output distances
+    topo_weight: float = 1.0
+
     # Completeness scorer — frozen discriminator for structural coherence
     completeness_scorer_path: str = ""
     completeness_weight: float = 0.1

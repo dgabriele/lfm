@@ -195,20 +195,20 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
                 if global_step % cfg.log_every == 0:
                     elapsed = time.time() - batch_start
                     z_std = (0.5 * out.logvar).exp().mean().item()
-                    len_str = f" len={out.length_loss.item():.3f}" if out.length_loss.item() > 0 else ""
+                    topo_str = f" topo={out.topo_rho.item():.3f}" if out.topo_rho.item() != 0 else ""
                     logger.info(
-                        "ep%d step=%d  recon=%.3f kl=%.3f "
-                        "disent=%.3f%s z_std=%.4f gnorm=%.2f lr=%.6f  [%.1fs]",
+                        "ep%d step=%d  recon=%.3f kl=%.3f%s "
+                        "z_std=%.4f gnorm=%.2f lr=%.6f  [%.1fs]",
                         epoch, global_step,
-                        out.recon_loss.item(),
-                        out.kl_loss.item(), out.disentangle["total"].item(),
-                        len_str, z_std, gnorm, scheduler.get_last_lr()[0], elapsed,
+                        out.recon_loss.item(), out.kl_loss.item(),
+                        topo_str, z_std, gnorm, scheduler.get_last_lr()[0], elapsed,
                     )
                     batch_start = time.time()
 
                 if global_step % cfg.checkpoint_every_steps == 0:
                     _save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, best_val_loss, out_dir)
                     _prior_diagnostic(model, sp, device, cfg)
+                    _downstream_diagnostic(model, sp, device, cfg)
 
             epoch_loss += out.total_loss.item()
             n_batches += 1
@@ -302,6 +302,117 @@ def _prior_diagnostic(
     )
     for j, s in enumerate(surfaces[:4]):
         logger.info("  prior[%d]: %s", j, s[:120])
+
+    model.train()
+
+
+@torch.no_grad()
+def _downstream_diagnostic(
+    model: DepTreeDiffusionVAE, sp, device: torch.device,
+    cfg: DepTreeDiffusionConfig, n_pairs: int = 16,
+) -> None:
+    """Test downstream viability: interpolation smoothness + discrimination.
+
+    1. Encode pairs of real sentences, interpolate z, decode at midpoint.
+       Measure: do interpolated outputs differ from endpoints?
+    2. Encode a batch, decode each, measure: do different z produce
+       distinguishably different output? (pairwise output diversity)
+    3. Log topology ρ: correlation between z-distances and output-distances.
+    """
+    global _diag_loader
+    from lfm.generator.dep_tree_diffusion.data import (
+        DiffusionDepTreeDataset, collate_diffusion,
+    )
+    from pathlib import Path as _P
+    import numpy as np
+
+    model.eval()
+
+    if _diag_loader is None:
+        cache_dir = _P(cfg.dataset_path) / "diffusion_cache"
+        ds = DiffusionDepTreeDataset(cache_dir)
+        _diag_loader = torch.utils.data.DataLoader(
+            ds, batch_size=n_pairs * 2, shuffle=True,
+            collate_fn=collate_diffusion, num_workers=0,
+        )
+
+    batch = next(iter(_diag_loader))
+    tokens = batch["tokens"].to(device)
+    lengths = batch["lengths"].to(device)
+    depths = batch["depths"].to(device)
+    b = tokens.size(0)
+
+    # Encode all
+    mu, _ = model.encoder(tokens, lengths)
+    per_token_roles = model._extract_per_token_roles(tokens, lengths)
+
+    # Decode each z
+    def _decode_z(z, ref_idx=0):
+        z_mem = model._z_to_memory(z.unsqueeze(0))
+        tok = model.diffusion_decoder.sample(
+            tokens[ref_idx:ref_idx+1].size(1),
+            per_token_roles[ref_idx:ref_idx+1],
+            depths[ref_idx:ref_idx+1],
+            z_mem, num_steps=8, depth_scale=1.0, min_noise=1.0,
+        )
+        ids = [int(t) for t in tok[0].tolist() if 0 < t < sp.GetPieceSize()]
+        return sp.DecodeIds(ids)
+
+    # 1. Interpolation test: pick 3 pairs, show endpoints + midpoint
+    logger.info("DOWNSTREAM DIAGNOSTIC:")
+    for i in range(min(3, n_pairs)):
+        a_idx, b_idx = i * 2, i * 2 + 1
+        z_a, z_b = mu[a_idx], mu[b_idx]
+        z_mid = 0.5 * z_a + 0.5 * z_b
+
+        text_a = _decode_z(z_a, a_idx)
+        text_mid = _decode_z(z_mid, a_idx)
+        text_b = _decode_z(z_b, a_idx)
+
+        from lfm.translator.romanize import respell
+        logger.info("  interp[%d] A:   %s", i, respell(text_a))
+        logger.info("  interp[%d] mid: %s", i, respell(text_mid))
+        logger.info("  interp[%d] B:   %s", i, respell(text_b))
+
+    # 2. Discrimination: decode N different z values, count unique outputs
+    decoded_set = set()
+    for i in range(min(b, 16)):
+        text = _decode_z(mu[i], i)
+        decoded_set.add(text)
+    unique_ratio = len(decoded_set) / min(b, 16)
+    logger.info("  discrimination: %d/%d unique decoded (%.0f%%)",
+                len(decoded_set), min(b, 16), unique_ratio * 100)
+
+    # 3. Topology: z-distance vs output-distance correlation
+    # Use mean logits as output representation (faster than full decode)
+    z_all = mu[:min(b, 16)]
+    decoded_reprs = []
+    for i in range(z_all.size(0)):
+        z_mem = model._z_to_memory(z_all[i:i+1])
+        t_low = torch.full((1, tokens.size(1)), 0.1, device=device)
+        x0 = model.diffusion_decoder.token_embedding(
+            tokens[i:i+1].clamp(max=model.diffusion_decoder.token_embedding.num_embeddings - 1)
+        )
+        x_t, _ = model.diffusion_decoder.add_noise(x0, t_low)
+        pad = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths[i:i+1].unsqueeze(1)
+        x0_p = model.diffusion_decoder(
+            x_t, t_low, per_token_roles[i:i+1], depths[i:i+1], z_mem, pad,
+        )
+        valid = (~pad).unsqueeze(-1).float()
+        pooled = (x0_p * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+        decoded_reprs.append(pooled)
+
+    decoded_reprs = torch.cat(decoded_reprs, dim=0)
+    idx = torch.triu_indices(z_all.size(0), z_all.size(0), offset=1, device=device)
+    z_d = torch.cdist(z_all, z_all)[idx[0], idx[1]]
+    o_d = torch.cdist(decoded_reprs, decoded_reprs)[idx[0], idx[1]]
+    if z_d.numel() > 2:
+        zc = z_d - z_d.mean()
+        oc = o_d - o_d.mean()
+        rho = (zc * oc).sum() / (zc.norm() * oc.norm()).clamp(min=1e-8)
+        logger.info("  topology ρ=%.4f (z-dist vs output-dist correlation)", rho.item())
+    else:
+        logger.info("  topology: insufficient samples")
 
     model.train()
 
