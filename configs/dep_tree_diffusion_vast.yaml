@@ -43,6 +43,10 @@ topo_weight: 1.0
 # Interpolation smoothness — midpoints between endpoints in output space
 interp_weight: 0.5
 
+# Entropy floor — prevents suffix-cycling at tail positions
+entropy_floor: 1.5
+entropy_weight: 0.05
+
 # Completeness scorer
 completeness_scorer_path: /workspace/lfm/data/models/completeness_scorer/best.pt
 completeness_weight: 0.1
@@ -77,8 +81,8 @@ word_dropout_min: 0.05
 word_dropout_anneal_epochs: 3
 
 # Training — RTX 3090 (24GB)
-batch_size: 128
-gradient_accumulation_steps: 1
+batch_size: 96
+gradient_accumulation_steps: 2
 lr: 0.0005
 lr_min: 0.0001
 num_epochs: 5

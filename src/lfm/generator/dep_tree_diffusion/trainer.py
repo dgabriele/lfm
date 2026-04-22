@@ -358,21 +358,42 @@ def _downstream_diagnostic(
         ids = [int(t) for t in tok[0].tolist() if 0 < t < sp.GetPieceSize()]
         return sp.DecodeIds(ids)
 
-    # 1. Interpolation test: pick 3 pairs, show endpoints + midpoint
+    from lfm.translator.romanize import respell
+    struct_dim = cfg.latent.struct_dim
+
     logger.info("DOWNSTREAM DIAGNOSTIC:")
-    for i in range(min(3, n_pairs)):
+
+    # 1a. Structure interpolation (content held constant)
+    for i in range(min(2, n_pairs)):
         a_idx, b_idx = i * 2, i * 2 + 1
         z_a, z_b = mu[a_idx], mu[b_idx]
-        z_mid = 0.5 * z_a + 0.5 * z_b
 
-        text_a = _decode_z(z_a, a_idx)
-        text_mid = _decode_z(z_mid, a_idx)
-        text_b = _decode_z(z_b, a_idx)
+        z_a_struct, z_a_content = z_a[:struct_dim], z_a[struct_dim:]
+        z_b_struct = z_b[:struct_dim]
 
-        from lfm.translator.romanize import respell
-        logger.info("  interp[%d] A:   %s", i, respell(text_a))
-        logger.info("  interp[%d] mid: %s", i, respell(text_mid))
-        logger.info("  interp[%d] B:   %s", i, respell(text_b))
+        z_start = z_a
+        z_mid = torch.cat([0.5 * z_a_struct + 0.5 * z_b_struct, z_a_content])
+        z_end = torch.cat([z_b_struct, z_a_content])
+
+        logger.info("  struct_interp[%d] A:   %s", i, respell(_decode_z(z_start, a_idx)))
+        logger.info("  struct_interp[%d] mid: %s", i, respell(_decode_z(z_mid, a_idx)))
+        logger.info("  struct_interp[%d] B:   %s", i, respell(_decode_z(z_end, a_idx)))
+
+    # 1b. Content interpolation (structure held constant)
+    for i in range(min(2, n_pairs)):
+        a_idx, b_idx = i * 2, i * 2 + 1
+        z_a, z_b = mu[a_idx], mu[b_idx]
+
+        z_a_struct = z_a[:struct_dim]
+        z_a_content, z_b_content = z_a[struct_dim:], z_b[struct_dim:]
+
+        z_start = z_a
+        z_mid = torch.cat([z_a_struct, 0.5 * z_a_content + 0.5 * z_b_content])
+        z_end = torch.cat([z_a_struct, z_b_content])
+
+        logger.info("  content_interp[%d] A:   %s", i, respell(_decode_z(z_start, a_idx)))
+        logger.info("  content_interp[%d] mid: %s", i, respell(_decode_z(z_mid, a_idx)))
+        logger.info("  content_interp[%d] B:   %s", i, respell(_decode_z(z_end, a_idx)))
 
     # 2. Discrimination: decode N different z values, count unique outputs
     decoded_set = set()

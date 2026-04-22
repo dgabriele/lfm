@@ -40,6 +40,14 @@ class DepTreeDiffusionConfig(DepTreeVAEConfig):
     # between the endpoints' decoded outputs, not in a random direction
     interp_weight: float = 0.5
 
+    # Entropy floor — prevents vocabulary collapse at tail positions
+    # where the model cycles through a small pool of affixes.
+    # Only penalizes positions with entropy below the threshold.
+    # Normal function words (and, of, the) have moderate entropy;
+    # degenerate suffix cycling has very low entropy.
+    entropy_floor: float = 1.5  # nats (~4-5 plausible tokens minimum)
+    entropy_weight: float = 0.05
+
     # Completeness scorer — frozen discriminator for structural coherence
     completeness_scorer_path: str = ""
     completeness_weight: float = 0.1

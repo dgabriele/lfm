@@ -44,6 +44,7 @@ class DiffusionVAEOutput:
     logvar: Tensor
 
     interp_loss: Tensor = torch.tensor(0.0)
+    entropy_loss: Tensor = torch.tensor(0.0)
 
     @property
     def total_loss(self) -> Tensor:
@@ -55,6 +56,7 @@ class DiffusionVAEOutput:
             + self.dip_loss
             + self.topo_loss
             + self.interp_loss
+            + self.entropy_loss
             + self.disentangle["total"]
         )
 
@@ -281,7 +283,31 @@ class DepTreeDiffusionVAE(nn.Module):
 
             interp_loss = cfg.interp_weight * F.mse_loss(repr_mid, expected_mid)
 
-        # 9. Disentanglement (disabled for diffusion — zeroed in config)
+        # 9. Entropy floor — prevent vocabulary collapse at tail positions.
+        # Computed on the decoder's predicted logits from the recon forward
+        # pass (reuse x0_pred from _diffusion_loss via a low-noise pass).
+        entropy_loss = torch.tensor(0.0, device=device)
+        if cfg.entropy_weight > 0:
+            # Quick low-noise forward to get logits
+            t_ent = torch.full((tokens.size(0), tokens.size(1)), 0.1, device=device)
+            x0_ent = self.diffusion_decoder.token_embedding(
+                tokens.clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
+            )
+            x_t_ent, _ = self.diffusion_decoder.add_noise(x0_ent, t_ent)
+            padding_ent = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths.unsqueeze(1)
+            x0_pred_ent = self.diffusion_decoder(
+                x_t_ent, t_ent, per_token_roles, depths, z_memory, padding_ent,
+            )
+            logits_ent = self.diffusion_decoder.output_head(x0_pred_ent)
+            log_probs = torch.log_softmax(logits_ent, dim=-1)
+            probs = log_probs.exp()
+            per_pos_entropy = -(probs * log_probs).sum(dim=-1)  # (B, S)
+            # Only penalize positions below the floor, ignore padding
+            valid_ent = ~padding_ent
+            shortfall = torch.clamp(cfg.entropy_floor - per_pos_entropy, min=0)
+            entropy_loss = cfg.entropy_weight * (shortfall * valid_ent.float()).sum() / valid_ent.float().sum().clamp(min=1)
+
+        # 10. Disentanglement (disabled for diffusion — zeroed in config)
         disent = self.disentanglement(z_struct, z_content,
             self._make_role_bow(role_ids, role_lengths, device),
             self._make_content_bow(tokens, lengths, device),
@@ -296,6 +322,7 @@ class DepTreeDiffusionVAE(nn.Module):
             topo_rho=topo_rho,
             topo_loss=topo_loss,
             interp_loss=interp_loss,
+            entropy_loss=entropy_loss,
             disentangle=disent,
             z_struct=z_struct,
             z_content=z_content,
