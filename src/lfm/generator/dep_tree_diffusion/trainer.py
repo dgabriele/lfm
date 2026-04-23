@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import signal
 import sys
 import time
@@ -78,14 +79,6 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
         n_params, n_params / 1e6, device,
     )
 
-    # Compile the diffusion decoder for kernel fusion + reduced overhead
-    if hasattr(torch, "compile"):
-        try:
-            model.diffusion_decoder = torch.compile(model.diffusion_decoder)
-            logger.info("torch.compile applied to diffusion decoder")
-        except Exception as e:
-            logger.warning("torch.compile failed, continuing without: %s", e)
-
     param_groups = model.trainable_parameters()
     optimizer = AdamW(
         [{"params": g["params"], "lr": cfg.lr} for g in param_groups],
@@ -126,6 +119,14 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
         global_step = ckpt.get("global_step", 0)
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         logger.info("Resumed from epoch=%d step=%d best_val=%.4f", start_epoch, global_step, best_val_loss)
+
+    # torch.compile — enable via env var COMPILE_DECODER=1 on images with gcc
+    if os.environ.get("COMPILE_DECODER") == "1" and hasattr(torch, "compile"):
+        try:
+            model.diffusion_decoder = torch.compile(model.diffusion_decoder)
+            logger.info("torch.compile applied to diffusion decoder")
+        except Exception as e:
+            logger.warning("torch.compile failed: %s", e)
 
     accum = cfg.gradient_accumulation_steps
 
@@ -481,8 +482,11 @@ def _downstream_diagnostic(
 
 
 def _save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, best_val_loss, out_dir):
+    # Strip _orig_mod. prefix from torch.compile wrapped modules
+    state = model.state_dict()
+    state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
     ckpt = {
-        "model_state": model.state_dict(),
+        "model_state": state,
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict(),
         "scaler_state": scaler.state_dict(),
