@@ -172,7 +172,7 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
                         )
                         x_t, _ = model.diffusion_decoder.add_noise(x0, t_low.unsqueeze(1).expand_as(depths_b))
                         per_token_roles = model._extract_per_token_roles(batch["tokens"], batch["lengths"])
-                        z_mem = model._z_to_role_memory(out.z_content, per_token_roles)
+                        z_mem = model._z_to_memory(torch.cat([out.z_struct, out.z_content], dim=-1))
                         padding = torch.arange(batch["tokens"].size(1), device=device).unsqueeze(0) >= batch["lengths"].unsqueeze(1)
                         x0_pred = model.diffusion_decoder(
                             x_t, t_low.unsqueeze(1).expand_as(depths_b),
@@ -287,10 +287,9 @@ def _prior_diagnostic(
     # Extract per-token roles from real data
     per_token_roles = model._extract_per_token_roles(real_tokens[:b], real_lengths[:b])
 
-    # Sample z from prior, project to per-role memory
+    # Sample z from prior, project to memory
     z = torch.randn(b, cfg.latent.total_dim, device=device)
-    z_content = z[:, cfg.latent.struct_dim:]
-    z_memory = model._z_to_role_memory(z_content, per_token_roles)
+    z_memory = model._z_to_memory(z)
 
     # Generate via diffusion using real structure + prior z
     seq_len = real_tokens.size(1)
@@ -366,14 +365,11 @@ def _downstream_diagnostic(
     per_token_roles = model._extract_per_token_roles(tokens, lengths)
 
     # Decode each z
-    struct_dim = cfg.latent.struct_dim
     def _decode_z(z, ref_idx=0):
-        zc = z[struct_dim:].unsqueeze(0)
-        roles_ref = per_token_roles[ref_idx:ref_idx+1]
-        z_mem = model._z_to_role_memory(zc, roles_ref)
+        z_mem = model._z_to_memory(z.unsqueeze(0))
         tok = model.diffusion_decoder.sample(
             tokens[ref_idx:ref_idx+1].size(1),
-            roles_ref,
+            per_token_roles[ref_idx:ref_idx+1],
             depths[ref_idx:ref_idx+1],
             z_mem,
             num_steps=cfg.diffusion.num_diffusion_steps,
@@ -443,7 +439,7 @@ def _downstream_diagnostic(
     z_all = mu[:min(b, 16)]
     decoded_reprs = []
     for i in range(z_all.size(0)):
-        z_mem = model._z_to_role_memory(z_all[i:i+1, struct_dim:], per_token_roles[i:i+1])
+        z_mem = model._z_to_memory(z_all[i:i+1])
         t_low = torch.full((1, tokens.size(1)), 0.1, device=device)
         x0 = model.diffusion_decoder.token_embedding(
             tokens[i:i+1].clamp(max=model.diffusion_decoder.token_embedding.num_embeddings - 1)
