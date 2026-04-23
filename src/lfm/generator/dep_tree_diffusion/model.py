@@ -112,10 +112,9 @@ class DepTreeDiffusionVAE(nn.Module):
             max_word_position=dcfg.max_word_position,
         )
 
-        # Z → memory projection (full z, not split)
-        dcfg = cfg.diffusion
-        self._num_mem_tokens = dcfg.num_memory_tokens
-        self._z_to_mem_proj = nn.Linear(cfg.latent.total_dim, dcfg.d_model * self._num_mem_tokens)
+        # Per-role z memory (replaces global z→N token projection)
+        # PhraseZProjector produces (B, R, d_model) — one clean memory
+        # vector per role. Each token cross-attends to its role's vector.
 
         # Per-role length predictor
         self.length_predictor = RoleLengthPredictor(
@@ -182,11 +181,11 @@ class DepTreeDiffusionVAE(nn.Module):
                 self._z_content_mean.lerp_(z_content.mean(dim=0), m)
                 self._z_content_std.lerp_(z_content.std(dim=0).clamp(min=1e-6), m)
 
-        # 3. Z → memory for cross-attention (project full z, not just z_content)
-        z_memory = self._z_to_memory(z)  # (B, num_mem, H)
+        # 3. Per-role z memory for cross-attention
+        per_token_roles = self._extract_per_token_roles(tokens, lengths)
+        z_memory = self._z_to_role_memory(z_content, per_token_roles)
 
         # 4. Diffusion loss on full interleaved sequence (roles + content)
-        per_token_roles = self._extract_per_token_roles(tokens, lengths)
         recon_loss = self._diffusion_loss(
             tokens, lengths, per_token_roles, depths, z_memory,
         )
@@ -278,9 +277,11 @@ class DepTreeDiffusionVAE(nn.Module):
             wp_i = self.diffusion_decoder.compute_word_positions(
                 tokens[:n_pairs], self._role_offset,
             )
+            struct_dim = cfg.latent.struct_dim
 
             def _pool_decode(z_vec):
-                mem = self._z_to_memory(z_vec)
+                zc = z_vec[:, struct_dim:]
+                mem = self._z_to_role_memory(zc, roles_i)
                 x_t, _ = self.diffusion_decoder.add_noise(x0_i, t_low_i)
                 pred = self.diffusion_decoder(x_t, t_low_i, roles_i, depths_i, mem, pad_i,
                                               word_positions=wp_i)
@@ -344,10 +345,51 @@ class DepTreeDiffusionVAE(nn.Module):
             logvar=logvar,
         )
 
-    def _z_to_memory(self, z: Tensor) -> Tensor:
-        """Project full z to cross-attention memory tokens."""
-        b = z.size(0)
-        return self._z_to_mem_proj(z).reshape(b, self._num_mem_tokens, -1)
+    def _z_to_role_memory(
+        self, z_content: Tensor, per_token_roles: Tensor,
+    ) -> Tensor:
+        """Produce per-token cross-attention memory from per-role z projections.
+
+        Each token gets its role's dedicated z vector as cross-attention
+        memory — clean signal re-injected at every denoiser layer.
+
+        Args:
+            z_content: (B, content_dim) content latent.
+            per_token_roles: (B, S) role ID per token position.
+
+        Returns:
+            memory: (B, S, d_model) per-token memory for cross-attention.
+        """
+        b, s = per_token_roles.shape
+        device = per_token_roles.device
+
+        # Get unique role sequence for PhraseZProjector
+        # Use per_token_roles to build a role sequence (max R roles)
+        max_roles = self.cfg.skeleton.max_roles
+        role_ids = per_token_roles[:, :max_roles]
+        role_mask = torch.ones(b, role_ids.size(1), dtype=torch.bool, device=device)
+
+        # Project z_content → per-role memory (B, R, d_model)
+        role_memory = self.phrase_projector(z_content, role_ids, role_mask)
+
+        # Expand to per-token: each token gets its role's memory
+        # Map per_token_roles → index into role_memory
+        # Build group mapping: which role group does each position belong to?
+        is_role = per_token_roles != per_token_roles  # dummy, need actual group index
+        # Use cumulative role changes to get group index
+        changes = torch.cat([
+            torch.ones(b, 1, dtype=torch.bool, device=device),
+            per_token_roles[:, 1:] != per_token_roles[:, :-1],
+        ], dim=1)
+        group_idx = changes.long().cumsum(dim=1) - 1
+        group_idx = group_idx.clamp(max=role_memory.size(1) - 1)
+
+        # Gather per-token memory from role memory
+        # role_memory: (B, R, H), group_idx: (B, S) → memory: (B, S, H)
+        expanded_idx = group_idx.unsqueeze(-1).expand(-1, -1, role_memory.size(-1))
+        per_token_memory = role_memory.gather(1, expanded_idx)
+
+        return per_token_memory
 
     def _extract_per_token_roles(self, tokens: Tensor, lengths: Tensor) -> Tensor:
         """Forward-fill role IDs across content tokens in interleaved sequence."""
