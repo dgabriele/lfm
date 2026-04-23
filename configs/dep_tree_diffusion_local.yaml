@@ -41,7 +41,7 @@ diffusion:
   max_tokens_per_role: 6
   depth_scale: 1.0
   min_noise: 0.5  # 0.5 = tree-structured (early positions resolve first); 1.0 = uniform
-  num_memory_tokens: 8
+  num_memory_tokens: 4
 
 # Disentanglement — disabled for diffusion decoder (handles full sequence)
 disentanglement:
@@ -70,8 +70,8 @@ interp_weight: 0.5
 completeness_scorer_path: data/models/completeness_scorer/best.pt
 completeness_weight: 0.1
 
-kl_weight: 0.1
-kl_free_bits: 0.5
+kl_weight: 0.2
+kl_free_bits: 0.1
 kl_warmup_steps: 5000
 dip_weight: 0.0
 z_var_weight: 5.0

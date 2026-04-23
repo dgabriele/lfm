@@ -70,8 +70,8 @@ disentanglement:
   gradient_reversal_scale: 0.0
   hsic_weight: 0.0
 
-kl_weight: 0.1
-kl_free_bits: 0.5
+kl_weight: 0.2
+kl_free_bits: 0.1
 kl_warmup_steps: 5000
 dip_weight: 0.0
 z_var_weight: 5.0
