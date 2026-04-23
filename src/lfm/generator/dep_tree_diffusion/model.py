@@ -262,9 +262,10 @@ class DepTreeDiffusionVAE(nn.Module):
                 shortfall = torch.clamp(cfg.entropy_floor - per_pos_entropy, min=0)
                 entropy_loss = cfg.entropy_weight * (shortfall * valid_ent.float()).sum() / valid_ent.float().sum().clamp(min=1)
 
-        # 8. Interpolation smoothness
+        # 8. Interpolation smoothness (every 4th step to save 3 decoder forwards)
         interp_loss = torch.tensor(0.0, device=device)
-        if cfg.interp_weight > 0 and z.size(0) >= 4:
+        global_step = kwargs.get("global_step", 0)
+        if cfg.interp_weight > 0 and z.size(0) >= 4 and global_step % 4 == 0:
             n_pairs = z.size(0) // 2
             z_a = z[:n_pairs]
             z_b = z[n_pairs:2 * n_pairs]

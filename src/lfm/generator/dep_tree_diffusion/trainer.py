@@ -151,6 +151,7 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
                     role_lengths=batch["role_lengths"],
                     kl_weight=kl_weight,
                     role_token_counts=batch["role_token_counts"],
+                    global_step=global_step,
                 )
 
                 z_var_loss = torch.tensor(0.0, device=device)
