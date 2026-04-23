@@ -70,6 +70,8 @@ def filter_sentence(text: str, min_words: int = 5, max_words: int = 30) -> bool:
         return False
     if RE_QUOTED.search(text):
         return False
+    if "-" in text:
+        return False
     # Must start with a letter (not bullet, semicolon, number, etc.)
     if not text[0].isalpha():
         return False
@@ -162,6 +164,9 @@ def ipa_convert_batch(
     for sent, source_key in sentences:
         try:
             ipa = epi.transliterate(sent)
+            # Strip hyphens — they're non-linguistic artifacts that corrupt
+            # the phonetic model (9% of English data had them)
+            ipa = ipa.replace("-", " ").replace("  ", " ").strip()
             if ipa and len(ipa.split()) == len(sent.split()):
                 results.append((sent, ipa, source_key))
             else:

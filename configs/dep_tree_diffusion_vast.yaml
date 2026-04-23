@@ -37,6 +37,7 @@ diffusion:
   max_tokens_per_role: 6
   depth_scale: 1.0
   min_noise: 0.5
+  num_memory_tokens: 8
 
 # Topology — z distances preserve decoded-output distances
 topo_weight: 1.0
