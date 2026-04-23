@@ -231,6 +231,7 @@ class TreeDiffusionDecoder(nn.Module):
         self.timestep_embedding = TimestepEmbedding(d_model)
 
         self.input_proj = nn.Linear(d_model, d_model)
+        self.self_cond_proj = nn.Linear(d_model, d_model)
 
         self.layers = nn.ModuleList([
             TreeDenoiserBlock(d_model, num_heads, dropout)
@@ -327,6 +328,7 @@ class TreeDiffusionDecoder(nn.Module):
         memory: Tensor,
         padding_mask: Tensor | None = None,
         word_positions: Tensor | None = None,
+        self_cond: Tensor | None = None,
     ) -> Tensor:
         """Predict clean token embeddings from noisy input.
 
@@ -338,6 +340,7 @@ class TreeDiffusionDecoder(nn.Module):
             memory: (B, R, H) z_content role memory.
             padding_mask: (B, S) True = padded position.
             word_positions: (B, S) position within word (0=boundary).
+            self_cond: (B, S, H) previous step's x0 prediction (detached).
 
         Returns:
             x0_pred: (B, S, H) predicted clean embeddings.
@@ -353,6 +356,8 @@ class TreeDiffusionDecoder(nn.Module):
         h = h + self.pos_embedding(pos_ids.clamp(max=self.pos_embedding.num_embeddings - 1))
         if word_positions is not None:
             h = h + self.word_pos_embedding(word_positions.clamp(max=self.max_word_pos))
+        if self_cond is not None:
+            h = h + self.self_cond_proj(self_cond)
 
         # Per-position timestep embedding
         t_emb = self.timestep_embedding(t_per_pos)  # (B, S, H)
@@ -394,13 +399,18 @@ class TreeDiffusionDecoder(nn.Module):
         word_positions = self.word_positions_from_roles(role_ids)
         word_positions = word_positions.clamp(max=self.max_word_pos)
 
+        # Self-conditioning: chain x0 predictions across steps
+        x0_prev = None
+
         # Reverse diffusion: t goes from 1 → 0
         for step in range(num_steps):
             t_global = torch.full((b,), 1.0 - step / num_steps, device=device)
             t_per_pos = self.tree_noise_schedule(t_global, depths, depth_scale, min_noise)
 
             x0_pred = self(x_t, t_per_pos, role_ids, depths, memory, padding_mask,
-                           word_positions=word_positions)
+                           word_positions=word_positions, self_cond=x0_prev)
+
+            x0_prev = x0_pred
 
             # Update word positions from predicted tokens
             if role_offset is not None and step < num_steps - 1:

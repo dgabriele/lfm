@@ -385,10 +385,20 @@ class DepTreeDiffusionVAE(nn.Module):
             tokens, self._role_offset,
         )
 
+        # Self-conditioning: 50% of the time, run a detached forward first
+        self_cond = None
+        if self.training and torch.rand(1).item() < 0.5:
+            with torch.no_grad():
+                self_cond = self.diffusion_decoder(
+                    x_t, t_per_pos, per_token_roles, depths,
+                    z_memory, padding_mask, word_positions=word_positions,
+                ).detach()
+
         # Predict clean embeddings
         x0_pred = self.diffusion_decoder(
             x_t, t_per_pos, per_token_roles, depths,
             z_memory, padding_mask, word_positions=word_positions,
+            self_cond=self_cond,
         )
 
         # CE loss on predicted tokens
