@@ -373,6 +373,7 @@ class DepTreeDiffusionVAE(nn.Module):
         # Per-position noise from tree depth
         t_per_pos = self.diffusion_decoder.tree_noise_schedule(
             t_global, depths, self.cfg.diffusion.depth_scale, self.cfg.diffusion.min_noise,
+            invert=self.cfg.diffusion.invert_depth_noise,
         )
 
         # Corrupt content tokens only — role markers stay clean

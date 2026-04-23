@@ -300,6 +300,7 @@ def _prior_diagnostic(
         depth_scale=cfg.diffusion.depth_scale,
         min_noise=cfg.diffusion.min_noise,
         role_offset=model._role_offset,
+        invert_depth_noise=cfg.diffusion.invert_depth_noise,
         ref_tokens=real_tokens[:b],
     )
 

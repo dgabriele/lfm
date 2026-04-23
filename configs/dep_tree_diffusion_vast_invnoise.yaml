@@ -1,0 +1,99 @@
+# DepTree Diffusion VAE — vast.ai RTX 3090 (24GB)
+# Inverted noise: deep positions get LESS noise (resolve first).
+# Hypothesis: deep positions are simpler (1-2 token modifiers),
+# so they should resolve early, not late.
+
+model_type: dep_tree_diffusion
+
+dataset_path: /workspace/lfm/data/datasets/english-dep-trees-v16
+spm_model_path: /workspace/lfm/data/models/v15b_ipa/spm.model
+output_dir: /workspace/lfm/data/models/dep_tree_diffusion_v1_invnoise
+
+spm_vocab_size: 8000
+max_seq_len: 160
+
+encoder_hidden_dim: 512
+encoder_num_layers: 2
+encoder_num_heads: 8
+encoder_dropout: 0.1
+
+latent:
+  total_dim: 256
+  struct_dim: 64
+  content_dim: 192
+
+skeleton:
+  mode: parallel
+  hidden_dim: 128
+  max_roles: 40
+  num_layers: 2
+  num_heads: 4
+  dropout: 0.1
+
+diffusion:
+  d_model: 512
+  num_layers: 6
+  num_heads: 8
+  dropout: 0.1
+  num_diffusion_steps: 8
+  max_tokens_per_role: 6
+  depth_scale: 1.0
+  min_noise: 0.5
+  num_memory_tokens: 8
+  invert_depth_noise: true
+
+# Topology — z distances preserve decoded-output distances
+topo_weight: 1.0
+# Interpolation smoothness — midpoints between endpoints in output space
+interp_weight: 0.5
+
+# Entropy floor — prevents suffix-cycling at tail positions
+entropy_floor: 2.0
+entropy_weight: 0.1
+
+# Completeness scorer
+completeness_scorer_path: /workspace/lfm/data/models/completeness_scorer/best.pt
+completeness_weight: 0.1
+
+# Unused AR decoder fields (required by base config)
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+freeze_decoder: false
+
+disentanglement:
+  struct_cls_weight: 0.0
+  content_bow_weight: 0.0
+  adversarial_weight: 0.0
+  gradient_reversal_scale: 0.0
+  hsic_weight: 0.0
+
+kl_weight: 0.2
+kl_free_bits: 0.1
+kl_warmup_steps: 5000
+dip_weight: 0.0
+z_var_weight: 5.0
+z_var_target: 0.05
+word_dropout: 0.3
+word_dropout_min: 0.05
+word_dropout_anneal_epochs: 3
+
+# Training — RTX 3090 (24GB), ~4-5GB headroom target
+batch_size: 64
+gradient_accumulation_steps: 3
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 5
+use_amp: true
+seed: 42
+device: cuda
+
+log_every: 50
+checkpoint_every_steps: 1000
+val_fraction: 0.02

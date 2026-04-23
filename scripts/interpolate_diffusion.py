@@ -41,17 +41,25 @@ def main():
     parser.add_argument("--spm-path", default="data/models/v15b_ipa/spm.model")
     parser.add_argument("--n-pairs", type=int, default=5)
     parser.add_argument("--steps", type=int, default=5, help="interpolation steps")
+    parser.add_argument("--config", default=None, help="YAML config file")
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
 
     device = torch.device(args.device)
 
-    cfg = DepTreeDiffusionConfig(
-        dataset_path=args.dataset,
-        spm_model_path=args.spm_path,
-        max_seq_len=160,
-        completeness_scorer_path="",
-    )
+    if args.config:
+        import yaml
+        with open(args.config) as f:
+            raw = yaml.safe_load(f)
+        raw.pop("model_type", None)
+        cfg = DepTreeDiffusionConfig(**raw)
+    else:
+        cfg = DepTreeDiffusionConfig(
+            dataset_path=args.dataset,
+            spm_model_path=args.spm_path,
+            max_seq_len=160,
+            completeness_scorer_path="",
+        )
 
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     model = DepTreeDiffusionVAE(cfg, 8050)

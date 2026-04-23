@@ -21,6 +21,7 @@ class DiffusionDecoderConfig(LFMBaseConfig):
     min_noise: float = 0.3
     max_word_position: int = 8
     num_memory_tokens: int = 4
+    invert_depth_noise: bool = False
 
 
 class DepTreeDiffusionConfig(DepTreeVAEConfig):

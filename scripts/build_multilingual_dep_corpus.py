@@ -206,11 +206,25 @@ def dep_parse_and_write(
     )
     logger.info("  Stanza %s pipeline loaded", stanza_code)
 
-    parsed = 0
     failed = 0
     t0 = time.time()
 
-    with open(out_path, "w") as f:
+    # Resume support: skip already-processed sentences
+    existing = 0
+    if out_path.exists():
+        with open(out_path) as ef:
+            existing = sum(1 for _ in ef)
+        if existing > 0:
+            logger.info("  Resuming: %d sentences already exist, skipping...", existing)
+            # Skip the corresponding triples (approximate: 1 triple ≈ 1 output line)
+            triples = triples[existing:]
+            if not triples:
+                logger.info("  Target already reached!")
+                return existing
+
+    mode = "a" if existing > 0 else "w"
+    parsed = existing
+    with open(out_path, mode) as f:
         for i in range(0, len(triples), batch_size):
             batch = triples[i : i + batch_size]
             originals = [orig for orig, _, _ in batch]
