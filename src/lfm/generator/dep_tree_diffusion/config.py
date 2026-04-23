@@ -19,6 +19,8 @@ class DiffusionDecoderConfig(LFMBaseConfig):
     max_tokens_per_role: int = 6
     depth_scale: float = 1.0
     min_noise: float = 0.3
+    max_word_position: int = 8
+    num_memory_tokens: int = 4
 
 
 class DepTreeDiffusionConfig(DepTreeVAEConfig):

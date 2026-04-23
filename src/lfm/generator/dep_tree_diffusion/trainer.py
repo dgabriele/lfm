@@ -99,13 +99,21 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
     resume_path = out_dir / "resume.pt"
     if resume_path.exists():
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model_state"])
-        optimizer.load_state_dict(ckpt["optimizer_state"])
+        missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
+        if missing:
+            logger.info("New parameters (randomly initialized): %s", missing)
+        try:
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+        except (ValueError, RuntimeError) as e:
+            logger.warning("Optimizer state incompatible (new params?), resetting: %s", e)
         # Update optimizer LR to match config (may have changed)
         for pg in optimizer.param_groups:
             pg["lr"] = cfg.lr
         scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=cfg.lr_min)
-        scaler.load_state_dict(ckpt["scaler_state"])
+        try:
+            scaler.load_state_dict(ckpt["scaler_state"])
+        except RuntimeError:
+            pass
         start_epoch = ckpt.get("epoch", 0)
         global_step = ckpt.get("global_step", 0)
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
@@ -207,8 +215,16 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
 
                 if global_step % cfg.checkpoint_every_steps == 0:
                     _save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, best_val_loss, out_dir)
-                    _prior_diagnostic(model, sp, device, cfg)
-                    _downstream_diagnostic(model, sp, device, cfg)
+                    torch.cuda.empty_cache()
+                    try:
+                        _prior_diagnostic(model, sp, device, cfg)
+                        _downstream_diagnostic(model, sp, device, cfg)
+                    except RuntimeError as e:
+                        if "out of memory" in str(e):
+                            logger.warning("OOM during diagnostics — skipping (step=%d)", global_step)
+                            torch.cuda.empty_cache()
+                        else:
+                            raise
 
             epoch_loss += out.total_loss.item()
             n_batches += 1
@@ -236,7 +252,7 @@ _diag_loader = None
 @torch.no_grad()
 def _prior_diagnostic(
     model: DepTreeDiffusionVAE, sp, device: torch.device,
-    cfg: DepTreeDiffusionConfig, n_samples: int = 32,
+    cfg: DepTreeDiffusionConfig, n_samples: int = 16,
 ) -> None:
     """Sample z ~ N(0,1) but use real skeletons/depths from training data.
 
@@ -281,6 +297,8 @@ def _prior_diagnostic(
         seq_len, per_token_roles[:b], real_depths[:b], z_memory,
         num_steps=cfg.diffusion.num_diffusion_steps,
         depth_scale=cfg.diffusion.depth_scale,
+        min_noise=cfg.diffusion.min_noise,
+        role_offset=model._role_offset,
     )
 
     surfaces = []
@@ -309,7 +327,7 @@ def _prior_diagnostic(
 @torch.no_grad()
 def _downstream_diagnostic(
     model: DepTreeDiffusionVAE, sp, device: torch.device,
-    cfg: DepTreeDiffusionConfig, n_pairs: int = 16,
+    cfg: DepTreeDiffusionConfig, n_pairs: int = 8,
 ) -> None:
     """Test downstream viability: interpolation smoothness + discrimination.
 
@@ -353,7 +371,11 @@ def _downstream_diagnostic(
             tokens[ref_idx:ref_idx+1].size(1),
             per_token_roles[ref_idx:ref_idx+1],
             depths[ref_idx:ref_idx+1],
-            z_mem, num_steps=8, depth_scale=1.0, min_noise=1.0,
+            z_mem,
+            num_steps=cfg.diffusion.num_diffusion_steps,
+            depth_scale=cfg.diffusion.depth_scale,
+            min_noise=cfg.diffusion.min_noise,
+            role_offset=model._role_offset,
         )
         ids = [int(t) for t in tok[0].tolist() if 0 < t < sp.GetPieceSize()]
         return sp.DecodeIds(ids)
@@ -363,14 +385,16 @@ def _downstream_diagnostic(
 
     logger.info("DOWNSTREAM DIAGNOSTIC:")
 
-    # 1a. Structure interpolation (content held constant)
+    # 1a. Posterior interpolation — between encoded real sentences
+    logger.info("  POSTERIOR INTERPOLATION (encoded data centroids):")
     for i in range(min(2, n_pairs)):
         a_idx, b_idx = i * 2, i * 2 + 1
         z_a, z_b = mu[a_idx], mu[b_idx]
 
         z_a_struct, z_a_content = z_a[:struct_dim], z_a[struct_dim:]
-        z_b_struct = z_b[:struct_dim]
+        z_b_struct, z_b_content = z_b[:struct_dim], z_b[struct_dim:]
 
+        # Structure interpolation (content held constant from A)
         z_start = z_a
         z_mid = torch.cat([0.5 * z_a_struct + 0.5 * z_b_struct, z_a_content])
         z_end = torch.cat([z_b_struct, z_a_content])
@@ -379,14 +403,7 @@ def _downstream_diagnostic(
         logger.info("  struct_interp[%d] mid: %s", i, respell(_decode_z(z_mid, a_idx)))
         logger.info("  struct_interp[%d] B:   %s", i, respell(_decode_z(z_end, a_idx)))
 
-    # 1b. Content interpolation (structure held constant)
-    for i in range(min(2, n_pairs)):
-        a_idx, b_idx = i * 2, i * 2 + 1
-        z_a, z_b = mu[a_idx], mu[b_idx]
-
-        z_a_struct = z_a[:struct_dim]
-        z_a_content, z_b_content = z_a[struct_dim:], z_b[struct_dim:]
-
+        # Content interpolation (structure held constant from A)
         z_start = z_a
         z_mid = torch.cat([z_a_struct, 0.5 * z_a_content + 0.5 * z_b_content])
         z_end = torch.cat([z_a_struct, z_b_content])
@@ -394,6 +411,19 @@ def _downstream_diagnostic(
         logger.info("  content_interp[%d] A:   %s", i, respell(_decode_z(z_start, a_idx)))
         logger.info("  content_interp[%d] mid: %s", i, respell(_decode_z(z_mid, a_idx)))
         logger.info("  content_interp[%d] B:   %s", i, respell(_decode_z(z_end, a_idx)))
+
+    # 1b. Prior-region interpolation — z sampled from N(0, 0.8²)
+    # Tests what game agents would see: z from the prior, not encoder posteriors.
+    logger.info("  PRIOR-REGION INTERPOLATION (z ~ N(0, 0.64)):")
+    z_dim = cfg.latent.total_dim
+    for i in range(2):
+        z_a_prior = torch.randn(z_dim, device=device) * 0.8
+        z_b_prior = torch.randn(z_dim, device=device) * 0.8
+        z_mid_prior = 0.5 * z_a_prior + 0.5 * z_b_prior
+        ref = 0
+        logger.info("  prior_interp[%d] A:   %s", i, respell(_decode_z(z_a_prior, ref)))
+        logger.info("  prior_interp[%d] mid: %s", i, respell(_decode_z(z_mid_prior, ref)))
+        logger.info("  prior_interp[%d] B:   %s", i, respell(_decode_z(z_b_prior, ref)))
 
     # 2. Discrimination: decode N different z values, count unique outputs
     decoded_set = set()

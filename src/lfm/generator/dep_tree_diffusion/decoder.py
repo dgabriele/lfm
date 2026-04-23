@@ -216,15 +216,18 @@ class TreeDiffusionDecoder(nn.Module):
         dropout: float = 0.1,
         max_positions: int = 256,
         max_depth: int = 10,
+        max_word_position: int = 8,
     ) -> None:
         super().__init__()
         self.d_model = d_model
         self.max_depth = max_depth
+        self.max_word_pos = max_word_position
 
         self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.role_embedding = nn.Embedding(NUM_DEP_RELATIONS, d_model)
         self.depth_embedding = nn.Embedding(max_depth + 1, d_model)
         self.pos_embedding = nn.Embedding(max_positions, d_model)
+        self.word_pos_embedding = nn.Embedding(max_word_position + 1, d_model)
         self.timestep_embedding = TimestepEmbedding(d_model)
 
         self.input_proj = nn.Linear(d_model, d_model)
@@ -281,6 +284,40 @@ class TreeDiffusionDecoder(nn.Module):
         x_t = (1 - t) * x0 + t * noise
         return x_t, noise
 
+    @staticmethod
+    def compute_word_positions(tokens: Tensor, role_offset: int) -> Tensor:
+        """Position within word, reset at each role marker.
+
+        Role markers (token >= role_offset) get position 0.
+        Subsequent content tokens get 1, 2, 3, ...
+        The model learns that most words end by position 2-3.
+        """
+        b, s = tokens.shape
+        device = tokens.device
+        is_boundary = tokens >= role_offset
+        positions = torch.arange(s, device=device).unsqueeze(0).expand(b, -1)
+        boundary_pos = torch.where(is_boundary, positions, torch.zeros_like(positions))
+        boundary_pos, _ = boundary_pos.cummax(dim=1)
+        return positions - boundary_pos
+
+    @staticmethod
+    def word_positions_from_roles(role_ids: Tensor) -> Tensor:
+        """Approximate word positions from forward-filled role IDs.
+
+        Used at inference step 0 when tokens aren't available yet.
+        Detects span boundaries where role_id changes.
+        """
+        b, s = role_ids.shape
+        device = role_ids.device
+        positions = torch.arange(s, device=device).unsqueeze(0).expand(b, -1)
+        changes = torch.cat([
+            torch.ones(b, 1, dtype=torch.bool, device=device),
+            role_ids[:, 1:] != role_ids[:, :-1],
+        ], dim=1)
+        change_pos = torch.where(changes, positions, torch.zeros_like(positions))
+        change_pos, _ = change_pos.cummax(dim=1)
+        return positions - change_pos
+
     def forward(
         self,
         x_t: Tensor,
@@ -289,6 +326,7 @@ class TreeDiffusionDecoder(nn.Module):
         depths: Tensor,
         memory: Tensor,
         padding_mask: Tensor | None = None,
+        word_positions: Tensor | None = None,
     ) -> Tensor:
         """Predict clean token embeddings from noisy input.
 
@@ -299,6 +337,7 @@ class TreeDiffusionDecoder(nn.Module):
             depths: (B, S) tree depth per position.
             memory: (B, R, H) z_content role memory.
             padding_mask: (B, S) True = padded position.
+            word_positions: (B, S) position within word (0=boundary).
 
         Returns:
             x0_pred: (B, S, H) predicted clean embeddings.
@@ -306,12 +345,14 @@ class TreeDiffusionDecoder(nn.Module):
         b, s, _ = x_t.shape
         device = x_t.device
 
-        # Build input: noisy embedding + role + depth + position
+        # Build input: noisy embedding + role + depth + position + word position
         pos_ids = torch.arange(s, device=device).unsqueeze(0).expand(b, -1)
         h = self.input_proj(x_t)
         h = h + self.role_embedding(role_ids.clamp(max=NUM_DEP_RELATIONS - 1))
         h = h + self.depth_embedding(depths.clamp(max=self.max_depth))
         h = h + self.pos_embedding(pos_ids.clamp(max=self.pos_embedding.num_embeddings - 1))
+        if word_positions is not None:
+            h = h + self.word_pos_embedding(word_positions.clamp(max=self.max_word_pos))
 
         # Per-position timestep embedding
         t_emb = self.timestep_embedding(t_per_pos)  # (B, S, H)
@@ -333,8 +374,12 @@ class TreeDiffusionDecoder(nn.Module):
         depth_scale: float = 1.0,
         min_noise: float = 0.3,
         padding_mask: Tensor | None = None,
+        role_offset: int | None = None,
     ) -> Tensor:
         """Generate tokens via iterative denoising from pure noise.
+
+        Word positions are refined iteratively: step 0 approximates from
+        role_ids, subsequent steps derive from predicted tokens.
 
         Returns:
             token_ids: (B, S) predicted token IDs.
@@ -345,12 +390,23 @@ class TreeDiffusionDecoder(nn.Module):
         # Start from noise
         x_t = torch.randn(b, seq_len, self.d_model, device=device)
 
+        # Initial word positions from role structure
+        word_positions = self.word_positions_from_roles(role_ids)
+        word_positions = word_positions.clamp(max=self.max_word_pos)
+
         # Reverse diffusion: t goes from 1 → 0
         for step in range(num_steps):
             t_global = torch.full((b,), 1.0 - step / num_steps, device=device)
             t_per_pos = self.tree_noise_schedule(t_global, depths, depth_scale, min_noise)
 
-            x0_pred = self(x_t, t_per_pos, role_ids, depths, memory, padding_mask)
+            x0_pred = self(x_t, t_per_pos, role_ids, depths, memory, padding_mask,
+                           word_positions=word_positions)
+
+            # Update word positions from predicted tokens
+            if role_offset is not None and step < num_steps - 1:
+                pred_tokens = self.output_head(x0_pred).argmax(dim=-1)
+                word_positions = self.compute_word_positions(pred_tokens, role_offset)
+                word_positions = word_positions.clamp(max=self.max_word_pos)
 
             if step < num_steps - 1:
                 # Re-noise to next step level

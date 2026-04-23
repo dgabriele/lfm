@@ -40,7 +40,8 @@ diffusion:
   num_diffusion_steps: 8
   max_tokens_per_role: 6
   depth_scale: 1.0
-  min_noise: 1.0  # 1.0 = uniform noise (all positions equal); <1.0 = tree-structured
+  min_noise: 0.5  # 0.5 = tree-structured (early positions resolve first); 1.0 = uniform
+  num_memory_tokens: 8
 
 # Disentanglement — disabled for diffusion decoder (handles full sequence)
 disentanglement:
@@ -79,9 +80,13 @@ word_dropout: 0.3
 word_dropout_min: 0.05
 word_dropout_anneal_epochs: 3
 
-# Training — local GPU (5.3GB peak at batch=128)
-batch_size: 32
-gradient_accumulation_steps: 4
+# Training — local GPU
+batch_size: 16
+gradient_accumulation_steps: 8
+
+# Entropy floor — prevents suffix-cycling at tail positions
+entropy_floor: 2.0
+entropy_weight: 0.1
 lr: 0.0005
 lr_min: 0.0001
 num_epochs: 5

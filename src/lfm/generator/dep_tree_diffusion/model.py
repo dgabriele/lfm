@@ -109,12 +109,13 @@ class DepTreeDiffusionVAE(nn.Module):
             num_layers=dcfg.num_layers,
             num_heads=dcfg.num_heads,
             dropout=dcfg.dropout,
+            max_word_position=dcfg.max_word_position,
         )
 
         # Z → memory projection (full z, not split)
         dcfg = cfg.diffusion
-        self._z_to_mem_proj = nn.Linear(cfg.latent.total_dim, dcfg.d_model * 4)
-        self._num_mem_tokens = 4
+        self._num_mem_tokens = dcfg.num_memory_tokens
+        self._z_to_mem_proj = nn.Linear(cfg.latent.total_dim, dcfg.d_model * self._num_mem_tokens)
 
         # Per-role length predictor
         self.length_predictor = RoleLengthPredictor(
@@ -232,8 +233,12 @@ class DepTreeDiffusionVAE(nn.Module):
             )
             x_t_low, _ = self.diffusion_decoder.add_noise(x0_clean, t_low)
             padding = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths.unsqueeze(1)
+            word_positions_topo = self.diffusion_decoder.compute_word_positions(
+                tokens, self._role_offset,
+            )
             x0_pred = self.diffusion_decoder(
                 x_t_low, t_low, per_token_roles, depths, z_memory, padding,
+                word_positions=word_positions_topo,
             )
             # Pool decoded representation
             valid = (~padding).unsqueeze(-1).float()
@@ -270,10 +275,15 @@ class DepTreeDiffusionVAE(nn.Module):
             pad_i = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths[:n_pairs].unsqueeze(1)
             valid_i = (~pad_i).unsqueeze(-1).float()
 
+            wp_i = self.diffusion_decoder.compute_word_positions(
+                tokens[:n_pairs], self._role_offset,
+            )
+
             def _pool_decode(z_vec):
                 mem = self._z_to_memory(z_vec)
                 x_t, _ = self.diffusion_decoder.add_noise(x0_i, t_low_i)
-                pred = self.diffusion_decoder(x_t, t_low_i, roles_i, depths_i, mem, pad_i)
+                pred = self.diffusion_decoder(x_t, t_low_i, roles_i, depths_i, mem, pad_i,
+                                              word_positions=wp_i)
                 return (pred * valid_i).sum(dim=1) / valid_i.sum(dim=1).clamp(min=1)
 
             repr_a = _pool_decode(z_a)
@@ -295,8 +305,12 @@ class DepTreeDiffusionVAE(nn.Module):
             )
             x_t_ent, _ = self.diffusion_decoder.add_noise(x0_ent, t_ent)
             padding_ent = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths.unsqueeze(1)
+            wp_ent = self.diffusion_decoder.compute_word_positions(
+                tokens, self._role_offset,
+            )
             x0_pred_ent = self.diffusion_decoder(
                 x_t_ent, t_ent, per_token_roles, depths, z_memory, padding_ent,
+                word_positions=wp_ent,
             )
             logits_ent = self.diffusion_decoder.output_head(x0_pred_ent)
             log_probs = torch.log_softmax(logits_ent, dim=-1)
@@ -393,10 +407,15 @@ class DepTreeDiffusionVAE(nn.Module):
         # Padding mask
         padding_mask = torch.arange(s, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
 
+        # Word positions from ground truth tokens
+        word_positions = self.diffusion_decoder.compute_word_positions(
+            tokens, self._role_offset,
+        )
+
         # Predict clean embeddings
         x0_pred = self.diffusion_decoder(
             x_t, t_per_pos, per_token_roles, depths,
-            z_memory, padding_mask,
+            z_memory, padding_mask, word_positions=word_positions,
         )
 
         # CE loss on predicted tokens
