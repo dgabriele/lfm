@@ -78,6 +78,14 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
         n_params, n_params / 1e6, device,
     )
 
+    # Compile the diffusion decoder for kernel fusion + reduced overhead
+    if hasattr(torch, "compile"):
+        try:
+            model.diffusion_decoder = torch.compile(model.diffusion_decoder)
+            logger.info("torch.compile applied to diffusion decoder")
+        except Exception as e:
+            logger.warning("torch.compile failed, continuing without: %s", e)
+
     param_groups = model.trainable_parameters()
     optimizer = AdamW(
         [{"params": g["params"], "lr": cfg.lr} for g in param_groups],
