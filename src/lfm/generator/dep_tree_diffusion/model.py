@@ -219,44 +219,50 @@ class DepTreeDiffusionVAE(nn.Module):
             off = cov - torch.diag(cov.diag())
             dip_loss = cfg.dip_weight * off.pow(2).sum() / z.size(1) ** 2
 
-        # 7. Topology loss — z distances should preserve decoded-output distances.
-        # Decode at low noise (t≈0.1) to get near-clean output representations,
-        # pool them, and correlate pairwise distances with z-space distances.
+        # 7-9. Topology + entropy share a single low-noise decode.
+        # Both need a t=0.1 forward on the full batch — do it once.
         topo_rho = torch.tensor(0.0, device=device)
         topo_loss = torch.tensor(0.0, device=device)
-        if cfg.topo_weight > 0 and z.size(0) >= 4:
-            b_topo = z.size(0)
-            t_low = torch.full((b_topo, tokens.size(1)), 0.1, device=device)
+        entropy_loss = torch.tensor(0.0, device=device)
+        need_low_noise = (cfg.topo_weight > 0 and z.size(0) >= 4) or cfg.entropy_weight > 0
+        if need_low_noise:
+            t_low = torch.full((tokens.size(0), tokens.size(1)), 0.1, device=device)
             x0_clean = self.diffusion_decoder.token_embedding(
                 tokens.clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
             )
             x_t_low, _ = self.diffusion_decoder.add_noise(x0_clean, t_low)
             padding = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths.unsqueeze(1)
-            word_positions_topo = self.diffusion_decoder.compute_word_positions(
-                tokens, self._role_offset,
-            )
-            x0_pred = self.diffusion_decoder(
+            wp_low = self.diffusion_decoder.compute_word_positions(tokens, self._role_offset)
+            x0_pred_low = self.diffusion_decoder(
                 x_t_low, t_low, per_token_roles, depths, z_memory, padding,
-                word_positions=word_positions_topo,
+                word_positions=wp_low,
             )
-            # Pool decoded representation
-            valid = (~padding).unsqueeze(-1).float()
-            decoded_repr = (x0_pred * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
 
-            # Pairwise distances in z-space and decoded-output space
-            idx = torch.triu_indices(b_topo, b_topo, offset=1, device=device)
-            z_dists = torch.cdist(z, z)[idx[0], idx[1]]
-            out_dists = torch.cdist(decoded_repr, decoded_repr)[idx[0], idx[1]]
+            # Topology: z-distance vs output-distance correlation
+            if cfg.topo_weight > 0 and z.size(0) >= 4:
+                valid = (~padding).unsqueeze(-1).float()
+                decoded_repr = (x0_pred_low * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+                idx = torch.triu_indices(z.size(0), z.size(0), offset=1, device=device)
+                z_dists = torch.cdist(z, z)[idx[0], idx[1]]
+                out_dists = torch.cdist(decoded_repr, decoded_repr)[idx[0], idx[1]]
+                if z_dists.numel() > 2:
+                    zc = z_dists - z_dists.mean()
+                    oc = out_dists - out_dists.mean()
+                    denom = (zc.norm() * oc.norm()).clamp(min=1e-8)
+                    topo_rho = (zc * oc).sum() / denom
+                    topo_loss = cfg.topo_weight * (1.0 - topo_rho)
 
-            if z_dists.numel() > 2:
-                zc = z_dists - z_dists.mean()
-                oc = out_dists - out_dists.mean()
-                denom = (zc.norm() * oc.norm()).clamp(min=1e-8)
-                topo_rho = (zc * oc).sum() / denom
-                topo_loss = cfg.topo_weight * (1.0 - topo_rho)
+            # Entropy floor: penalize low-entropy positions
+            if cfg.entropy_weight > 0:
+                logits_ent = self.diffusion_decoder.output_head(x0_pred_low)
+                log_probs = torch.log_softmax(logits_ent, dim=-1)
+                probs = log_probs.exp()
+                per_pos_entropy = -(probs * log_probs).sum(dim=-1)
+                valid_ent = ~padding
+                shortfall = torch.clamp(cfg.entropy_floor - per_pos_entropy, min=0)
+                entropy_loss = cfg.entropy_weight * (shortfall * valid_ent.float()).sum() / valid_ent.float().sum().clamp(min=1)
 
-        # 8. Interpolation smoothness — midpoint decoding should be
-        # between the two endpoints, not in a random direction.
+        # 8. Interpolation smoothness
         interp_loss = torch.tensor(0.0, device=device)
         if cfg.interp_weight > 0 and z.size(0) >= 4:
             n_pairs = z.size(0) // 2
@@ -264,7 +270,6 @@ class DepTreeDiffusionVAE(nn.Module):
             z_b = z[n_pairs:2 * n_pairs]
             z_mid = 0.5 * z_a + 0.5 * z_b
 
-            # Decode all three at low noise
             t_low_i = torch.full((n_pairs, tokens.size(1)), 0.1, device=device)
             x0_i = self.diffusion_decoder.token_embedding(
                 tokens[:n_pairs].clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
@@ -273,10 +278,7 @@ class DepTreeDiffusionVAE(nn.Module):
             depths_i = depths[:n_pairs]
             pad_i = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths[:n_pairs].unsqueeze(1)
             valid_i = (~pad_i).unsqueeze(-1).float()
-
-            wp_i = self.diffusion_decoder.compute_word_positions(
-                tokens[:n_pairs], self._role_offset,
-            )
+            wp_i = self.diffusion_decoder.compute_word_positions(tokens[:n_pairs], self._role_offset)
 
             def _pool_decode(z_vec):
                 mem = self._z_to_memory(z_vec)
@@ -291,34 +293,6 @@ class DepTreeDiffusionVAE(nn.Module):
             expected_mid = 0.5 * (repr_a + repr_b)
 
             interp_loss = cfg.interp_weight * F.mse_loss(repr_mid, expected_mid)
-
-        # 9. Entropy floor — prevent vocabulary collapse at tail positions.
-        # Computed on the decoder's predicted logits from the recon forward
-        # pass (reuse x0_pred from _diffusion_loss via a low-noise pass).
-        entropy_loss = torch.tensor(0.0, device=device)
-        if cfg.entropy_weight > 0:
-            # Quick low-noise forward to get logits
-            t_ent = torch.full((tokens.size(0), tokens.size(1)), 0.1, device=device)
-            x0_ent = self.diffusion_decoder.token_embedding(
-                tokens.clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
-            )
-            x_t_ent, _ = self.diffusion_decoder.add_noise(x0_ent, t_ent)
-            padding_ent = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths.unsqueeze(1)
-            wp_ent = self.diffusion_decoder.compute_word_positions(
-                tokens, self._role_offset,
-            )
-            x0_pred_ent = self.diffusion_decoder(
-                x_t_ent, t_ent, per_token_roles, depths, z_memory, padding_ent,
-                word_positions=wp_ent,
-            )
-            logits_ent = self.diffusion_decoder.output_head(x0_pred_ent)
-            log_probs = torch.log_softmax(logits_ent, dim=-1)
-            probs = log_probs.exp()
-            per_pos_entropy = -(probs * log_probs).sum(dim=-1)  # (B, S)
-            # Only penalize positions below the floor, ignore padding
-            valid_ent = ~padding_ent
-            shortfall = torch.clamp(cfg.entropy_floor - per_pos_entropy, min=0)
-            entropy_loss = cfg.entropy_weight * (shortfall * valid_ent.float()).sum() / valid_ent.float().sum().clamp(min=1)
 
         # 10. Disentanglement (disabled for diffusion — zeroed in config)
         disent = self.disentanglement(z_struct, z_content,
