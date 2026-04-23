@@ -375,8 +375,10 @@ class DepTreeDiffusionVAE(nn.Module):
             t_global, depths, self.cfg.diffusion.depth_scale, self.cfg.diffusion.min_noise,
         )
 
-        # Corrupt
+        # Corrupt content tokens only — role markers stay clean
         x_t, _ = self.diffusion_decoder.add_noise(x0, t_per_pos)
+        is_role = tokens >= self._role_offset
+        x_t = torch.where(is_role.unsqueeze(-1), x0, x_t)
 
         # Padding mask
         padding_mask = torch.arange(s, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
@@ -402,12 +404,12 @@ class DepTreeDiffusionVAE(nn.Module):
             self_cond=self_cond,
         )
 
-        # CE loss on predicted tokens
+        # CE loss on content tokens only — role markers are given, not predicted
         logits = self.diffusion_decoder.output_head(x0_pred)
-        valid = ~padding_mask
-        if valid.any():
+        is_content = ~padding_mask & ~is_role
+        if is_content.any():
             loss = F.cross_entropy(
-                logits[valid], clamped[valid].clamp(max=logits.size(-1) - 1),
+                logits[is_content], clamped[is_content].clamp(max=logits.size(-1) - 1),
             )
         else:
             loss = torch.tensor(0.0, device=device)

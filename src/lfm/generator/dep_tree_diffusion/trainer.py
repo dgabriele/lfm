@@ -300,6 +300,7 @@ def _prior_diagnostic(
         depth_scale=cfg.diffusion.depth_scale,
         min_noise=cfg.diffusion.min_noise,
         role_offset=model._role_offset,
+        ref_tokens=real_tokens[:b],
     )
 
     surfaces = []
@@ -377,6 +378,7 @@ def _downstream_diagnostic(
             depth_scale=cfg.diffusion.depth_scale,
             min_noise=cfg.diffusion.min_noise,
             role_offset=model._role_offset,
+            ref_tokens=tokens[ref_idx:ref_idx+1],
         )
         ids = [int(t) for t in tok[0].tolist() if 0 < t < sp.GetPieceSize()]
         return sp.DecodeIds(ids)

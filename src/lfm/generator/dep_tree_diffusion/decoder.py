@@ -380,6 +380,7 @@ class TreeDiffusionDecoder(nn.Module):
         min_noise: float = 0.3,
         padding_mask: Tensor | None = None,
         role_offset: int | None = None,
+        ref_tokens: Tensor | None = None,
     ) -> Tensor:
         """Generate tokens via iterative denoising from pure noise.
 
@@ -394,6 +395,15 @@ class TreeDiffusionDecoder(nn.Module):
 
         # Start from noise
         x_t = torch.randn(b, seq_len, self.d_model, device=device)
+
+        # Clamp role markers to clean embeddings if ref_tokens provided
+        role_mask = None
+        if ref_tokens is not None and role_offset is not None:
+            role_mask = ref_tokens >= role_offset
+            role_emb_clean = self.token_embedding(
+                ref_tokens.clamp(max=self.token_embedding.num_embeddings - 1)
+            )
+            x_t = torch.where(role_mask.unsqueeze(-1), role_emb_clean, x_t)
 
         # Initial word positions from role structure
         word_positions = self.word_positions_from_roles(role_ids)
@@ -425,6 +435,9 @@ class TreeDiffusionDecoder(nn.Module):
                 noise = torch.randn_like(x0_pred)
                 t_n = t_per_pos_next.unsqueeze(-1)
                 x_t = (1 - t_n) * x0_pred + t_n * noise
+                # Clamp role markers back to clean embeddings
+                if role_mask is not None:
+                    x_t = torch.where(role_mask.unsqueeze(-1), role_emb_clean, x_t)
             else:
                 x_t = x0_pred
 
