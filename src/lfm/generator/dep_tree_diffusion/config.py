@@ -22,6 +22,8 @@ class DiffusionDecoderConfig(LFMBaseConfig):
     max_word_position: int = 8
     num_memory_tokens: int = 4
     invert_depth_noise: bool = False
+    hierarchical: bool = False
+    word_expander_hidden: int = 256
 
 
 class DepTreeDiffusionConfig(DepTreeVAEConfig):

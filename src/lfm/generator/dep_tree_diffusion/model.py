@@ -122,6 +122,16 @@ class DepTreeDiffusionVAE(nn.Module):
             max_len=dcfg.max_tokens_per_role,
         )
 
+        # Hierarchical: AR word expander for per-role token generation
+        if dcfg.hierarchical:
+            from lfm.generator.dep_tree_diffusion.word_expander import WordExpander
+            self.word_expander = WordExpander(
+                vocab_size=full_decode_vocab,
+                d_model=dcfg.d_model,
+                d_hidden=dcfg.word_expander_hidden,
+                max_tokens=dcfg.max_tokens_per_role,
+            )
+
         # IDs
         self._pad_id = 0
         self._bos_id = cfg.spm_vocab_size
@@ -185,10 +195,16 @@ class DepTreeDiffusionVAE(nn.Module):
         per_token_roles = self._extract_per_token_roles(tokens, lengths)
         z_memory = self._z_to_memory(z)
 
-        # 4. Diffusion loss on full interleaved sequence (roles + content)
-        recon_loss = self._diffusion_loss(
-            tokens, lengths, per_token_roles, depths, z_memory,
-        )
+        # 4. Reconstruction loss
+        if cfg.diffusion.hierarchical:
+            recon_loss = self._hierarchical_loss(
+                tokens, lengths, per_token_roles, depths, z_memory,
+                role_ids, role_lengths,
+            )
+        else:
+            recon_loss = self._diffusion_loss(
+                tokens, lengths, per_token_roles, depths, z_memory,
+            )
 
         # Skeleton is handled by the diffusion decoder (role tokens in
         # the interleaved sequence at depth=0). No separate skeleton loss.
@@ -417,6 +433,109 @@ class DepTreeDiffusionVAE(nn.Module):
 
         return loss
 
+    def _hierarchical_loss(
+        self,
+        tokens: Tensor,
+        lengths: Tensor,
+        per_token_roles: Tensor,
+        depths: Tensor,
+        z_memory: Tensor,
+        role_ids: Tensor,
+        role_lengths: Tensor,
+    ) -> Tensor:
+        """Hierarchical diffusion + AR loss.
+
+        The diffusion decoder runs on the full interleaved sequence (as before)
+        but the loss comes from the WordExpander AR head rather than per-token CE.
+        Per-role output is pooled from the diffusion decoder, then the WordExpander
+        generates tokens left-to-right within each role.
+        """
+        b, s = tokens.shape
+        device = tokens.device
+        dcfg = self.cfg.diffusion
+
+        # Run the standard diffusion forward (with skeleton clamping)
+        full_vocab = self._decoder_vocab + len(DEP_REL_TO_ID)
+        clamped = tokens.clamp(max=full_vocab - 1)
+        x0 = self.diffusion_decoder.token_embedding(
+            clamped.clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
+        )
+
+        if self.training and self._word_dropout_p > 0:
+            drop = torch.rand(b, s, 1, device=device) < self._word_dropout_p
+            x0 = x0.masked_fill(drop, 0.0)
+
+        t_global = torch.rand(b, device=device)
+        t_per_pos = self.diffusion_decoder.tree_noise_schedule(
+            t_global, depths, dcfg.depth_scale, dcfg.min_noise,
+            invert=dcfg.invert_depth_noise,
+        )
+        x_t, _ = self.diffusion_decoder.add_noise(x0, t_per_pos)
+        is_role = tokens >= self._role_offset
+        x_t = torch.where(is_role.unsqueeze(-1), x0, x_t)
+        padding_mask = torch.arange(s, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
+        word_positions = self.diffusion_decoder.compute_word_positions(tokens, self._role_offset)
+
+        self_cond = None
+        if self.training and torch.rand(1).item() < 0.5:
+            with torch.no_grad():
+                self_cond = self.diffusion_decoder(
+                    x_t, t_per_pos, per_token_roles, depths,
+                    z_memory, padding_mask, word_positions=word_positions,
+                ).detach()
+
+        x0_pred = self.diffusion_decoder(
+            x_t, t_per_pos, per_token_roles, depths,
+            z_memory, padding_mask, word_positions=word_positions,
+            self_cond=self_cond,
+        )
+
+        # Pool per role: mean of content token predictions within each role span
+        # Identify role boundaries via cumulative role changes
+        changes = torch.cat([
+            torch.ones(b, 1, dtype=torch.bool, device=device),
+            per_token_roles[:, 1:] != per_token_roles[:, :-1],
+        ], dim=1)
+        group_idx = changes.long().cumsum(dim=1) - 1  # (B, S)
+        max_roles = group_idx.max().item() + 1
+        max_roles = min(max_roles, self.cfg.skeleton.max_roles)
+
+        # Pool x0_pred per role
+        role_vectors = torch.zeros(b, max_roles, dcfg.d_model, device=device)
+        role_counts = torch.zeros(b, max_roles, 1, device=device)
+        is_content = ~padding_mask & ~is_role
+        for bi in range(b):
+            content_mask = is_content[bi]
+            gi = group_idx[bi][content_mask]
+            gi = gi.clamp(max=max_roles - 1)
+            preds = x0_pred[bi][content_mask]
+            role_vectors[bi].scatter_add_(0, gi.unsqueeze(-1).expand(-1, dcfg.d_model), preds)
+            role_counts[bi].scatter_add_(0, gi.unsqueeze(-1), torch.ones_like(gi, dtype=torch.float).unsqueeze(-1))
+        role_vectors = role_vectors / role_counts.clamp(min=1)
+
+        # Extract per-role target tokens for WordExpander supervision
+        max_tok = dcfg.max_tokens_per_role
+        target_tokens = torch.zeros(b, max_roles, max_tok, dtype=torch.long, device=device)
+        target_lengths = torch.zeros(b, max_roles, dtype=torch.long, device=device)
+        for bi in range(b):
+            content_mask = is_content[bi]
+            content_toks = clamped[bi][content_mask]
+            gi = group_idx[bi][content_mask].clamp(max=max_roles - 1)
+            # Fill target_tokens per role
+            pos_in_role = torch.zeros(max_roles, dtype=torch.long, device=device)
+            for j in range(content_toks.size(0)):
+                r = gi[j].item()
+                p = pos_in_role[r].item()
+                if p < max_tok:
+                    target_tokens[bi, r, p] = content_toks[j]
+                    pos_in_role[r] += 1
+            target_lengths[bi] = pos_in_role[:max_roles]
+
+        # AR loss from WordExpander
+        ar_loss = self.word_expander(role_vectors, target_tokens, target_lengths)
+
+        return ar_loss
+
     def _extract_content(
         self, tokens: Tensor, lengths: Tensor, dep_depths: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
@@ -499,7 +618,7 @@ class DepTreeDiffusionVAE(nn.Module):
 
     def trainable_parameters(self) -> list[dict]:
         """Parameter groups for optimizer."""
-        return [
+        groups = [
             {"params": list(self.encoder.parameters())},
             {"params": list(self.latent.parameters())},
             {"params": list(self.phrase_projector.parameters())},
@@ -507,3 +626,6 @@ class DepTreeDiffusionVAE(nn.Module):
             {"params": list(self.length_predictor.parameters())},
             {"params": list(self.disentanglement.parameters())},
         ]
+        if hasattr(self, "word_expander"):
+            groups.append({"params": list(self.word_expander.parameters())})
+        return groups
