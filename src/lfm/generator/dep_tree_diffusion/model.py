@@ -500,36 +500,61 @@ class DepTreeDiffusionVAE(nn.Module):
         max_roles = group_idx.max().item() + 1
         max_roles = min(max_roles, self.cfg.skeleton.max_roles)
 
-        # Pool x0_pred per role
-        role_vectors = torch.zeros(b, max_roles, dcfg.d_model, device=device)
-        role_counts = torch.zeros(b, max_roles, 1, device=device)
+        # Pool x0_pred per role — vectorized across batch
         is_content = ~padding_mask & ~is_role
-        for bi in range(b):
-            content_mask = is_content[bi]
-            gi = group_idx[bi][content_mask]
-            gi = gi.clamp(max=max_roles - 1)
-            preds = x0_pred[bi][content_mask]
-            role_vectors[bi].scatter_add_(0, gi.unsqueeze(-1).expand(-1, dcfg.d_model), preds)
-            role_counts[bi].scatter_add_(0, gi.unsqueeze(-1), torch.ones_like(gi, dtype=torch.float).unsqueeze(-1))
-        role_vectors = role_vectors / role_counts.clamp(min=1)
+        gi_clamped = group_idx.clamp(max=max_roles - 1)
+        # Zero out non-content positions so they don't contribute to scatter
+        content_float = is_content.float()  # (B, S)
+        # Flatten batch into combined index: batch_i * max_roles + role_j
+        batch_offset = torch.arange(b, device=device).unsqueeze(1) * max_roles  # (B, 1)
+        flat_idx = (batch_offset + gi_clamped) * content_float.long()  # (B, S)
+        flat_idx = flat_idx.reshape(-1)  # (B*S,)
 
-        # Extract per-role target tokens for WordExpander supervision
+        role_vectors_flat = torch.zeros(b * max_roles, dcfg.d_model, device=device)
+        role_counts_flat = torch.zeros(b * max_roles, 1, device=device)
+        content_mask_flat = is_content.reshape(-1)  # (B*S,)
+        preds_flat = x0_pred.reshape(-1, dcfg.d_model)  # (B*S, H)
+
+        valid_idx = flat_idx[content_mask_flat]
+        valid_preds = preds_flat[content_mask_flat]
+        role_vectors_flat.scatter_add_(0, valid_idx.unsqueeze(-1).expand(-1, dcfg.d_model), valid_preds)
+        role_counts_flat.scatter_add_(0, valid_idx.unsqueeze(-1), torch.ones(valid_idx.size(0), 1, device=device))
+
+        role_vectors = (role_vectors_flat / role_counts_flat.clamp(min=1)).reshape(b, max_roles, dcfg.d_model)
+
+        # Extract per-role target tokens — vectorized
         max_tok = dcfg.max_tokens_per_role
+        # Compute position-within-role for each content token
+        # Use cumsum within each (batch, role) group
+        content_toks_flat = clamped.reshape(-1)  # (B*S,)
+        # For each content position, compute its index within its role
+        ones = torch.ones(b, s, dtype=torch.long, device=device)
+        ones[~is_content] = 0
+        # Cumulative count per (batch, role) group
+        # Use the flat_idx to compute per-group cumcount
+        role_pos = torch.zeros(b * max_roles, dtype=torch.long, device=device)
         target_tokens = torch.zeros(b, max_roles, max_tok, dtype=torch.long, device=device)
         target_lengths = torch.zeros(b, max_roles, dtype=torch.long, device=device)
-        for bi in range(b):
-            content_mask = is_content[bi]
-            content_toks = clamped[bi][content_mask]
-            gi = group_idx[bi][content_mask].clamp(max=max_roles - 1)
-            # Fill target_tokens per role
-            pos_in_role = torch.zeros(max_roles, dtype=torch.long, device=device)
-            for j in range(content_toks.size(0)):
-                r = gi[j].item()
-                p = pos_in_role[r].item()
-                if p < max_tok:
-                    target_tokens[bi, r, p] = content_toks[j]
-                    pos_in_role[r] += 1
-            target_lengths[bi] = pos_in_role[:max_roles]
+
+        # This part is hard to fully vectorize — use a compact loop over content tokens only
+        valid_batch_idx = torch.arange(b, device=device).unsqueeze(1).expand_as(is_content)[is_content]
+        valid_role_idx = gi_clamped[is_content]
+        valid_content_toks = clamped[is_content]
+        # Compute position within each (batch, role) group via cumcount
+        combined_key = valid_batch_idx * max_roles + valid_role_idx
+        # Sequential cumcount — unavoidable for correctness, but over content tokens only (not B*S)
+        pos_counter = torch.zeros(b * max_roles, dtype=torch.long, device=device)
+        positions = torch.empty_like(combined_key)
+        for i in range(combined_key.size(0)):
+            k = combined_key[i].item()
+            positions[i] = pos_counter[k]
+            pos_counter[k] += 1
+
+        # Fill target_tokens using the computed positions
+        valid_pos = positions.clamp(max=max_tok - 1)
+        in_range = positions < max_tok
+        target_tokens[valid_batch_idx[in_range], valid_role_idx[in_range], valid_pos[in_range]] = valid_content_toks[in_range]
+        target_lengths = pos_counter.clamp(max=max_tok).reshape(b, max_roles)
 
         # AR loss from WordExpander
         ar_loss = self.word_expander(role_vectors, target_tokens, target_lengths)
