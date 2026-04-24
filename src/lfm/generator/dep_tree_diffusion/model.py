@@ -334,9 +334,14 @@ class DepTreeDiffusionVAE(nn.Module):
         depths: Tensor,
         per_token_roles: Tensor,
         z_memory: Tensor,
-        t_global: float = 0.1,
+        t_global: float | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Single low-noise decode with proper tree noise schedule.
+        """Decode at a noise level matching training distribution.
+
+        When t_global is None (default), samples per-example t ~ U[0,1]
+        just like training, so the model's output_head is always in its
+        calibrated regime. A fixed value can be passed for deterministic
+        evaluation.
 
         Returns (x0_pred, logits, padding_mask).
         """
@@ -344,7 +349,10 @@ class DepTreeDiffusionVAE(nn.Module):
         device = tokens.device
         cfg = self.cfg
 
-        t_g = torch.full((b,), t_global, device=device)
+        if t_global is None:
+            t_g = torch.rand(b, device=device)
+        else:
+            t_g = torch.full((b,), t_global, device=device)
         t_per_pos = self.diffusion_decoder.tree_noise_schedule(
             t_g, depths, cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
         )
