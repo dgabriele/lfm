@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 _diag_loader: DataLoader | None = None
 
+# Fixed t for single-step evaluation — the model's output_head is
+# well-calibrated here (99%+ accuracy). Lower values produce garbage.
+_EVAL_T = 0.5
+
 
 def _get_loader(cfg: DepTreeDiffusionConfig, batch_size: int) -> DataLoader:
     global _diag_loader
@@ -112,14 +116,10 @@ def checkpoint_digest(
 ) -> dict:
     """Run comprehensive diagnostic digest and log results.
 
-    Args:
-        model: Trained DepTreeDiffusionVAE.
-        sp: SentencePiece processor.
-        device: Torch device.
-        cfg: Model config.
-        n_samples: Batch size for statistical measurements.
-        n_decode: Number of samples for full diffusion decode.
-        n_topo: Number of samples for topology computation.
+    Single-step metrics (reconstruction, topology, entropy) use a fixed
+    t_global=0.5 where the model's output_head is calibrated. Full-decode
+    metrics use the complete iterative sampling pipeline and reflect
+    actual downstream generation quality.
 
     Returns:
         Dict of all measured scalars (for programmatic consumption).
@@ -147,17 +147,17 @@ def checkpoint_digest(
     per_token_roles = model._extract_per_token_roles(tokens, lengths)
     z_memory = model._z_to_memory(z)
 
-    padding = torch.arange(s, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
     is_role = tokens >= model._role_offset
-    is_content = ~padding & ~is_role
 
-    # Low-noise forward for reconstruction analysis
+    # Single-step forward at fixed t=0.5 for calibrated metrics
     x0_pred, logits, padding = model.low_noise_forward(
         tokens, lengths, depths, per_token_roles, z_memory,
+        t_global=_EVAL_T,
     )
+    is_content = ~padding & ~is_role
     preds = logits.argmax(dim=-1)
 
-    # ── RECONSTRUCTION QUALITY ───────────────────────────────────
+    # ── RECONSTRUCTION (single-step at t=0.5) ───────────────────
     content_correct = (preds == tokens) & is_content
     depth_bins = [0, 1, 2, 3, 4]
 
@@ -177,7 +177,7 @@ def checkpoint_digest(
     metrics["acc_total"] = total_acc
     metrics["ce_total"] = ce
 
-    logger.info("── Reconstruction ──")
+    logger.info("── Reconstruction (t=%.1f) ──", _EVAL_T)
     logger.info("  overall: acc=%.1f%% CE=%.4f", total_acc * 100, ce)
     logger.info("  by depth: %s", "  ".join(f"d{d}={a:.0%}({n})" for d, a, n in depth_accs))
 
@@ -231,7 +231,7 @@ def checkpoint_digest(
     logger.info("  active units: %d/%d (%.0f%%)  undercovered=%d overcovered=%d",
                 active_units, total_dims, metrics["active_units_pct"], undercovered, overcovered)
 
-    # ── TOPOLOGY ─────────────────────────────────────────────────
+    # ── TOPOLOGY (t=0.5) ────────────────────────────────────────
     valid_f = (~padding).unsqueeze(-1).float()
     decoded_repr = (x0_pred * valid_f).sum(dim=1) / valid_f.sum(dim=1).clamp(min=1)
     nt = min(b, n_topo)
@@ -242,7 +242,6 @@ def checkpoint_digest(
     topo_rho = _pearson(z_d, o_d).item() if z_d.numel() > 2 else 0.0
     metrics["topo_rho"] = topo_rho
 
-    # Struct-only and content-only
     zs_d = torch.cdist(z[:nt, :cfg.latent.struct_dim], z[:nt, :cfg.latent.struct_dim])[idx_t[0], idx_t[1]]
     zc_d = torch.cdist(z[:nt, cfg.latent.struct_dim:], z[:nt, cfg.latent.struct_dim:])[idx_t[0], idx_t[1]]
     rho_struct = _pearson(zs_d, o_d).item() if z_d.numel() > 2 else 0.0
@@ -250,10 +249,10 @@ def checkpoint_digest(
     metrics["topo_rho_struct"] = rho_struct
     metrics["topo_rho_content"] = rho_content
 
-    logger.info("── Topology (n=%d) ──", nt)
+    logger.info("── Topology (t=%.1f, n=%d) ──", _EVAL_T, nt)
     logger.info("  ρ full=%.4f  struct=%.4f  content=%.4f", topo_rho, rho_struct, rho_content)
 
-    # ── INFORMATION-THEORETIC ────────────────────────────────────
+    # ── ENTROPY (t=0.5) ─────────────────────────────────────────
     log_probs = torch.log_softmax(logits, dim=-1)
     probs = log_probs.exp()
     per_pos_entropy = -(probs * log_probs).sum(dim=-1)
@@ -273,7 +272,7 @@ def checkpoint_digest(
     metrics["eff_vocab"] = eff_vocab
     metrics["top1_confidence"] = top1_prob * 100
 
-    logger.info("── Information Theory ──")
+    logger.info("── Entropy (t=%.1f) ──", _EVAL_T)
     logger.info("  entropy: mean=%.2f ±%.2f  min=%.2f p10=%.2f p50=%.2f",
                 metrics["entropy_mean"], metrics["entropy_std"],
                 metrics["entropy_min"], metrics["entropy_p10"], metrics["entropy_p50"])
@@ -290,7 +289,7 @@ def checkpoint_digest(
             metrics[f"entropy_d{label}"] = ent
     logger.info("  entropy by depth: %s", "  ".join(f"d{d}={e:.2f}" for d, e in depth_ents))
 
-    # ── LINGUISTIC COHERENCE (posterior decode) ──────────────────
+    # ── FULL DECODE: POSTERIOR ───────────────────────────────────
     nd = min(b, n_decode)
     decoded_texts, decoded_ids = _decode_batch(
         model, z[:nd], tokens, lengths, per_token_roles, depths, cfg, sp,
@@ -309,19 +308,19 @@ def checkpoint_digest(
     metrics["posterior_unique_tokens"] = unique_tokens
     metrics["posterior_top10_mass_pct"] = top10_mass * 100
 
-    logger.info("── Linguistic Coherence (n=%d decoded) ──", nd)
-    logger.info("  surface diversity: %d/%d unique (%.0f%%)", unique_texts, nd, metrics["posterior_diversity_pct"])
-    logger.info("  repetition rate: %.1f%%  vocab coverage: %d unique / %d total  top-10 mass=%.0f%%",
-                rep_rate * 100, unique_tokens, total_gen, top10_mass * 100)
+    logger.info("── Full Decode: Posterior (n=%d) ──", nd)
+    logger.info("  diversity: %d/%d unique (%.0f%%)  rep_rate=%.1f%%  vocab=%d  top-10 mass=%.0f%%",
+                unique_texts, nd, metrics["posterior_diversity_pct"],
+                rep_rate * 100, unique_tokens, top10_mass * 100)
 
-    logger.info("  ── Sample comparisons (GT → Generated) ──")
+    logger.info("  ── GT → Generated ──")
     for i in range(min(4, nd)):
         n_tok = lengths[i].item()
         gt_ids = [t for t in tokens[i, :n_tok].tolist() if 0 < t < spm_size]
         logger.info("  [%d] GT:  %s", i, respell(sp.DecodeIds(gt_ids)))
         logger.info("  [%d] Gen: %s", i, respell(decoded_texts[i]))
 
-    # ── PRIOR GENERATION QUALITY ─────────────────────────────────
+    # ── FULL DECODE: PRIOR ──────────────────────────────────────
     z_prior = torch.randn(nd, cfg.latent.total_dim, device=device)
     prior_texts, prior_ids = _decode_batch(
         model, z_prior, tokens, lengths, per_token_roles, depths, cfg, sp,
@@ -334,7 +333,7 @@ def checkpoint_digest(
     metrics["prior_rep_rate_pct"] = prior_rep * 100
     metrics["prior_unique_tokens"] = prior_vocab
 
-    logger.info("── Prior Generation (n=%d) ──", nd)
+    logger.info("── Full Decode: Prior (n=%d) ──", nd)
     logger.info("  diversity: %d/%d unique (%.0f%%)  rep_rate=%.1f%%  vocab=%d",
                 prior_unique, nd, metrics["prior_diversity_pct"], prior_rep * 100, prior_vocab)
     for i in range(min(4, nd)):
