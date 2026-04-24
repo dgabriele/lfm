@@ -242,19 +242,8 @@ class DepTreeDiffusionVAE(nn.Module):
         entropy_loss = torch.tensor(0.0, device=device)
         need_low_noise = (cfg.topo_weight > 0 and z.size(0) >= 4) or cfg.entropy_weight > 0
         if need_low_noise:
-            t_global_low = torch.full((tokens.size(0),), 0.1, device=device)
-            t_low = self.diffusion_decoder.tree_noise_schedule(
-                t_global_low, depths, cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
-            )
-            x0_clean = self.diffusion_decoder.token_embedding(
-                tokens.clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
-            )
-            x_t_low, _ = self.diffusion_decoder.add_noise(x0_clean, t_low)
-            padding = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths.unsqueeze(1)
-            wp_low = self.diffusion_decoder.compute_word_positions(tokens, self._role_offset)
-            x0_pred_low = self.diffusion_decoder(
-                x_t_low, t_low, per_token_roles, depths, z_memory, padding,
-                word_positions=wp_low,
+            x0_pred_low, logits_low, padding = self.low_noise_forward(
+                tokens, lengths, depths, per_token_roles, z_memory,
             )
 
             # Topology: z-distance vs output-distance correlation
@@ -273,7 +262,7 @@ class DepTreeDiffusionVAE(nn.Module):
 
             # Entropy floor: penalize low-entropy positions
             if cfg.entropy_weight > 0:
-                logits_ent = self.diffusion_decoder.output_head(x0_pred_low)
+                logits_ent = logits_low
                 log_probs = torch.log_softmax(logits_ent, dim=-1)
                 probs = log_probs.exp()
                 per_pos_entropy = -(probs * log_probs).sum(dim=-1)
@@ -290,25 +279,18 @@ class DepTreeDiffusionVAE(nn.Module):
             z_b = z[n_pairs:2 * n_pairs]
             z_mid = 0.5 * z_a + 0.5 * z_b
 
-            t_global_i = torch.full((n_pairs,), 0.1, device=device)
-            t_low_i = self.diffusion_decoder.tree_noise_schedule(
-                t_global_i, depths[:n_pairs], cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
-            )
-            x0_i = self.diffusion_decoder.token_embedding(
-                tokens[:n_pairs].clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
-            )
-            roles_i = per_token_roles[:n_pairs]
+            tokens_i = tokens[:n_pairs]
+            lengths_i = lengths[:n_pairs]
             depths_i = depths[:n_pairs]
-            pad_i = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths[:n_pairs].unsqueeze(1)
-            valid_i = (~pad_i).unsqueeze(-1).float()
-            wp_i = self.diffusion_decoder.compute_word_positions(tokens[:n_pairs], self._role_offset)
+            roles_i = per_token_roles[:n_pairs]
 
             def _pool_decode(z_vec):
                 mem = self._z_to_memory(z_vec)
-                x_t, _ = self.diffusion_decoder.add_noise(x0_i, t_low_i)
-                pred = self.diffusion_decoder(x_t, t_low_i, roles_i, depths_i, mem, pad_i,
-                                              word_positions=wp_i)
-                return (pred * valid_i).sum(dim=1) / valid_i.sum(dim=1).clamp(min=1)
+                x0_p, _, pad_i = self.low_noise_forward(
+                    tokens_i, lengths_i, depths_i, roles_i, mem,
+                )
+                valid_i = (~pad_i).unsqueeze(-1).float()
+                return (x0_p * valid_i).sum(dim=1) / valid_i.sum(dim=1).clamp(min=1)
 
             repr_a = _pool_decode(z_a)
             repr_b = _pool_decode(z_b)
@@ -344,6 +326,42 @@ class DepTreeDiffusionVAE(nn.Module):
         """Project full z to cross-attention memory tokens."""
         b = z.size(0)
         return self._z_to_mem_proj(z).reshape(b, self._num_mem_tokens, -1)
+
+    def low_noise_forward(
+        self,
+        tokens: Tensor,
+        lengths: Tensor,
+        depths: Tensor,
+        per_token_roles: Tensor,
+        z_memory: Tensor,
+        t_global: float = 0.1,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Single low-noise decode with proper tree noise schedule.
+
+        Returns (x0_pred, logits, padding_mask).
+        """
+        b, s = tokens.shape
+        device = tokens.device
+        cfg = self.cfg
+
+        t_g = torch.full((b,), t_global, device=device)
+        t_per_pos = self.diffusion_decoder.tree_noise_schedule(
+            t_g, depths, cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
+        )
+        x0 = self.diffusion_decoder.token_embedding(
+            tokens.clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
+        )
+        x_t, _ = self.diffusion_decoder.add_noise(x0, t_per_pos)
+        is_role = tokens >= self._role_offset
+        x_t = torch.where(is_role.unsqueeze(-1), x0, x_t)
+        padding = torch.arange(s, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
+        wp = self.diffusion_decoder.compute_word_positions(tokens, self._role_offset)
+        x0_pred = self.diffusion_decoder(
+            x_t, t_per_pos, per_token_roles, depths, z_memory, padding,
+            word_positions=wp,
+        )
+        logits = self.diffusion_decoder.output_head(x0_pred)
+        return x0_pred, logits, padding
 
     def _extract_per_token_roles(self, tokens: Tensor, lengths: Tensor) -> Tensor:
         """Forward-fill role IDs across content tokens in interleaved sequence."""

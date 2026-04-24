@@ -172,25 +172,13 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
                 # Rewards structurally complete thoughts, penalizes word salad/loops.
                 completeness_loss = torch.tensor(0.0, device=device)
                 if completeness_scorer is not None and cfg.completeness_weight > 0:
-                    # Get decoder logits from a low-noise forward pass (t≈0.1)
-                    # so the output is close to what generation produces.
                     with torch.amp.autocast(device_type=device.type, enabled=False):
-                        depths_b = batch["depths"]
-                        t_global_low = torch.full((batch["tokens"].size(0),), 0.1, device=device)
-                        t_low = model.diffusion_decoder.tree_noise_schedule(
-                            t_global_low, depths_b, cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
-                        )
-                        x0 = model.diffusion_decoder.token_embedding(
-                            batch["tokens"].clamp(max=model.diffusion_decoder.token_embedding.num_embeddings - 1)
-                        )
-                        x_t, _ = model.diffusion_decoder.add_noise(x0, t_low)
                         per_token_roles = model._extract_per_token_roles(batch["tokens"], batch["lengths"])
                         z_mem = model._z_to_memory(torch.cat([out.z_struct, out.z_content], dim=-1))
-                        padding = torch.arange(batch["tokens"].size(1), device=device).unsqueeze(0) >= batch["lengths"].unsqueeze(1)
-                        x0_pred = model.diffusion_decoder(
-                            x_t, t_low, per_token_roles, depths_b, z_mem, padding,
+                        _, logits, _ = model.low_noise_forward(
+                            batch["tokens"], batch["lengths"], batch["depths"],
+                            per_token_roles, z_mem,
                         )
-                        logits = model.diffusion_decoder.output_head(x0_pred)
                         # Truncate to scorer's vocab size (SPM tokens only)
                         scorer_vocab = completeness_scorer.cfg.vocab_size
                         scores = completeness_scorer.score_soft(logits[:, :, :scorer_vocab].float(), batch["lengths"])
@@ -461,17 +449,9 @@ def _downstream_diagnostic(
     decoded_reprs = []
     for i in range(z_all.size(0)):
         z_mem = model._z_to_memory(z_all[i:i+1])
-        t_global_low = torch.full((1,), 0.1, device=device)
-        t_low = model.diffusion_decoder.tree_noise_schedule(
-            t_global_low, depths[i:i+1], cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
-        )
-        x0 = model.diffusion_decoder.token_embedding(
-            tokens[i:i+1].clamp(max=model.diffusion_decoder.token_embedding.num_embeddings - 1)
-        )
-        x_t, _ = model.diffusion_decoder.add_noise(x0, t_low)
-        pad = torch.arange(tokens.size(1), device=device).unsqueeze(0) >= lengths[i:i+1].unsqueeze(1)
-        x0_p = model.diffusion_decoder(
-            x_t, t_low, per_token_roles[i:i+1], depths[i:i+1], z_mem, pad,
+        x0_p, _, pad = model.low_noise_forward(
+            tokens[i:i+1], lengths[i:i+1], depths[i:i+1],
+            per_token_roles[i:i+1], z_mem,
         )
         valid = (~pad).unsqueeze(-1).float()
         pooled = (x0_p * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)

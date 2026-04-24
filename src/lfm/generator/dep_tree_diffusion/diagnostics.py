@@ -150,23 +150,10 @@ def checkpoint_digest(
     is_role = tokens >= model._role_offset
     is_content = ~padding & ~is_role
 
-    # Low-noise forward for reconstruction analysis — use tree noise schedule
-    # so per-position t matches what the model sees during training
-    t_global = torch.full((b,), 0.1, device=device)
-    t_low = model.diffusion_decoder.tree_noise_schedule(
-        t_global, depths, cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
+    # Low-noise forward for reconstruction analysis
+    x0_pred, logits, padding = model.low_noise_forward(
+        tokens, lengths, depths, per_token_roles, z_memory,
     )
-    x0 = model.diffusion_decoder.token_embedding(
-        tokens.clamp(max=model.diffusion_decoder.token_embedding.num_embeddings - 1)
-    )
-    x_t, _ = model.diffusion_decoder.add_noise(x0, t_low)
-    x_t = torch.where(is_role.unsqueeze(-1), x0, x_t)
-    wp = model.diffusion_decoder.compute_word_positions(tokens, model._role_offset)
-    x0_pred = model.diffusion_decoder(
-        x_t, t_low, per_token_roles, depths, z_memory, padding,
-        word_positions=wp,
-    )
-    logits = model.diffusion_decoder.output_head(x0_pred)
     preds = logits.argmax(dim=-1)
 
     # ── RECONSTRUCTION QUALITY ───────────────────────────────────
