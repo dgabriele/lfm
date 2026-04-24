@@ -42,6 +42,9 @@ class DepTreeVAEOutput:
     z_content: Tensor
     mu: Tensor
     logvar: Tensor
+    hidden: Tensor | None = None
+    logits: Tensor | None = None
+    content_mask: Tensor | None = None
 
     @property
     def total_loss(self) -> Tensor:
@@ -229,7 +232,9 @@ class DepTreeVAE(nn.Module):
         memory = self.phrase_projector(z_content, skel_roles, skel_mask)
 
         # 5. Reconstruct through the phrase decoder
-        recon_loss = self._decode_and_loss(tokens, lengths, memory, content_tokens, content_lengths)
+        recon_loss, hidden, logits, content_mask = self._decode_and_loss(
+            tokens, lengths, memory, content_tokens, content_lengths,
+        )
 
         # 6. KL divergence
         kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
@@ -262,6 +267,9 @@ class DepTreeVAE(nn.Module):
             z_content=z_content,
             mu=mu,
             logvar=logvar,
+            hidden=hidden,
+            logits=logits,
+            content_mask=content_mask,
         )
 
     def _split_roles_and_content(
@@ -333,13 +341,12 @@ class DepTreeVAE(nn.Module):
         memory: Tensor,
         content_tokens: Tensor,
         content_lengths: Tensor,
-    ) -> Tensor:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Run phrase decoder on content tokens with role-level memory.
 
-        The decoder cross-attends to ``memory`` (one vector per skeleton
-        role) while autoregressively generating content tokens.  The
-        cross-attention learns to shift focus across roles as it fills
-        successive syntactic slots — no forced positional alignment.
+        Returns (loss, hidden, logits, content_mask) so the trainer can
+        compute auxiliary losses (topology, entropy, interpolation)
+        without a second forward pass.
         """
         from lfm.generator.layers import multiscale_causal_mask
 
@@ -348,7 +355,6 @@ class DepTreeVAE(nn.Module):
 
         content_tokens = content_tokens.clamp(max=self._decoder_vocab - 1)
 
-        # Teacher forcing: shift right with BOS
         bos = torch.full(
             (b, 1), self._bos_id, dtype=torch.long, device=device,
         )
@@ -359,11 +365,9 @@ class DepTreeVAE(nn.Module):
         cs = decoder_input_ids.size(1)
         dec_input = self.dec_token_embedding(decoder_input_ids)
 
-        # Word dropout: zero out random token embeddings to force
-        # the decoder to rely on z (cross-attention memory)
         if self.training and self._word_dropout_p > 0:
             drop_mask = torch.rand(b, cs, 1, device=device) < self._word_dropout_p
-            drop_mask[:, 0] = False  # never drop BOS
+            drop_mask[:, 0] = False
             dec_input = dec_input.masked_fill(drop_mask, 0.0)
         if not isinstance(self.dec_pos_embedding, nn.Identity):
             pos = torch.arange(cs, device=device).unsqueeze(0)
@@ -378,13 +382,11 @@ class DepTreeVAE(nn.Module):
         )
         rope = self._rope_freqs[:cs] if self._rope_freqs is not None else None
 
-        # memory is (B, num_roles, h) — decoder cross-attends to all roles
         hidden = self.phrase_decoder(
             dec_input, memory, tgt_mask=tgt_mask, rope_freqs=rope,
         )
         logits = self.output_head(hidden)
 
-        # Masked CE loss over content tokens
         mask = torch.arange(cs, device=device).unsqueeze(0) < content_lengths.unsqueeze(1)
         flat_logits = logits.reshape(-1, logits.size(-1))
         flat_targets = content_tokens[:, :cs].reshape(-1)
@@ -393,7 +395,7 @@ class DepTreeVAE(nn.Module):
         loss = F.cross_entropy(
             flat_logits[flat_mask], flat_targets[flat_mask],
         )
-        return loss
+        return loss, hidden, logits, mask
 
     def _make_role_bow(
         self, role_ids: Tensor, role_lengths: Tensor, device: torch.device,

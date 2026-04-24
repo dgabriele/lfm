@@ -160,6 +160,20 @@ class DepTreeVAEConfig(LFMBaseConfig):
     z_var_weight: float = 0.0
     z_var_target: float = 0.05
 
+    # Topology — z distances preserve decoded-output distances
+    topo_weight: float = 0.0
+
+    # Interpolation smoothness — midpoints between endpoints in output space
+    interp_weight: float = 0.0
+
+    # Entropy floor — prevents vocabulary collapse at tail positions
+    entropy_floor: float = 0.0
+    entropy_weight: float = 0.0
+
+    # Completeness scorer — frozen discriminator for structural coherence
+    completeness_scorer_path: str = ""
+    completeness_weight: float = 0.0
+
     # Word dropout: randomly zero out decoder input token embeddings.
     # Forces the decoder to rely on z (cross-attention) rather than
     # just copying from autoregressive context. Annealed from

@@ -1,0 +1,83 @@
+# DepTree VAE (AR) — vast.ai RTX 3090 (24GB)
+# AR phrase decoder on clean dep-tree dataset with
+# topology, entropy floor, and one-sided z_var.
+
+dataset_path: /workspace/lfm/data/datasets/english-dep-trees-v16
+spm_model_path: /workspace/lfm/data/models/v15b_ipa/spm.model
+output_dir: /workspace/lfm/data/models/dep_tree_vae_v1
+
+spm_vocab_size: 8000
+max_seq_len: 160
+
+encoder_hidden_dim: 512
+encoder_num_layers: 2
+encoder_num_heads: 8
+encoder_dropout: 0.1
+
+latent:
+  total_dim: 256
+  struct_dim: 64
+  content_dim: 192
+
+skeleton:
+  mode: parallel
+  hidden_dim: 128
+  max_roles: 40
+  num_layers: 2
+  num_heads: 4
+  dropout: 0.1
+
+decoder_hidden_dim: 512
+decoder_num_layers: 4
+decoder_num_heads: 8
+decoder_dropout: 0.1
+num_memory_tokens: 8
+attention_head_windows: [3, 3, 7, 7, 15, 15, 0, 0]
+attention_global_every: 7
+use_rope: true
+share_decoder_layers: true
+freeze_decoder: false
+
+disentanglement:
+  struct_cls_weight: 0.0
+  content_bow_weight: 0.0
+  adversarial_weight: 0.0
+  gradient_reversal_scale: 0.0
+  hsic_weight: 0.0
+
+kl_weight: 0.2
+kl_free_bits: 0.1
+kl_warmup_steps: 5000
+dip_weight: 0.0
+
+# One-sided: only penalizes below-floor variance
+z_var_weight: 5.0
+z_var_target: 0.05
+
+# Topology — z distances preserve decoded-output distances
+topo_weight: 1.0
+# Interpolation smoothness (placeholder — needs z_mid decode)
+interp_weight: 0.0
+# Entropy floor
+entropy_floor: 1.5
+entropy_weight: 0.05
+# Completeness scorer
+completeness_scorer_path: /workspace/lfm/data/models/completeness_scorer/best.pt
+completeness_weight: 0.1
+
+word_dropout: 0.3
+word_dropout_min: 0.05
+word_dropout_anneal_epochs: 3
+
+batch_size: 80
+gradient_accumulation_steps: 3
+lr: 0.0005
+lr_min: 0.0001
+num_epochs: 5
+use_amp: true
+seed: 42
+device: cuda
+
+log_every: 50
+checkpoint_every_steps: 1000
+val_fraction: 0.02
