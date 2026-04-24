@@ -196,8 +196,15 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                 if completeness_scorer is not None and cfg.completeness_weight > 0 and out.logits is not None:
                     with torch.amp.autocast(device_type=device.type, enabled=False):
                         scorer_vocab = completeness_scorer.cfg.vocab_size
+                        logits_f = out.logits.float()
+                        if logits_f.size(-1) < scorer_vocab:
+                            pad = torch.full(
+                                (*logits_f.shape[:-1], scorer_vocab - logits_f.size(-1)),
+                                -1e9, device=device,
+                            )
+                            logits_f = torch.cat([logits_f, pad], dim=-1)
                         scores = completeness_scorer.score_soft(
-                            out.logits[:, :, :scorer_vocab].float(),
+                            logits_f[:, :, :scorer_vocab],
                             out.content_mask.sum(dim=1),
                         )
                         completeness_loss = -cfg.completeness_weight * scores.mean()
@@ -237,7 +244,7 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                     _save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, best_val_loss, out_dir)
                     torch.cuda.empty_cache()
                     try:
-                        _prior_diagnostic(model, sp, device, cfg)
+                        _checkpoint_digest(model, sp, device, cfg)
                     except RuntimeError as e:
                         if "out of memory" in str(e):
                             logger.warning("OOM during diagnostics — skipping (step=%d)", global_step)
@@ -291,26 +298,22 @@ def _kl_schedule(step: int, cfg: DepTreeVAEConfig) -> float:
 
 
 @torch.no_grad()
-def _prior_diagnostic(
-    model: DepTreeVAE, sp, device: torch.device, cfg: DepTreeVAEConfig,
-    n_samples: int = 32, max_len: int = 80,
-) -> None:
+def _greedy_decode(
+    model: DepTreeVAE, z: torch.Tensor, device: torch.device,
+    cfg: DepTreeVAEConfig, sp, max_len: int = 120,
+) -> list[tuple[str, bool]]:
+    """Greedy AR decode from z vectors. Returns list of (text, hit_eos)."""
     from lfm.generator.dep_tree_vae.config import DEP_RELATIONS
     from lfm.generator.dep_tree_vae.skeleton import SKEL_BOS, SKEL_EOS
     from lfm.generator.layers import multiscale_causal_mask
-    from lfm.translator.romanize import respell
 
-    model.eval()
-    z = torch.randn(n_samples, cfg.latent.total_dim, device=device)
+    b = z.size(0)
     z_struct, z_content = model.latent.split(z)
-
     skel_tokens = model.skeleton_decoder(z_struct)[0]
+    spm_size = sp.get_piece_size()
 
-    eos_count = 0
-    lengths = []
-    surfaces = []
-
-    for i in range(n_samples):
+    results = []
+    for i in range(b):
         roles = []
         for t in skel_tokens[i]:
             t_val = t.item()
@@ -344,37 +347,126 @@ def _prior_diagnostic(
                 break
             tokens = torch.cat([tokens, next_tok], dim=1)
 
-        n_tok = tokens.size(1) - 1
-        lengths.append(n_tok)
-        if hit_eos:
-            eos_count += 1
-
         ids = tokens[0, 1:].tolist()
-        ids = [t for t in ids if 0 < t < sp.GetPieceSize()]
-        surfaces.append(sp.DecodeIds(ids))
+        ids = [t for t in ids if 0 < t < spm_size]
+        results.append((sp.DecodeIds(ids), hit_eos))
 
-    avg_len = sum(lengths) / len(lengths)
-    eos_rate = eos_count / n_samples
-    len_std = (sum((l - avg_len)**2 for l in lengths) / len(lengths)) ** 0.5
+    return results
 
-    unique_texts = len(set(surfaces))
-    rep_count = 0
-    total_pairs = 0
-    for s in surfaces:
-        toks = s.split()
-        for j in range(1, len(toks)):
-            total_pairs += 1
-            if toks[j] == toks[j-1]:
-                rep_count += 1
-    rep_rate = rep_count / max(total_pairs, 1)
 
-    logger.info(
-        "PRIOR DIAGNOSTIC: eos=%.0f%% avg_len=%.1f±%.1f unique=%d/%d rep=%.1f%%",
-        eos_rate * 100, avg_len, len_std, unique_texts, n_samples, rep_rate * 100,
+@torch.no_grad()
+def _checkpoint_digest(
+    model: DepTreeVAE, sp, device: torch.device, cfg: DepTreeVAEConfig,
+    n_recon: int = 8, n_interp: int = 4, n_prior: int = 16,
+) -> None:
+    """Comprehensive checkpoint diagnostic: reconstruction, interpolation, prior."""
+    from lfm.generator.dep_tree_vae.data import DepTreeDataset, collate_dep_tree
+    from lfm.translator.romanize import respell
+    from pathlib import Path
+
+    model.eval()
+
+    # Load diagnostic batch
+    cache_dir = Path(cfg.dataset_path) / "cache"
+    ds = DepTreeDataset(cache_dir)
+    loader = torch.utils.data.DataLoader(
+        ds, batch_size=max(n_recon, n_interp * 2), shuffle=True,
+        collate_fn=collate_dep_tree, num_workers=0,
     )
-    for j in range(min(4, len(surfaces))):
-        logger.info("  prior[%d]: %s", j, respell(surfaces[j][:200]))
+    batch = next(iter(loader))
+    tokens = batch["tokens"].to(device)
+    lengths = batch["lengths"].to(device)
+    role_ids = batch["role_ids"].to(device)
+    role_lengths = batch["role_lengths"].to(device)
+    spm_size = sp.get_piece_size()
 
+    logger.info("=" * 70)
+    logger.info("CHECKPOINT DIGEST")
+    logger.info("=" * 70)
+
+    # Encode
+    mu, logvar = model.encoder(tokens, lengths)
+    z_struct, z_content, z = model.latent(mu, logvar)
+
+    # ── RECONSTRUCTION ───────────────────────────────────────────
+    logger.info("── Reconstruction (n=%d) ──", n_recon)
+    recon_results = _greedy_decode(model, z[:n_recon], device, cfg, sp)
+    eos_count = sum(1 for _, eos in recon_results if eos)
+
+    for i in range(min(4, n_recon)):
+        n_tok = lengths[i].item()
+        gt_ids = [t for t in tokens[i, :n_tok].tolist() if 0 < t < spm_size]
+        gt_text = respell(sp.DecodeIds(gt_ids))
+        gen_text = respell(recon_results[i][0])
+        logger.info("  [%d] GT:  %s", i, gt_text)
+        logger.info("  [%d] Rec: %s", i, gen_text)
+
+    logger.info("  eos_rate=%.0f%%", eos_count / n_recon * 100)
+
+    # ── POSTERIOR INTERPOLATION ──────────────────────────────────
+    struct_dim = cfg.latent.struct_dim
+    logger.info("── Posterior Interpolation (n=%d pairs) ──", n_interp)
+    for i in range(min(n_interp, tokens.size(0) // 2)):
+        a_idx, b_idx = i * 2, i * 2 + 1
+        z_a, z_b = z[a_idx], z[b_idx]
+
+        z_mid = 0.5 * z_a + 0.5 * z_b
+        texts = _greedy_decode(model, torch.stack([z_a, z_mid, z_b]), device, cfg, sp)
+        logger.info("  interp[%d] A:   %s", i, respell(texts[0][0]))
+        logger.info("  interp[%d] mid: %s", i, respell(texts[1][0]))
+        logger.info("  interp[%d] B:   %s", i, respell(texts[2][0]))
+
+        # Struct-only interpolation
+        z_struct_mid = torch.cat([
+            0.5 * z_a[:struct_dim] + 0.5 * z_b[:struct_dim],
+            z_a[struct_dim:],
+        ])
+        texts_s = _greedy_decode(model, z_struct_mid.unsqueeze(0), device, cfg, sp)
+        logger.info("  struct_mid[%d]:  %s", i, respell(texts_s[0][0]))
+
+        # Content-only interpolation
+        z_content_mid = torch.cat([
+            z_a[:struct_dim],
+            0.5 * z_a[struct_dim:] + 0.5 * z_b[struct_dim:],
+        ])
+        texts_c = _greedy_decode(model, z_content_mid.unsqueeze(0), device, cfg, sp)
+        logger.info("  content_mid[%d]: %s", i, respell(texts_c[0][0]))
+
+    # ── PRIOR INTERPOLATION ─────────────────────────────────────
+    logger.info("── Prior Interpolation (z ~ N(0,1)) ──")
+    for i in range(2):
+        z_a_p = torch.randn(cfg.latent.total_dim, device=device)
+        z_b_p = torch.randn(cfg.latent.total_dim, device=device)
+        z_mid_p = 0.5 * z_a_p + 0.5 * z_b_p
+        texts = _greedy_decode(model, torch.stack([z_a_p, z_mid_p, z_b_p]), device, cfg, sp)
+        logger.info("  prior_interp[%d] A:   %s", i, respell(texts[0][0]))
+        logger.info("  prior_interp[%d] mid: %s", i, respell(texts[1][0]))
+        logger.info("  prior_interp[%d] B:   %s", i, respell(texts[2][0]))
+
+    # ── PRIOR GENERATION ────────────────────────────────────────
+    z_prior = torch.randn(n_prior, cfg.latent.total_dim, device=device)
+    prior_results = _greedy_decode(model, z_prior, device, cfg, sp)
+
+    eos_count_p = sum(1 for _, eos in prior_results if eos)
+    prior_texts = [t for t, _ in prior_results]
+    unique_texts = len(set(prior_texts))
+
+    logger.info("── Prior Generation (n=%d) ──", n_prior)
+    logger.info("  eos=%.0f%%  unique=%d/%d", eos_count_p / n_prior * 100, unique_texts, n_prior)
+    for j in range(min(4, n_prior)):
+        logger.info("  prior[%d]: %s", j, respell(prior_texts[j]))
+
+    # ── LATENT SPACE ────────────────────────────────────────────
+    z_std = (0.5 * logvar).exp()
+    kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
+    active = (kl_per_dim.mean(dim=0) > 0.01).sum().item()
+    logger.info("── Latent Space ──")
+    logger.info("  z_std: mean=%.4f ±%.4f [%.4f, %.4f]",
+                z_std.mean().item(), z_std.std().item(), z_std.min().item(), z_std.max().item())
+    logger.info("  KL: total=%.2f  active=%d/%d",
+                kl_per_dim.sum(dim=-1).mean().item(), active, cfg.latent.total_dim)
+
+    logger.info("=" * 70)
     model.train()
 
 

@@ -1,3 +1,5 @@
+model_type: dep_tree_vae
+
 # DepTree VAE (AR) — vast.ai RTX 3090 (24GB)
 # AR phrase decoder on clean dep-tree dataset with
 # topology, entropy floor, and one-sided z_var.

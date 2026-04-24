@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-import struct
+import multiprocessing as mp
 from pathlib import Path
 
 import numpy as np
@@ -74,120 +74,145 @@ class DepTreeDataset(Dataset):
         return int(self._interleaved.max()) + 1
 
 
+_CHUNK_SIZE = 100_000
+
+
+def _process_chunk(args: tuple) -> list[dict] | None:
+    """Worker: process a chunk of JSONL lines into tokenized records."""
+    lines, spm_path, max_seq_len = args
+
+    sp = spm.SentencePieceProcessor()
+    sp.Load(spm_path)
+    spm_size = sp.get_piece_size()
+    eos_id = spm_size + 1
+    role_offset = spm_size + 2
+
+    results = []
+    for line in lines:
+        rec = json.loads(line)
+        ipa_words = rec["ipa"].split()
+        dep_labels = rec["dep_labels"]
+
+        if len(ipa_words) != len(dep_labels):
+            continue
+
+        interleaved = []
+        role_sequence = []
+        for label, word in zip(dep_labels, ipa_words):
+            role_id = DEP_REL_TO_ID.get(label, DEP_REL_TO_ID.get("dep", 0))
+            interleaved.append(role_offset + role_id)
+            for tid in sp.encode(word, out_type=int):
+                interleaved.append(tid)
+            role_sequence.append(role_id)
+        interleaved.append(eos_id)
+
+        if len(interleaved) > max_seq_len:
+            continue
+
+        skeleton = [SKEL_BOS] + role_sequence + [SKEL_EOS]
+        results.append({"interleaved": interleaved, "skeleton": skeleton})
+
+    return results
+
+
 def build_cache(
     jsonl_path: str | Path,
     sp: spm.SentencePieceProcessor,
     max_seq_len: int,
     cache_dir: str | Path,
     max_samples: int | None = None,
+    num_workers: int = 8,
 ) -> None:
-    """Read JSONL, tokenize, and save as compact binary cache."""
+    """Read JSONL, tokenize in parallel, and save as compact binary cache."""
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    spm_size = sp.get_piece_size()
-    eos_id = spm_size + 1
-    role_offset = spm_size + 2
+    spm_path = sp.serialized_model_proto()
+    # Need the file path for workers — get it from the sp object
+    # Workers reload from path, so we need the original path.
+    # Fall back to sequential if we can't get it.
+    import tempfile
+    spm_tmp = tempfile.NamedTemporaryFile(suffix=".model", delete=False)
+    spm_tmp.write(sp.serialized_model_proto())
+    spm_tmp.close()
+    spm_path_str = spm_tmp.name
 
-    # Two-pass: first pass counts sizes for pre-allocation,
-    # second pass fills.  Avoids holding 14M numpy arrays in memory.
+    logger.info("Reading JSONL and dispatching to %d workers...", num_workers)
+    chunks: list[list[str]] = []
+    current_chunk: list[str] = []
+    total_lines = 0
 
-    # Pass 1: scan to count total tokens and build index
-    index: list[tuple[int, int, int, int]] = []
+    with open(jsonl_path) as f:
+        for line in f:
+            current_chunk.append(line)
+            total_lines += 1
+            if len(current_chunk) >= _CHUNK_SIZE:
+                chunks.append(current_chunk)
+                current_chunk = []
+            if max_samples and total_lines >= max_samples * 1.2:
+                break
+        if current_chunk:
+            chunks.append(current_chunk)
+
+    logger.info("  %d lines in %d chunks, processing...", total_lines, len(chunks))
+
+    chunk_args = [(chunk, spm_path_str, max_seq_len) for chunk in chunks]
+
+    if num_workers > 1:
+        with mp.Pool(num_workers) as pool:
+            chunk_results = []
+            for i, result in enumerate(pool.imap(_process_chunk, chunk_args)):
+                chunk_results.append(result)
+                if (i + 1) % 10 == 0:
+                    done = sum(len(r) for r in chunk_results if r)
+                    logger.info("  processed %d/%d chunks (%dM samples)...",
+                                i + 1, len(chunks), done // 1_000_000)
+    else:
+        chunk_results = [_process_chunk(a) for a in chunk_args]
+
+    import os
+    os.unlink(spm_path_str)
+
+    all_records: list[dict] = []
+    for cr in chunk_results:
+        if cr:
+            all_records.extend(cr)
+        if max_samples and len(all_records) >= max_samples:
+            all_records = all_records[:max_samples]
+            break
+
+    n = len(all_records)
+    logger.info("  %d samples after filtering, assembling arrays...", n)
+
     inter_offset = 0
     skel_offset = 0
-    filtered = 0
-    total = 0
+    index: list[tuple[int, int, int, int]] = []
+    for rec in all_records:
+        i_len = len(rec["interleaved"])
+        s_len = len(rec["skeleton"])
+        index.append((inter_offset, i_len, skel_offset, s_len))
+        inter_offset += i_len
+        skel_offset += s_len
 
-    with open(jsonl_path) as f:
-        for line in f:
-            if max_samples and len(index) >= max_samples:
-                break
-            total += 1
-
-            rec = json.loads(line)
-            ipa_words = rec["ipa"].split()
-            dep_labels = rec["dep_labels"]
-
-            if len(ipa_words) != len(dep_labels):
-                filtered += 1
-                continue
-
-            inter_len = 0
-            n_roles = 0
-            for word in ipa_words:
-                inter_len += 1 + len(sp.encode(word, out_type=int))
-                n_roles += 1
-            inter_len += 1  # EOS
-
-            if inter_len > max_seq_len:
-                filtered += 1
-                continue
-
-            skel_len = n_roles + 2  # BOS + roles + EOS
-            index.append((inter_offset, inter_len, skel_offset, skel_len))
-            inter_offset += inter_len
-            skel_offset += skel_len
-
-            if len(index) % 2_000_000 == 0:
-                logger.info("  pass 1: %dM samples scanned...", len(index) // 1_000_000)
-
-    logger.info(
-        "  pass 1 done: %d samples, %dM inter tokens, %dM skel tokens",
-        len(index), inter_offset // 1_000_000, skel_offset // 1_000_000,
-    )
-
-    # Pre-allocate flat arrays
     inter_flat = np.zeros(inter_offset, dtype=np.int16)
     skel_flat = np.zeros(skel_offset, dtype=np.int16)
+
+    for i, rec in enumerate(all_records):
+        off_i, len_i, off_s, len_s = index[i]
+        inter_flat[off_i:off_i + len_i] = rec["interleaved"]
+        skel_flat[off_s:off_s + len_s] = rec["skeleton"]
+        if (i + 1) % 2_000_000 == 0:
+            logger.info("  assembled %dM/%dM...", (i + 1) // 1_000_000, n // 1_000_000)
+
     index_arr = np.array(index, dtype=np.int64)
-
-    # Pass 2: fill arrays
-    sample_idx = 0
-    with open(jsonl_path) as f:
-        for line in f:
-            if sample_idx >= len(index):
-                break
-            total_p2 = 0
-            rec = json.loads(line)
-            ipa_words = rec["ipa"].split()
-            dep_labels = rec["dep_labels"]
-
-            if len(ipa_words) != len(dep_labels):
-                continue
-
-            interleaved: list[int] = []
-            role_sequence: list[int] = []
-            for label, word in zip(dep_labels, ipa_words):
-                role_id = DEP_REL_TO_ID.get(label, DEP_REL_TO_ID.get("dep", 0))
-                interleaved.append(role_offset + role_id)
-                for tid in sp.encode(word, out_type=int):
-                    interleaved.append(tid)
-                role_sequence.append(role_id)
-            interleaved.append(eos_id)
-
-            if len(interleaved) > max_seq_len:
-                continue
-
-            skeleton = [SKEL_BOS] + role_sequence + [SKEL_EOS]
-
-            off_i, len_i, off_s, len_s = index[sample_idx]
-            inter_flat[off_i : off_i + len_i] = interleaved
-            skel_flat[off_s : off_s + len_s] = skeleton
-            sample_idx += 1
-
-            if sample_idx % 2_000_000 == 0:
-                logger.info("  pass 2: %dM samples filled...", sample_idx // 1_000_000)
-
     np.save(cache_dir / "interleaved.npy", inter_flat)
     np.save(cache_dir / "skeletons.npy", skel_flat)
     np.save(cache_dir / "index.npy", index_arr)
 
     logger.info(
-        "Cache built: %d samples (filtered %d/%d), "
-        "interleaved=%dM tokens (%.1f MB), skeletons=%dM tokens (%.1f MB)",
-        len(index), filtered, total,
-        len(inter_flat) // 1_000_000, inter_flat.nbytes / 1e6,
+        "Cache built: %d samples, interleaved=%dM tokens (%.1f MB), "
+        "skeletons=%dM tokens (%.1f MB)",
+        n, len(inter_flat) // 1_000_000, inter_flat.nbytes / 1e6,
         len(skel_flat) // 1_000_000, skel_flat.nbytes / 1e6,
     )
 
