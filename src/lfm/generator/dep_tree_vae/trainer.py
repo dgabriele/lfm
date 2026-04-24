@@ -319,7 +319,9 @@ def _kl_schedule(step: int, cfg: DepTreeVAEConfig) -> float:
 def _greedy_decode(
     model: DepTreeVAE, z: torch.Tensor, device: torch.device,
     cfg: DepTreeVAEConfig, sp, max_len: int | None = None,
-    ngram_block: tuple[int, ...] = (2, 3, 4),
+    ngram_block: tuple[int, ...] = (3, 4),
+    eos_boost: float = 3.0,
+    expected_len: int = 13,
 ) -> list[tuple[str, bool]]:
     """Greedy AR decode from z vectors. Returns list of (text, hit_eos)."""
     from lfm.generator.dep_tree_vae.config import DEP_RELATIONS
@@ -372,6 +374,9 @@ def _greedy_decode(
                         if tuple(generated[j:j + n - 1]) == prefix:
                             banned = generated[j + n - 1]
                             logits[0, banned] = -float("inf")
+            if eos_boost > 0 and len(generated) > expected_len:
+                overshoot = (len(generated) - expected_len) / expected_len
+                logits[0, model._eos_id] += eos_boost * overshoot
             next_tok = logits.argmax(dim=-1, keepdim=True)
             if next_tok.item() == model._eos_id:
                 hit_eos = True

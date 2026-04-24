@@ -4,12 +4,12 @@ model_type: dep_tree_vae
 # AR phrase decoder on clean dep-tree dataset with
 # topology, entropy floor, and one-sided z_var.
 
-dataset_path: /workspace/lfm/data/datasets/english-dep-trees-v16
+dataset_path: /workspace/lfm/data/datasets/english-dep-trees-v16-depth4
 spm_model_path: /workspace/lfm/data/models/v15b_ipa/spm.model
 output_dir: /workspace/lfm/data/models/dep_tree_vae_v1
 
 spm_vocab_size: 8000
-max_seq_len: 160
+max_seq_len: 80
 
 encoder_hidden_dim: 512
 encoder_num_layers: 2
