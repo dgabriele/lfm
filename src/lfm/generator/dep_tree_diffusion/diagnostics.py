@@ -74,6 +74,7 @@ def _decode_batch(
         min_noise=cfg.diffusion.min_noise,
         role_offset=model._role_offset,
         ref_tokens=tokens[:n],
+        word_pos_noise_scale=cfg.diffusion.word_pos_noise_scale,
     )
 
     texts = []

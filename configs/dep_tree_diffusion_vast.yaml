@@ -38,6 +38,7 @@ diffusion:
   depth_scale: 1.0
   min_noise: 0.5
   num_memory_tokens: 8
+  word_pos_noise_scale: 0.5
 
 # Topology — z distances preserve decoded-output distances
 topo_weight: 1.0

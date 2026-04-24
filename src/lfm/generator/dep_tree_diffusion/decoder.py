@@ -244,14 +244,16 @@ class TreeDiffusionDecoder(nn.Module):
         self, t_global: Tensor, depths: Tensor,
         depth_scale: float = 1.0, min_noise: float = 0.3,
         invert: bool = False,
+        word_positions: Tensor | None = None,
+        word_pos_noise_scale: float = 0.0,
     ) -> Tensor:
-        """Compute per-position noise level from global t and tree depth.
+        """Compute per-position noise level from global t, tree depth,
+        and optionally word position.
 
-        All positions get at least ``min_noise`` fraction of the full
-        schedule. When ``invert=False`` (default), root positions get
-        ``min_noise`` and leaves get full noise. When ``invert=True``,
-        leaves get ``min_noise`` and roots get full noise — hypothesis
-        that deep positions are simpler and should resolve first.
+        Two-level hierarchy:
+          1. Tree depth: root dep nodes resolve before leaves.
+          2. Word position: within each dep node's content span,
+             stems (position 1) resolve before suffixes (position 3+).
 
         Args:
             t_global: (B,) global diffusion time in [0, 1].
@@ -259,6 +261,12 @@ class TreeDiffusionDecoder(nn.Module):
             depth_scale: exponent controlling depth→noise mapping.
             min_noise: minimum noise fraction for quietest positions.
             invert: if True, deep positions get less noise.
+            word_positions: (B, S) position within word (0=role marker,
+                1=first content token, ...). When provided with nonzero
+                word_pos_noise_scale, later positions get more noise.
+            word_pos_noise_scale: strength of within-word noise gradient.
+                0.0 disables. 0.5 means the last within-word position
+                gets 50% more noise than the first.
 
         Returns:
             t_per_pos: (B, S) noise level per position in [0, 1].
@@ -268,7 +276,12 @@ class TreeDiffusionDecoder(nn.Module):
         if invert:
             depth_factor = 1.0 - depth_factor
         noise_factor = min_noise + (1.0 - min_noise) * depth_factor
-        return t_global.unsqueeze(1) * noise_factor
+
+        if word_positions is not None and word_pos_noise_scale > 0:
+            wp_normalized = word_positions.float() / max(self.max_word_pos, 1)
+            noise_factor = noise_factor * (1.0 + word_pos_noise_scale * wp_normalized)
+
+        return (t_global.unsqueeze(1) * noise_factor).clamp(max=1.0)
 
     def add_noise(
         self, x0: Tensor, t_per_pos: Tensor, noise: Tensor | None = None,
@@ -387,6 +400,7 @@ class TreeDiffusionDecoder(nn.Module):
         role_offset: int | None = None,
         ref_tokens: Tensor | None = None,
         invert_depth_noise: bool = False,
+        word_pos_noise_scale: float = 0.0,
     ) -> Tensor:
         """Generate tokens via iterative denoising from pure noise.
 
@@ -421,7 +435,8 @@ class TreeDiffusionDecoder(nn.Module):
         # Reverse diffusion: t goes from 1 → 0
         for step in range(num_steps):
             t_global = torch.full((b,), 1.0 - step / num_steps, device=device)
-            t_per_pos = self.tree_noise_schedule(t_global, depths, depth_scale, min_noise, invert=invert_depth_noise)
+            t_per_pos = self.tree_noise_schedule(t_global, depths, depth_scale, min_noise, invert=invert_depth_noise,
+                                                word_positions=word_positions, word_pos_noise_scale=word_pos_noise_scale)
 
             x0_pred = self(x_t, t_per_pos, role_ids, depths, memory, padding_mask,
                            word_positions=word_positions, self_cond=x0_prev)
@@ -437,7 +452,8 @@ class TreeDiffusionDecoder(nn.Module):
             if step < num_steps - 1:
                 # Re-noise to next step level
                 t_next = torch.full((b,), 1.0 - (step + 1) / num_steps, device=device)
-                t_per_pos_next = self.tree_noise_schedule(t_next, depths, depth_scale, min_noise, invert=invert_depth_noise)
+                t_per_pos_next = self.tree_noise_schedule(t_next, depths, depth_scale, min_noise, invert=invert_depth_noise,
+                                                         word_positions=word_positions, word_pos_noise_scale=word_pos_noise_scale)
                 noise = torch.randn_like(x0_pred)
                 t_n = t_per_pos_next.unsqueeze(-1)
                 x_t = (1 - t_n) * x0_pred + t_n * noise

@@ -353,8 +353,11 @@ class DepTreeDiffusionVAE(nn.Module):
             t_g = torch.rand(b, device=device)
         else:
             t_g = torch.full((b,), t_global, device=device)
+        wp = self.diffusion_decoder.compute_word_positions(tokens, self._role_offset)
         t_per_pos = self.diffusion_decoder.tree_noise_schedule(
             t_g, depths, cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
+            word_positions=wp,
+            word_pos_noise_scale=cfg.diffusion.word_pos_noise_scale,
         )
         x0 = self.diffusion_decoder.token_embedding(
             tokens.clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
@@ -363,7 +366,6 @@ class DepTreeDiffusionVAE(nn.Module):
         is_role = tokens >= self._role_offset
         x_t = torch.where(is_role.unsqueeze(-1), x0, x_t)
         padding = torch.arange(s, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
-        wp = self.diffusion_decoder.compute_word_positions(tokens, self._role_offset)
         x0_pred = self.diffusion_decoder(
             x_t, t_per_pos, per_token_roles, depths, z_memory, padding,
             word_positions=wp,
@@ -418,10 +420,17 @@ class DepTreeDiffusionVAE(nn.Module):
         # Random global timestep per sample
         t_global = torch.rand(b, device=device)
 
-        # Per-position noise from tree depth
+        # Word positions from ground truth tokens
+        word_positions = self.diffusion_decoder.compute_word_positions(
+            tokens, self._role_offset,
+        )
+
+        # Per-position noise from tree depth + word position
         t_per_pos = self.diffusion_decoder.tree_noise_schedule(
             t_global, depths, self.cfg.diffusion.depth_scale, self.cfg.diffusion.min_noise,
             invert=self.cfg.diffusion.invert_depth_noise,
+            word_positions=word_positions,
+            word_pos_noise_scale=self.cfg.diffusion.word_pos_noise_scale,
         )
 
         # Corrupt content tokens only — role markers stay clean
@@ -431,11 +440,6 @@ class DepTreeDiffusionVAE(nn.Module):
 
         # Padding mask
         padding_mask = torch.arange(s, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
-
-        # Word positions from ground truth tokens
-        word_positions = self.diffusion_decoder.compute_word_positions(
-            tokens, self._role_offset,
-        )
 
         # Self-conditioning: 50% of the time, run a detached forward first
         self_cond = None
@@ -498,9 +502,12 @@ class DepTreeDiffusionVAE(nn.Module):
             x0 = x0.masked_fill(drop, 0.0)
 
         t_global = torch.rand(b, device=device)
+        word_positions = self.diffusion_decoder.compute_word_positions(tokens, self._role_offset)
         t_per_pos = self.diffusion_decoder.tree_noise_schedule(
             t_global, depths, dcfg.depth_scale, dcfg.min_noise,
             invert=dcfg.invert_depth_noise,
+            word_positions=word_positions,
+            word_pos_noise_scale=dcfg.word_pos_noise_scale,
         )
         x_t, _ = self.diffusion_decoder.add_noise(x0, t_per_pos)
         is_role = tokens >= self._role_offset
