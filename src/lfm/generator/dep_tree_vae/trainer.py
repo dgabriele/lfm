@@ -146,13 +146,15 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                     shortfall = torch.clamp(cfg.z_var_target - per_dim_var, min=0)
                     z_var_loss = cfg.z_var_weight * shortfall.pow(2).mean()
 
-                # Z-prediction: decoder hidden states must retain z info
+                # Z-prediction: decoder hidden states must retain z info.
+                # Uses cosine similarity — scale-invariant, bounded gradient.
                 z_pred_loss = torch.tensor(0.0, device=device)
-                if cfg.z_pred_weight > 0 and out.hidden is not None:
+                if cfg.z_pred_weight > 0 and out.hidden is not None and hasattr(model, 'z_predictor'):
                     valid = out.content_mask.unsqueeze(-1).float()
                     pooled = (out.hidden * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
                     z_hat = model.z_predictor(pooled)
-                    z_pred_loss = cfg.z_pred_weight * F.mse_loss(z_hat, z.detach())
+                    cos_sim = F.cosine_similarity(z_hat, z.detach(), dim=-1).mean()
+                    z_pred_loss = cfg.z_pred_weight * (1.0 - cos_sim)
 
                 # Topology: z-distance vs output-distance correlation
                 topo_loss = torch.tensor(0.0, device=device)
@@ -223,9 +225,8 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
 
             if (i + 1) % accum == 0:
                 scaler.unscale_(optimizer)
-                gnorm = nn.utils.clip_grad_norm_(
-                    [p for g in param_groups for p in g["params"]], 5.0,
-                ).item()
+                graded = [p for g in param_groups for p in g["params"] if p.grad is not None]
+                gnorm = nn.utils.clip_grad_norm_(graded, 5.0).item() if graded else 0.0
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()

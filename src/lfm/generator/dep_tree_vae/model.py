@@ -130,14 +130,13 @@ class DepTreeVAE(nn.Module):
         self.output_head = nn.Linear(h, decoder_vocab)
         self._decoder_vocab = decoder_vocab
 
-        # Z-prediction head: forces decoder hidden states to retain z info.
-        # Without this, the decoder can ignore cross-attention memory and
-        # rely on self-attention alone (posterior collapse).
-        self.z_predictor = nn.Sequential(
-            nn.Linear(h, h),
-            nn.GELU(),
-            nn.Linear(h, cfg.latent.total_dim),
-        )
+        # Z-prediction head (only when z_pred_weight > 0)
+        if cfg.z_pred_weight > 0:
+            self.z_predictor = nn.Sequential(
+                nn.Linear(h, h),
+                nn.GELU(),
+                nn.Linear(h, cfg.latent.total_dim),
+            )
 
         self._pad_id = 0
         self._bos_id = cfg.spm_vocab_size

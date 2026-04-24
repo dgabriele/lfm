@@ -50,14 +50,14 @@ disentanglement:
 kl_weight: 0.2
 kl_free_bits: 0.1
 kl_warmup_steps: 5000
-dip_weight: 0.1
+dip_weight: 0.0
 
 # One-sided: only penalizes below-floor variance
 z_var_weight: 5.0
 z_var_target: 0.05
 
 # Z-prediction: decoder must retain z in hidden states
-z_pred_weight: 1.0
+z_pred_weight: 0.0
 
 # Topology — z distances preserve decoded-output distances
 topo_weight: 1.0
@@ -70,11 +70,11 @@ entropy_weight: 0.05
 completeness_scorer_path: ""
 completeness_weight: 0.0
 
-word_dropout: 0.5
-word_dropout_min: 0.2
-word_dropout_anneal_epochs: 5
+word_dropout: 0.3
+word_dropout_min: 0.05
+word_dropout_anneal_epochs: 3
 
-batch_size: 192
+batch_size: 160
 gradient_accumulation_steps: 2
 lr: 0.0005
 lr_min: 0.0001
