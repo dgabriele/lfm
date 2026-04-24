@@ -166,7 +166,9 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
                 z_var_loss = torch.tensor(0.0, device=device)
                 if cfg.z_var_weight > 0:
                     z = torch.cat([out.z_struct, out.z_content], dim=-1)
-                    z_var_loss = cfg.z_var_weight * (z.var(dim=0) - cfg.z_var_target).pow(2).mean()
+                    per_dim_var = z.var(dim=0)
+                    shortfall = torch.clamp(cfg.z_var_target - per_dim_var, min=0)
+                    z_var_loss = cfg.z_var_weight * shortfall.pow(2).mean()
 
                 # Completeness loss: frozen scorer on decoder's soft-token output.
                 # Rewards structurally complete thoughts, penalizes word salad/loops.
