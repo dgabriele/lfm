@@ -318,12 +318,16 @@ def _kl_schedule(step: int, cfg: DepTreeVAEConfig) -> float:
 @torch.no_grad()
 def _greedy_decode(
     model: DepTreeVAE, z: torch.Tensor, device: torch.device,
-    cfg: DepTreeVAEConfig, sp, max_len: int = 120,
+    cfg: DepTreeVAEConfig, sp, max_len: int | None = None,
+    ngram_block: tuple[int, ...] = (2, 3, 4),
 ) -> list[tuple[str, bool]]:
     """Greedy AR decode from z vectors. Returns list of (text, hit_eos)."""
     from lfm.generator.dep_tree_vae.config import DEP_RELATIONS
     from lfm.generator.dep_tree_vae.skeleton import SKEL_BOS, SKEL_EOS
     from lfm.generator.layers import multiscale_causal_mask
+
+    if max_len is None:
+        max_len = cfg.max_seq_len - 1
 
     b = z.size(0)
     z_struct, z_content = model.latent.split(z)
@@ -349,6 +353,7 @@ def _greedy_decode(
 
         tokens = torch.full((1, 1), model._bos_id, dtype=torch.long, device=device)
         hit_eos = False
+        generated: list[int] = []
         for _ in range(max_len):
             seq_len = tokens.size(1)
             tok_emb = model.dec_token_embedding(tokens)
@@ -359,10 +364,19 @@ def _greedy_decode(
             )
             rope = model._rope_freqs[:seq_len] if model._rope_freqs is not None else None
             hidden = model.phrase_decoder(tok_emb, memory, tgt_mask=tgt_mask, rope_freqs=rope)
-            next_tok = model.output_head(hidden[:, -1:]).argmax(dim=-1)
+            logits = model.output_head(hidden[:, -1, :])
+            for n in ngram_block:
+                if len(generated) >= n - 1:
+                    prefix = tuple(generated[-(n - 1):])
+                    for j in range(len(generated) - n + 1):
+                        if tuple(generated[j:j + n - 1]) == prefix:
+                            banned = generated[j + n - 1]
+                            logits[0, banned] = -float("inf")
+            next_tok = logits.argmax(dim=-1, keepdim=True)
             if next_tok.item() == model._eos_id:
                 hit_eos = True
                 break
+            generated.append(next_tok.item())
             tokens = torch.cat([tokens, next_tok], dim=1)
 
         ids = tokens[0, 1:].tolist()
