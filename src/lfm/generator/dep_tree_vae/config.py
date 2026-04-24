@@ -175,6 +175,10 @@ class DepTreeVAEConfig(LFMBaseConfig):
     entropy_floor: float = 0.0
     entropy_weight: float = 0.0
 
+    # Repetition penalty — penalizes consecutive positions with similar
+    # logit distributions (cosine similarity). Directly targets AR cycling.
+    rep_penalty_weight: float = 0.0
+
     # Completeness scorer — frozen discriminator for structural coherence
     completeness_scorer_path: str = ""
     completeness_weight: float = 0.0

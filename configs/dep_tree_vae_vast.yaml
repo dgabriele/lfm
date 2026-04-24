@@ -17,9 +17,9 @@ encoder_num_heads: 8
 encoder_dropout: 0.1
 
 latent:
-  total_dim: 256
-  struct_dim: 64
-  content_dim: 192
+  total_dim: 384
+  struct_dim: 96
+  content_dim: 288
 
 skeleton:
   mode: parallel
@@ -47,8 +47,8 @@ disentanglement:
   gradient_reversal_scale: 0.0
   hsic_weight: 0.0
 
-kl_weight: 0.2
-kl_free_bits: 0.1
+kl_weight: 0.01
+kl_free_bits: 0.5
 kl_warmup_steps: 5000
 dip_weight: 0.0
 
@@ -66,6 +66,8 @@ interp_weight: 0.0
 # Entropy floor
 entropy_floor: 1.5
 entropy_weight: 0.05
+# Repetition penalty
+rep_penalty_weight: 0.5
 # Completeness scorer
 completeness_scorer_path: ""
 completeness_weight: 0.0
@@ -74,7 +76,7 @@ word_dropout: 0.3
 word_dropout_min: 0.05
 word_dropout_anneal_epochs: 3
 
-batch_size: 160
+batch_size: 176
 gradient_accumulation_steps: 2
 lr: 0.0005
 lr_min: 0.0001

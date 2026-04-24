@@ -182,6 +182,15 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                     valid_ent = out.content_mask.float()
                     entropy_loss = cfg.entropy_weight * (shortfall * valid_ent).sum() / valid_ent.sum().clamp(min=1)
 
+                # Repetition penalty: cosine similarity between consecutive logit vectors
+                rep_loss = torch.tensor(0.0, device=device)
+                if cfg.rep_penalty_weight > 0 and out.logits is not None and out.logits.size(1) > 1:
+                    logits_a = out.logits[:, :-1]
+                    logits_b = out.logits[:, 1:]
+                    cos_sim = F.cosine_similarity(logits_a, logits_b, dim=-1)
+                    valid_pairs = out.content_mask[:, 1:].float()
+                    rep_loss = cfg.rep_penalty_weight * (cos_sim * valid_pairs).sum() / valid_pairs.sum().clamp(min=1)
+
                 # Interpolation smoothness (every 4th step)
                 interp_loss = torch.tensor(0.0, device=device)
                 if cfg.interp_weight > 0 and z.size(0) >= 4 and global_step % 4 == 0 and out.hidden is not None:
@@ -219,7 +228,7 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                         )
                         completeness_loss = -cfg.completeness_weight * scores.mean()
 
-                loss = (out.total_loss + z_var_loss + z_pred_loss + topo_loss + entropy_loss + completeness_loss) / accum
+                loss = (out.total_loss + z_var_loss + z_pred_loss + topo_loss + entropy_loss + rep_loss + completeness_loss) / accum
 
             scaler.scale(loss).backward()
 
