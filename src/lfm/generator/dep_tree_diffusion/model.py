@@ -242,7 +242,10 @@ class DepTreeDiffusionVAE(nn.Module):
         entropy_loss = torch.tensor(0.0, device=device)
         need_low_noise = (cfg.topo_weight > 0 and z.size(0) >= 4) or cfg.entropy_weight > 0
         if need_low_noise:
-            t_low = torch.full((tokens.size(0), tokens.size(1)), 0.1, device=device)
+            t_global_low = torch.full((tokens.size(0),), 0.1, device=device)
+            t_low = self.diffusion_decoder.tree_noise_schedule(
+                t_global_low, depths, cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
+            )
             x0_clean = self.diffusion_decoder.token_embedding(
                 tokens.clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
             )
@@ -287,7 +290,10 @@ class DepTreeDiffusionVAE(nn.Module):
             z_b = z[n_pairs:2 * n_pairs]
             z_mid = 0.5 * z_a + 0.5 * z_b
 
-            t_low_i = torch.full((n_pairs, tokens.size(1)), 0.1, device=device)
+            t_global_i = torch.full((n_pairs,), 0.1, device=device)
+            t_low_i = self.diffusion_decoder.tree_noise_schedule(
+                t_global_i, depths[:n_pairs], cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
+            )
             x0_i = self.diffusion_decoder.token_embedding(
                 tokens[:n_pairs].clamp(max=self.diffusion_decoder.token_embedding.num_embeddings - 1)
             )

@@ -82,7 +82,7 @@ word_dropout_min: 0.05
 word_dropout_anneal_epochs: 3
 
 # Training — RTX 3090 (24GB), ~4-5GB headroom target
-batch_size: 64
+batch_size: 80
 gradient_accumulation_steps: 3
 lr: 0.0005
 lr_min: 0.0001

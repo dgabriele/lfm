@@ -107,113 +107,99 @@ def _process_chunk(args: tuple) -> list[dict] | None:
     return results
 
 
+_CHUNK_SIZE = 100_000
+
+
 def build_diffusion_cache(
     jsonl_path: str | Path,
     spm_path: str,
     max_seq_len: int,
     cache_dir: str | Path,
     max_samples: int | None = None,
-    num_workers: int = 0,
+    num_workers: int = 8,
 ) -> None:
-    """Build cache with depths + role token counts. Parallelized."""
+    """Build cache with depths + role token counts.
+
+    Single pass: read JSONL in chunks, process chunks in parallel
+    (JSON parse + SPM encode + depth compute), then assemble into
+    pre-allocated flat arrays sequentially.
+    """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    sp = spm.SentencePieceProcessor()
-    sp.Load(spm_path)
-    spm_size = sp.get_piece_size()
-    eos_id = spm_size + 1
-    role_offset = spm_size + 2
-
-    # Two-pass: pass 1 counts sizes, pass 2 fills pre-allocated arrays.
-    # Sequential but memory-efficient — no 10M-record list in RAM.
-
-    # Pass 1: scan to count sizes and build index
-    index: list[tuple[int, int, int, int]] = []
-    inter_offset = 0
-    skel_offset = 0
-    filtered = 0
+    # Read lines and dispatch to worker pool in chunks
+    logger.info("Reading JSONL and dispatching to %d workers...", num_workers)
+    chunks: list[list[str]] = []
+    current_chunk: list[str] = []
+    total_lines = 0
 
     with open(jsonl_path) as f:
         for line in f:
-            if max_samples and len(index) >= max_samples:
+            current_chunk.append(line)
+            total_lines += 1
+            if len(current_chunk) >= _CHUNK_SIZE:
+                chunks.append(current_chunk)
+                current_chunk = []
+            if max_samples and total_lines >= max_samples * 1.2:
                 break
-            rec = json.loads(line)
-            ipa_words = rec["ipa"].split()
-            dep_labels = rec["dep_labels"]
-            if len(ipa_words) != len(dep_labels):
-                filtered += 1
-                continue
-            inter_len = sum(1 + len(sp.encode(w, out_type=int)) for w in ipa_words) + 1
-            if inter_len > max_seq_len:
-                filtered += 1
-                continue
-            skel_len = len(dep_labels) + 2
-            index.append((inter_offset, inter_len, skel_offset, skel_len))
-            inter_offset += inter_len
-            skel_offset += skel_len
-            if len(index) % 2_000_000 == 0:
-                logger.info("  pass 1: %dM samples...", len(index) // 1_000_000)
+        if current_chunk:
+            chunks.append(current_chunk)
 
-    logger.info("  pass 1: %d samples, %dM tokens", len(index), inter_offset // 1_000_000)
+    logger.info("  %d lines in %d chunks, processing...", total_lines, len(chunks))
 
-    # Pre-allocate flat arrays
+    chunk_args = [(chunk, spm_path, max_seq_len) for chunk in chunks]
+
+    if num_workers > 1:
+        with mp.Pool(num_workers) as pool:
+            chunk_results = []
+            for i, result in enumerate(pool.imap(_process_chunk, chunk_args)):
+                chunk_results.append(result)
+                done = sum(len(r) for r in chunk_results)
+                if (i + 1) % 10 == 0:
+                    logger.info("  processed %d/%d chunks (%dM samples)...",
+                                i + 1, len(chunks), done // 1_000_000)
+    else:
+        chunk_results = [_process_chunk(a) for a in chunk_args]
+
+    # Flatten and optionally truncate to max_samples
+    all_records: list[dict] = []
+    for cr in chunk_results:
+        if cr:
+            all_records.extend(cr)
+        if max_samples and len(all_records) >= max_samples:
+            all_records = all_records[:max_samples]
+            break
+
+    n = len(all_records)
+    logger.info("  %d samples after filtering, assembling arrays...", n)
+
+    # Compute offsets (sequential prefix sum — fast, no SPM work)
+    inter_offset = 0
+    skel_offset = 0
+    index: list[tuple[int, int, int, int]] = []
+    for rec in all_records:
+        i_len = len(rec["interleaved"])
+        s_len = len(rec["skeleton"])
+        index.append((inter_offset, i_len, skel_offset, s_len))
+        inter_offset += i_len
+        skel_offset += s_len
+
+    # Pre-allocate and fill
     inter_flat = np.zeros(inter_offset, dtype=np.int16)
     skel_flat = np.zeros(skel_offset, dtype=np.int16)
     depth_flat = np.zeros(inter_offset, dtype=np.int8)
     role_counts_flat = np.zeros(skel_offset, dtype=np.int8)
+
+    for i, rec in enumerate(all_records):
+        off_i, len_i, off_s, len_s = index[i]
+        inter_flat[off_i:off_i + len_i] = rec["interleaved"]
+        depth_flat[off_i:off_i + len_i] = np.clip(rec["depths"], 0, 127)
+        skel_flat[off_s:off_s + len_s] = rec["skeleton"]
+        role_counts_flat[off_s:off_s + len_s] = np.clip(rec["role_token_counts"], 0, 127)
+        if (i + 1) % 2_000_000 == 0:
+            logger.info("  assembled %dM/%dM...", (i + 1) // 1_000_000, n // 1_000_000)
+
     index_arr = np.array(index, dtype=np.int64)
-
-    # Pass 2: fill arrays
-    sample_idx = 0
-    with open(jsonl_path) as f:
-        for line in f:
-            if sample_idx >= len(index):
-                break
-            rec = json.loads(line)
-            ipa_words = rec["ipa"].split()
-            dep_labels = rec["dep_labels"]
-            dep_heads = rec.get("dep_heads", [0] * len(dep_labels))
-            if len(ipa_words) != len(dep_labels):
-                continue
-
-            word_depths = _compute_depths(dep_heads)
-
-            interleaved = []
-            token_depths = []
-            role_sequence = []
-            tokens_per_role = []
-
-            for label, word, depth in zip(dep_labels, ipa_words, word_depths):
-                role_id = DEP_REL_TO_ID.get(label, DEP_REL_TO_ID.get("dep", 0))
-                interleaved.append(role_offset + role_id)
-                token_depths.append(depth)
-                word_tids = sp.encode(word, out_type=int)
-                for tid in word_tids:
-                    interleaved.append(tid)
-                    token_depths.append(depth)
-                role_sequence.append(role_id)
-                tokens_per_role.append(len(word_tids))
-
-            interleaved.append(eos_id)
-            token_depths.append(0)
-
-            if len(interleaved) > max_seq_len:
-                continue
-
-            skeleton = [SKEL_BOS] + role_sequence + [SKEL_EOS]
-            role_counts_padded = [0] + tokens_per_role + [0]
-
-            off_i, len_i, off_s, len_s = index[sample_idx]
-            inter_flat[off_i:off_i + len_i] = interleaved
-            depth_flat[off_i:off_i + len_i] = np.clip(token_depths, 0, 127)
-            skel_flat[off_s:off_s + len_s] = skeleton
-            role_counts_flat[off_s:off_s + len_s] = np.clip(role_counts_padded, 0, 127)
-            sample_idx += 1
-
-            if sample_idx % 2_000_000 == 0:
-                logger.info("  pass 2: %dM filled...", sample_idx // 1_000_000)
-
     np.save(cache_dir / "interleaved.npy", inter_flat)
     np.save(cache_dir / "skeletons.npy", skel_flat)
     np.save(cache_dir / "depths.npy", depth_flat)
@@ -222,7 +208,7 @@ def build_diffusion_cache(
 
     logger.info(
         "Diffusion cache: %d samples, %dM tokens, depths [0, %d]",
-        len(index), inter_offset // 1_000_000, depth_flat.max(),
+        n, inter_offset // 1_000_000, depth_flat.max(),
     )
 
 

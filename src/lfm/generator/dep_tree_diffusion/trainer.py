@@ -175,18 +175,20 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
                     # Get decoder logits from a low-noise forward pass (t≈0.1)
                     # so the output is close to what generation produces.
                     with torch.amp.autocast(device_type=device.type, enabled=False):
-                        t_low = torch.full((batch["tokens"].size(0),), 0.1, device=device)
                         depths_b = batch["depths"]
+                        t_global_low = torch.full((batch["tokens"].size(0),), 0.1, device=device)
+                        t_low = model.diffusion_decoder.tree_noise_schedule(
+                            t_global_low, depths_b, cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
+                        )
                         x0 = model.diffusion_decoder.token_embedding(
                             batch["tokens"].clamp(max=model.diffusion_decoder.token_embedding.num_embeddings - 1)
                         )
-                        x_t, _ = model.diffusion_decoder.add_noise(x0, t_low.unsqueeze(1).expand_as(depths_b))
+                        x_t, _ = model.diffusion_decoder.add_noise(x0, t_low)
                         per_token_roles = model._extract_per_token_roles(batch["tokens"], batch["lengths"])
                         z_mem = model._z_to_memory(torch.cat([out.z_struct, out.z_content], dim=-1))
                         padding = torch.arange(batch["tokens"].size(1), device=device).unsqueeze(0) >= batch["lengths"].unsqueeze(1)
                         x0_pred = model.diffusion_decoder(
-                            x_t, t_low.unsqueeze(1).expand_as(depths_b),
-                            per_token_roles, depths_b, z_mem, padding,
+                            x_t, t_low, per_token_roles, depths_b, z_mem, padding,
                         )
                         logits = model.diffusion_decoder.output_head(x0_pred)
                         # Truncate to scorer's vocab size (SPM tokens only)
@@ -229,6 +231,12 @@ def train_dep_tree_diffusion(cfg: DepTreeDiffusionConfig) -> None:
                     try:
                         _prior_diagnostic(model, sp, device, cfg)
                         _downstream_diagnostic(model, sp, device, cfg)
+                        from lfm.generator.dep_tree_diffusion.diagnostics import checkpoint_digest
+                        metrics = checkpoint_digest(model, sp, device, cfg)
+                        val_ce = metrics.get("ce_total", float("inf"))
+                        if val_ce < best_val_loss:
+                            best_val_loss = val_ce
+                            _save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, best_val_loss, out_dir, name="best.pt")
                     except RuntimeError as e:
                         if "out of memory" in str(e):
                             logger.warning("OOM during diagnostics — skipping (step=%d)", global_step)
@@ -453,7 +461,10 @@ def _downstream_diagnostic(
     decoded_reprs = []
     for i in range(z_all.size(0)):
         z_mem = model._z_to_memory(z_all[i:i+1])
-        t_low = torch.full((1, tokens.size(1)), 0.1, device=device)
+        t_global_low = torch.full((1,), 0.1, device=device)
+        t_low = model.diffusion_decoder.tree_noise_schedule(
+            t_global_low, depths[i:i+1], cfg.diffusion.depth_scale, cfg.diffusion.min_noise,
+        )
         x0 = model.diffusion_decoder.token_embedding(
             tokens[i:i+1].clamp(max=model.diffusion_decoder.token_embedding.num_embeddings - 1)
         )
@@ -481,8 +492,7 @@ def _downstream_diagnostic(
     model.train()
 
 
-def _save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, best_val_loss, out_dir):
-    # Strip _orig_mod. prefix from torch.compile wrapped modules
+def _save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, best_val_loss, out_dir, name="resume.pt"):
     state = model.state_dict()
     state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
     ckpt = {
@@ -494,5 +504,5 @@ def _save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, be
         "global_step": global_step,
         "best_val_loss": best_val_loss,
     }
-    torch.save(ckpt, out_dir / "resume.pt")
-    logger.info("Checkpoint at step %d (epoch %d)", global_step, epoch)
+    torch.save(ckpt, out_dir / name)
+    logger.info("Saved %s at step %d (epoch %d, best_ce=%.4f)", name, global_step, epoch, best_val_loss)
