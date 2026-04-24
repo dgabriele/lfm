@@ -130,12 +130,19 @@ class DepTreeVAE(nn.Module):
         self.output_head = nn.Linear(h, decoder_vocab)
         self._decoder_vocab = decoder_vocab
 
-        # IDs (match pretrained decoder convention)
-        self._pad_id = 0
-        self._bos_id = cfg.spm_vocab_size      # 8000
-        self._eos_id = cfg.spm_vocab_size + 1   # 8001
+        # Z-prediction head: forces decoder hidden states to retain z info.
+        # Without this, the decoder can ignore cross-attention memory and
+        # rely on self-attention alone (posterior collapse).
+        self.z_predictor = nn.Sequential(
+            nn.Linear(h, h),
+            nn.GELU(),
+            nn.Linear(h, cfg.latent.total_dim),
+        )
 
-        # Word dropout rate (set by trainer per step via annealing schedule)
+        self._pad_id = 0
+        self._bos_id = cfg.spm_vocab_size
+        self._eos_id = cfg.spm_vocab_size + 1
+
         self._word_dropout_p: float = 0.0
 
         # Z distribution stats (updated during training for downstream calibration)

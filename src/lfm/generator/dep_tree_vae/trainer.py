@@ -146,6 +146,14 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                     shortfall = torch.clamp(cfg.z_var_target - per_dim_var, min=0)
                     z_var_loss = cfg.z_var_weight * shortfall.pow(2).mean()
 
+                # Z-prediction: decoder hidden states must retain z info
+                z_pred_loss = torch.tensor(0.0, device=device)
+                if cfg.z_pred_weight > 0 and out.hidden is not None:
+                    valid = out.content_mask.unsqueeze(-1).float()
+                    pooled = (out.hidden * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+                    z_hat = model.z_predictor(pooled)
+                    z_pred_loss = cfg.z_pred_weight * F.mse_loss(z_hat, z.detach())
+
                 # Topology: z-distance vs output-distance correlation
                 topo_loss = torch.tensor(0.0, device=device)
                 topo_rho = torch.tensor(0.0, device=device)
@@ -209,7 +217,7 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                         )
                         completeness_loss = -cfg.completeness_weight * scores.mean()
 
-                loss = (out.total_loss + z_var_loss + topo_loss + entropy_loss + completeness_loss) / accum
+                loss = (out.total_loss + z_var_loss + z_pred_loss + topo_loss + entropy_loss + completeness_loss) / accum
 
             scaler.scale(loss).backward()
 

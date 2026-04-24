@@ -160,6 +160,11 @@ class DepTreeVAEConfig(LFMBaseConfig):
     z_var_weight: float = 0.0
     z_var_target: float = 0.05
 
+    # Z-prediction: forces decoder hidden states to retain z information.
+    # Small MLP predicts z from pooled hidden states — prevents the decoder
+    # from ignoring cross-attention memory (posterior collapse).
+    z_pred_weight: float = 0.0
+
     # Topology — z distances preserve decoded-output distances
     topo_weight: float = 0.0
 
