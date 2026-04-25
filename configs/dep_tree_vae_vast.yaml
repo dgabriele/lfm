@@ -85,7 +85,10 @@ eos_class_weight: 3.0
 # Length-prediction head — z encodes the target token count.
 # When use_predicted_length_at_decode is true, _greedy_decode takes
 # the per-sample prediction as expected_len, replacing the global default.
-length_pred_weight: 0.1
+# Bumped 0.1 → 0.5: at 0.1 the head's gradient was too weak vs recon's 1.0,
+# producing oscillating per-sample length predictions and propagating
+# the instability through the count head's renormalization.
+length_pred_weight: 0.5
 use_predicted_length_at_decode: true
 
 # Per-role token-count head — predicts tokens-per-role from per-role memory.
@@ -93,7 +96,8 @@ use_predicted_length_at_decode: true
 # with a non-uniform distribution matching the training data, eliminating
 # the failure mode where multiple consecutive positions receive the same
 # role and the decoder cycles on role-typical fillers.
-tokens_per_role_weight: 0.1
+# Bumped 0.1 → 0.3 to give stronger head training signal.
+tokens_per_role_weight: 0.3
 max_tokens_per_role: 12
 
 # Decode-time defaults (used by _greedy_decode and downstream pipelines).
