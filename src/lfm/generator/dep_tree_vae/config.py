@@ -65,18 +65,17 @@ DEP_REL_TO_ID = {rel: i for i, rel in enumerate(DEP_RELATIONS)}
 
 
 class LatentConfig(LFMBaseConfig):
-    """Latent space split configuration."""
+    """Latent space configuration.
+
+    The struct/content split is no longer enforced — both downstream modules
+    (SkeletonDecoder, PhraseZProjector) read the full latent. ``struct_dim``
+    and ``content_dim`` remain as input-width settings for those modules and
+    should normally equal ``total_dim``.
+    """
 
     total_dim: int = 256
-    struct_dim: int = 64
-    content_dim: int = 192
-
-    def model_post_init(self, __context: object) -> None:
-        if self.struct_dim + self.content_dim != self.total_dim:
-            raise ValueError(
-                f"struct_dim ({self.struct_dim}) + content_dim "
-                f"({self.content_dim}) must equal total_dim ({self.total_dim})"
-            )
+    struct_dim: int = 256
+    content_dim: int = 256
 
 
 class SkeletonDecoderConfig(LFMBaseConfig):

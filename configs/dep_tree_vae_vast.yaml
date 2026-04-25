@@ -18,8 +18,8 @@ encoder_dropout: 0.1
 
 latent:
   total_dim: 384
-  struct_dim: 96
-  content_dim: 288
+  struct_dim: 384
+  content_dim: 384
 
 skeleton:
   mode: parallel
@@ -41,11 +41,11 @@ share_decoder_layers: true
 freeze_decoder: false
 
 disentanglement:
-  struct_cls_weight: 1.0
-  content_bow_weight: 0.5
-  adversarial_weight: 0.1
-  gradient_reversal_scale: 1.0
-  hsic_weight: 0.5
+  struct_cls_weight: 0.0
+  content_bow_weight: 0.0
+  adversarial_weight: 0.0
+  gradient_reversal_scale: 0.0
+  hsic_weight: 0.0
 
 kl_weight: 0.01
 kl_free_bits: 0.5

@@ -434,6 +434,39 @@ class DepTreeVAE(nn.Module):
         bow[:, 0] = 0  # Don't count padding
         return bow
 
+    def autotune(
+        self,
+        val_z: Tensor,
+        sp,
+        source_texts: list[str] | None = None,
+        st_model=None,
+        **grid_kwargs,
+    ):
+        """Grid-search ``_greedy_decode`` knobs on a fixed latent batch.
+
+        Thin wrapper around :class:`lfm.generator.dep_tree_vae.autotune.DecodeAutotuner`.
+        Returns a list of ``(DecodeConfig, DecodeMetrics)`` ranked by composite
+        score (highest first). See ``DecodeAutotuner.grid_search`` for the
+        per-axis grids that can be passed through ``grid_kwargs``.
+
+        Args:
+            val_z: ``(B, total_dim)`` latent vectors to decode under each setting.
+            sp: SentencePieceProcessor used by the decoder.
+            source_texts: Optional ``B`` reference strings — enables length-MAE
+                and (with ``st_model``) semantic-score metrics.
+            st_model: Optional SentenceTransformer for semantic similarity.
+            **grid_kwargs: Forwarded to ``DecodeAutotuner.grid_search``
+                (``eos_boosts``, ``expected_lens``, ``ngram_blocks``, ``verbose``).
+        """
+        from lfm.generator.dep_tree_vae.autotune import DecodeAutotuner
+
+        device = next(self.parameters()).device
+        tuner = DecodeAutotuner(
+            self, sp, self.cfg, device, val_z,
+            source_texts=source_texts, st_model=st_model,
+        )
+        return tuner.grid_search(**grid_kwargs)
+
     def trainable_parameters(self) -> list[dict]:
         """Parameter groups for optimizer setup."""
         frozen = set()

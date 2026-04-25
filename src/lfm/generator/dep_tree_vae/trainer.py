@@ -137,7 +137,7 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                     kl_weight=kl_weight,
                 )
 
-                z = torch.cat([out.z_struct, out.z_content], dim=-1)
+                z = out.z_struct  # full latent (struct/content aliases)
 
                 # One-sided z_var: only penalize below-floor variance
                 z_var_loss = torch.tensor(0.0, device=device)
@@ -441,7 +441,6 @@ def _checkpoint_digest(
     logger.info("  eos_rate=%.0f%%", eos_count / n_recon * 100)
 
     # ── POSTERIOR INTERPOLATION ──────────────────────────────────
-    struct_dim = cfg.latent.struct_dim
     logger.info("── Posterior Interpolation (n=%d pairs) ──", n_interp)
     for i in range(min(n_interp, tokens.size(0) // 2)):
         a_idx, b_idx = i * 2, i * 2 + 1
@@ -452,22 +451,6 @@ def _checkpoint_digest(
         logger.info("  interp[%d] A:   %s", i, respell(texts[0][0]))
         logger.info("  interp[%d] mid: %s", i, respell(texts[1][0]))
         logger.info("  interp[%d] B:   %s", i, respell(texts[2][0]))
-
-        # Struct-only interpolation
-        z_struct_mid = torch.cat([
-            0.5 * z_a[:struct_dim] + 0.5 * z_b[:struct_dim],
-            z_a[struct_dim:],
-        ])
-        texts_s = _greedy_decode(model, z_struct_mid.unsqueeze(0), device, cfg, sp)
-        logger.info("  struct_mid[%d]:  %s", i, respell(texts_s[0][0]))
-
-        # Content-only interpolation
-        z_content_mid = torch.cat([
-            z_a[:struct_dim],
-            0.5 * z_a[struct_dim:] + 0.5 * z_b[struct_dim:],
-        ])
-        texts_c = _greedy_decode(model, z_content_mid.unsqueeze(0), device, cfg, sp)
-        logger.info("  content_mid[%d]: %s", i, respell(texts_c[0][0]))
 
     # ── PRIOR INTERPOLATION ─────────────────────────────────────
     logger.info("── Prior Interpolation (z ~ N(0,1)) ──")
