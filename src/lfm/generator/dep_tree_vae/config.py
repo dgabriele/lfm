@@ -195,6 +195,13 @@ class DepTreeVAEConfig(LFMBaseConfig):
     length_pred_weight: float = 0.0
     use_predicted_length_at_decode: bool = False
 
+    # Per-role token-count head — auxiliary head that predicts how many
+    # tokens each dependency role spans, from the per-role memory. Provides
+    # the inference role-to-position mapping that mirrors the training
+    # distribution, replacing the uniform monotonic walk.
+    tokens_per_role_weight: float = 0.0
+    max_tokens_per_role: int = 12  # categorical bucket cap (0..N inclusive)
+
     # Decode-time defaults (also consumed as fallbacks by ``_greedy_decode``).
     eos_boost: float = 3.0
     expected_len: int = 13

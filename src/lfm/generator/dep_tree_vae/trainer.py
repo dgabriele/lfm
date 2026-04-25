@@ -382,17 +382,41 @@ def _greedy_decode(
             else expected_len
         )
 
-        # Per-position role for the decoder input — monotonic walk through
-        # the predicted role sequence, distributed evenly across the target
-        # length. Mirrors what ``content_roles`` provided during training.
+        # Per-position role for the decoder input. Two strategies:
+        #   1. If the model has a tokens_per_role_head, use its argmax count
+        #      per role to build a non-uniform distribution that mirrors
+        #      training (roles span variable token counts).
+        #   2. Otherwise fall back to a uniform monotonic walk.
         per_pos_role_emb: torch.Tensor | None = None
         if hasattr(model, "decoder_role_emb"):
             n_roles = max(len(roles), 1)
-            per_pos_ids: list[int] = []
             target_for_dist = max(sample_expected_len, 1)
-            for j in range(max_len):
-                idx = min(int(j * n_roles / target_for_dist), n_roles - 1)
-                per_pos_ids.append(roles[idx])
+
+            counts: list[int] | None = None
+            if hasattr(model, "tokens_per_role_head"):
+                # memory has shape (1, n_roles, h); predict count per role
+                role_count_logits = model.tokens_per_role_head(memory)
+                pred_counts = role_count_logits.argmax(dim=-1).clamp(min=1).squeeze(0)
+                # Trim to actual role count present
+                pred_counts = pred_counts[:n_roles].tolist()
+                # Renormalize so total ≈ target_for_dist (preserve length-head budget).
+                total_pred = max(int(sum(pred_counts)), 1)
+                scale = target_for_dist / total_pred
+                counts = [max(1, int(round(c * scale))) for c in pred_counts]
+
+            per_pos_ids: list[int] = []
+            if counts is not None:
+                for r_idx, n_tok in zip(range(n_roles), counts):
+                    per_pos_ids.extend([roles[r_idx]] * n_tok)
+                # Pad / truncate to max_len; pad with the last role if short.
+                if len(per_pos_ids) < max_len:
+                    per_pos_ids.extend([roles[-1]] * (max_len - len(per_pos_ids)))
+                per_pos_ids = per_pos_ids[:max_len]
+            else:
+                for j in range(max_len):
+                    idx = min(int(j * n_roles / target_for_dist), n_roles - 1)
+                    per_pos_ids.append(roles[idx])
+
             per_pos_role_emb = model.decoder_role_emb(
                 torch.tensor(per_pos_ids, device=device, dtype=torch.long)
             )  # (max_len, h)

@@ -46,6 +46,7 @@ class DepTreeVAEOutput:
     logits: Tensor | None = None
     content_mask: Tensor | None = None
     length_loss: Tensor | None = None
+    tokens_per_role_loss: Tensor | None = None
 
     @property
     def total_loss(self) -> Tensor:
@@ -58,6 +59,8 @@ class DepTreeVAEOutput:
         )
         if self.length_loss is not None:
             total = total + self.length_loss
+        if self.tokens_per_role_loss is not None:
+            total = total + self.tokens_per_role_loss
         return total
 
 
@@ -161,6 +164,18 @@ class DepTreeVAE(nn.Module):
         # attention, causing high-prior tokens to win the argmax.
         self.decoder_role_emb = nn.Embedding(NUM_DEP_RELATIONS, h)
 
+        # Per-role token-count head — predicts how many tokens each
+        # dep role spans, from the per-role memory. At training, supervised
+        # against actual counts derived from ``tokens_per_role_pos``.
+        # At inference, replaces the uniform monotonic role-to-position
+        # mapping with a non-uniform distribution that mirrors training.
+        if cfg.tokens_per_role_weight > 0:
+            self.tokens_per_role_head = nn.Sequential(
+                nn.Linear(cfg.decoder_hidden_dim, 64),
+                nn.GELU(),
+                nn.Linear(64, cfg.max_tokens_per_role + 1),
+            )
+
         self._pad_id = 0
         self._bos_id = cfg.spm_vocab_size
         self._eos_id = cfg.spm_vocab_size + 1
@@ -245,7 +260,7 @@ class DepTreeVAE(nn.Module):
         )
 
         # 4. Build per-role memory from z_content + skeleton roles
-        content_tokens, content_lengths, content_roles, _ = (
+        content_tokens, content_lengths, content_roles, _, tokens_per_role_pos = (
             self._split_roles_and_content(tokens, lengths)
         )
         content_lengths = content_lengths.clamp(min=1)
@@ -274,6 +289,36 @@ class DepTreeVAE(nn.Module):
             length_loss = self.cfg.length_pred_weight * F.cross_entropy(
                 length_logits, target_len,
             )
+
+        # 5c. Per-role token-count prediction (auxiliary)
+        tokens_per_role_loss: Tensor | None = None
+        if hasattr(self, "tokens_per_role_head") and self.cfg.tokens_per_role_weight > 0:
+            r_count = memory.size(1)
+            count_logits = self.tokens_per_role_head(memory)  # (B, R, max_count+1)
+            # GT: tokens_per_role_pos[b, r] for r in 1..r_count (skip "before any role" at idx 0)
+            target_counts = tokens_per_role_pos[:, 1 : r_count + 1].clamp(
+                max=self.cfg.max_tokens_per_role,
+            ).long()
+            # Pad target to r_count if data has fewer roles than memory width
+            if target_counts.size(1) < r_count:
+                pad = torch.zeros(
+                    target_counts.size(0), r_count - target_counts.size(1),
+                    device=device, dtype=torch.long,
+                )
+                target_counts = torch.cat([target_counts, pad], dim=1)
+            # Mask: only score positions inside the actual role count.
+            actual_role_count = (role_lengths - 1).clamp(min=0)
+            role_mask = (
+                torch.arange(r_count, device=device).unsqueeze(0)
+                < actual_role_count.unsqueeze(1)
+            )
+            flat_logits = count_logits.reshape(-1, count_logits.size(-1))
+            flat_targets = target_counts.reshape(-1)
+            flat_mask = role_mask.reshape(-1)
+            if int(flat_mask.sum()) > 0:
+                tokens_per_role_loss = self.cfg.tokens_per_role_weight * F.cross_entropy(
+                    flat_logits[flat_mask], flat_targets[flat_mask],
+                )
 
         # 6. KL divergence
         kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
@@ -310,11 +355,12 @@ class DepTreeVAE(nn.Module):
             logits=logits,
             content_mask=content_mask,
             length_loss=length_loss,
+            tokens_per_role_loss=tokens_per_role_loss,
         )
 
     def _split_roles_and_content(
         self, tokens: Tensor, lengths: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Split interleaved sequence into role ids and content token ids.
 
         Role tokens have ids >= role_offset.  Each role token applies
@@ -326,6 +372,9 @@ class DepTreeVAE(nn.Module):
             content_lengths: ``(B,)`` number of content tokens per sample.
             content_roles: ``(B, max_content)`` dep role id per content token.
             content_positions: ``(B, max_content)`` position indices.
+            tokens_per_role_pos: ``(B, max_role_positions+1)`` count of content
+                tokens belonging to each role position. Index 0 is "before
+                any role marker"; index r ≥ 1 is the count for the r-th role.
         """
         b, s = tokens.shape
         device = tokens.device
@@ -372,7 +421,19 @@ class DepTreeVAE(nn.Module):
         content_lengths = content_counts.clamp(min=1)
         positions = torch.arange(max_content, device=device).unsqueeze(0).expand(b, -1)
 
-        return content_tokens, content_lengths, content_roles, positions
+        # Tokens per role POSITION (not type) — derived from role_group, which
+        # increments at every role marker. Index r ≥ 1 corresponds to the r-th
+        # role in the skeleton; index 0 holds tokens before any role marker.
+        max_role_pos = self.cfg.skeleton.max_roles + 1
+        tokens_per_role_pos = torch.zeros(
+            b, max_role_pos, device=device, dtype=torch.long,
+        )
+        ones_for_content = is_content.long()
+        tokens_per_role_pos.scatter_add_(
+            1, role_group.clamp(max=max_role_pos - 1), ones_for_content,
+        )
+
+        return content_tokens, content_lengths, content_roles, positions, tokens_per_role_pos
 
     def _decode_and_loss(
         self,

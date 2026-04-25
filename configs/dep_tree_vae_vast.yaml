@@ -63,11 +63,17 @@ z_pred_weight: 0.0
 topo_weight: 1.0
 # Interpolation smoothness (placeholder — needs z_mid decode)
 interp_weight: 0.0
-# Entropy floor
-entropy_floor: 1.5
-entropy_weight: 0.05
-# Repetition penalty
-rep_penalty_weight: 0.5
+# Entropy floor — DROPPED. The 1.5-nat floor in an 8000-vocab decoder
+# was forcing every output position to spread mass over 4-5 tokens,
+# preventing confident commits to specific lexical content and biasing
+# the argmax toward high-prior fillers (cycling cause).
+entropy_floor: 0.0
+entropy_weight: 0.0
+# Repetition penalty — DROPPED. Cosine-sim of consecutive logit vectors
+# wasn't catching the actual cycling we observed (adjacent identical
+# argmax tokens from prior-dominated distributions). Role conditioning
+# + per-role token-count head address the structural cause directly.
+rep_penalty_weight: 0.0
 # Completeness scorer
 completeness_scorer_path: ""
 completeness_weight: 0.0
@@ -81,6 +87,14 @@ eos_class_weight: 3.0
 # the per-sample prediction as expected_len, replacing the global default.
 length_pred_weight: 0.1
 use_predicted_length_at_decode: true
+
+# Per-role token-count head — predicts tokens-per-role from per-role memory.
+# At inference, replaces the uniform monotonic role-to-position mapping
+# with a non-uniform distribution matching the training data, eliminating
+# the failure mode where multiple consecutive positions receive the same
+# role and the decoder cycles on role-typical fillers.
+tokens_per_role_weight: 0.1
+max_tokens_per_role: 12
 
 # Decode-time defaults (used by _greedy_decode and downstream pipelines).
 # Empirically tuned via DecodeAutotuner; with the length head + EOS
