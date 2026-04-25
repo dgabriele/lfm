@@ -153,6 +153,14 @@ class DepTreeVAE(nn.Module):
                 nn.Linear(128, cfg.max_seq_len),
             )
 
+        # Per-token role conditioning: every decoder input position is
+        # told which dependency role the token it's about to predict
+        # belongs to. Without this, the AR decoder must infer the
+        # current role from cross-attention alone — which fragments at
+        # tail positions where multiple similar roles produce ambiguous
+        # attention, causing high-prior tokens to win the argmax.
+        self.decoder_role_emb = nn.Embedding(NUM_DEP_RELATIONS, h)
+
         self._pad_id = 0
         self._bos_id = cfg.spm_vocab_size
         self._eos_id = cfg.spm_vocab_size + 1
@@ -255,6 +263,7 @@ class DepTreeVAE(nn.Module):
         # 5. Reconstruct through the phrase decoder
         recon_loss, hidden, logits, content_mask = self._decode_and_loss(
             tokens, lengths, memory, content_tokens, content_lengths,
+            content_roles=content_roles,
         )
 
         # 5b. Length prediction (auxiliary)
@@ -372,6 +381,7 @@ class DepTreeVAE(nn.Module):
         memory: Tensor,
         content_tokens: Tensor,
         content_lengths: Tensor,
+        content_roles: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Run phrase decoder on content tokens with role-level memory.
 
@@ -400,6 +410,16 @@ class DepTreeVAE(nn.Module):
             drop_mask = torch.rand(b, cs, 1, device=device) < self._word_dropout_p
             drop_mask[:, 0] = False
             dec_input = dec_input.masked_fill(drop_mask, 0.0)
+
+        # Per-token role conditioning. ``content_roles[i]`` is the role of the
+        # token being PREDICTED at input position i (input i is BOS or
+        # content_tokens[i-1]; output i is content_tokens[i]). Adding the role
+        # embedding gives the decoder explicit "current role" context, instead
+        # of forcing it to infer role from cross-attention alone.
+        if content_roles is not None and hasattr(self, "decoder_role_emb"):
+            role_ids_in = content_roles[:, :cs].clamp(max=NUM_DEP_RELATIONS - 1)
+            dec_input = dec_input + self.decoder_role_emb(role_ids_in)
+
         if not isinstance(self.dec_pos_embedding, nn.Identity):
             pos = torch.arange(cs, device=device).unsqueeze(0)
             dec_input = dec_input + self.dec_pos_embedding(pos)

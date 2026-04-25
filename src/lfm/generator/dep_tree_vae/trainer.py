@@ -382,12 +382,29 @@ def _greedy_decode(
             else expected_len
         )
 
+        # Per-position role for the decoder input — monotonic walk through
+        # the predicted role sequence, distributed evenly across the target
+        # length. Mirrors what ``content_roles`` provided during training.
+        per_pos_role_emb: torch.Tensor | None = None
+        if hasattr(model, "decoder_role_emb"):
+            n_roles = max(len(roles), 1)
+            per_pos_ids: list[int] = []
+            target_for_dist = max(sample_expected_len, 1)
+            for j in range(max_len):
+                idx = min(int(j * n_roles / target_for_dist), n_roles - 1)
+                per_pos_ids.append(roles[idx])
+            per_pos_role_emb = model.decoder_role_emb(
+                torch.tensor(per_pos_ids, device=device, dtype=torch.long)
+            )  # (max_len, h)
+
         tokens = torch.full((1, 1), model._bos_id, dtype=torch.long, device=device)
         hit_eos = False
         generated: list[int] = []
         for _ in range(max_len):
             seq_len = tokens.size(1)
             tok_emb = model.dec_token_embedding(tokens)
+            if per_pos_role_emb is not None:
+                tok_emb = tok_emb + per_pos_role_emb[:seq_len].unsqueeze(0)
             tgt_mask = multiscale_causal_mask(
                 seq_len, cfg.decoder_num_heads,
                 tuple(cfg.attention_head_windows),
