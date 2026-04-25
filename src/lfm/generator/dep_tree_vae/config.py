@@ -182,6 +182,24 @@ class DepTreeVAEConfig(LFMBaseConfig):
     completeness_scorer_path: str = ""
     completeness_weight: float = 0.0
 
+    # EOS sharpening — multiplier on EOS token's contribution to next-token
+    # cross-entropy. EOS is rare per sample but high-stakes; upweighting
+    # produces sharper termination at the correct position. Set 1.0 to disable.
+    eos_class_weight: float = 1.0
+
+    # Length-prediction head — auxiliary head that predicts the number of
+    # content tokens from z. Loss = CE between predicted and actual length.
+    # When enabled, ``use_predicted_length_at_decode`` makes ``_greedy_decode``
+    # use the per-sample prediction as ``expected_len`` (replacing the global
+    # default), so the model controls its own EOS pressure naturally.
+    length_pred_weight: float = 0.0
+    use_predicted_length_at_decode: bool = False
+
+    # Decode-time defaults (also consumed as fallbacks by ``_greedy_decode``).
+    eos_boost: float = 3.0
+    expected_len: int = 13
+    ngram_block: tuple[int, ...] = (3, 4)
+
     # Word dropout: randomly zero out decoder input token embeddings.
     # Forces the decoder to rely on z (cross-attention) rather than
     # just copying from autoregressive context. Annealed from

@@ -319,15 +319,28 @@ def _kl_schedule(step: int, cfg: DepTreeVAEConfig) -> float:
 def _greedy_decode(
     model: DepTreeVAE, z: torch.Tensor, device: torch.device,
     cfg: DepTreeVAEConfig, sp, max_len: int | None = None,
-    ngram_block: tuple[int, ...] = (3, 4),
-    eos_boost: float = 3.0,
-    expected_len: int = 13,
+    ngram_block: tuple[int, ...] | None = None,
+    eos_boost: float | None = None,
+    expected_len: int | None = None,
 ) -> list[tuple[str, bool]]:
-    """Greedy AR decode from z vectors. Returns list of (text, hit_eos)."""
+    """Greedy AR decode from z vectors. Returns list of (text, hit_eos).
+
+    When ``ngram_block``/``eos_boost``/``expected_len`` are ``None``, falls
+    back to the corresponding ``cfg`` fields. If the model has a
+    ``length_head`` and ``cfg.use_predicted_length_at_decode`` is set, the
+    per-sample length prediction overrides ``expected_len``.
+    """
     from lfm.generator.dep_tree_vae.config import DEP_RELATIONS
     from lfm.generator.dep_tree_vae.skeleton import SKEL_BOS, SKEL_EOS
     from lfm.generator.layers import multiscale_causal_mask
 
+    # Pull defaults from cfg when the caller didn't override.
+    if ngram_block is None:
+        ngram_block = tuple(getattr(cfg, "ngram_block", (3, 4)))
+    if eos_boost is None:
+        eos_boost = float(getattr(cfg, "eos_boost", 3.0))
+    if expected_len is None:
+        expected_len = int(getattr(cfg, "expected_len", 13))
     if max_len is None:
         max_len = cfg.max_seq_len - 1
 
@@ -335,6 +348,16 @@ def _greedy_decode(
     z_struct, z_content = model.latent.split(z)
     skel_tokens = model.skeleton_decoder(z_struct)[0]
     spm_size = sp.get_piece_size()
+
+    # Per-sample expected_len from the length head (if enabled and present).
+    predicted_lens: torch.Tensor | None = None
+    if (
+        getattr(cfg, "use_predicted_length_at_decode", False)
+        and hasattr(model, "length_head")
+    ):
+        predicted_lens = model.length_head(z).argmax(dim=-1).clamp(
+            min=2, max=cfg.max_seq_len - 1,
+        )
 
     results = []
     for i in range(b):
@@ -352,6 +375,12 @@ def _greedy_decode(
 
         role_ids = torch.tensor(roles, device=device).unsqueeze(0)
         memory = model.phrase_projector(z_content[i:i+1], role_ids)
+
+        # Sample-specific target length.
+        sample_expected_len = (
+            int(predicted_lens[i].item()) if predicted_lens is not None
+            else expected_len
+        )
 
         tokens = torch.full((1, 1), model._bos_id, dtype=torch.long, device=device)
         hit_eos = False
@@ -374,8 +403,8 @@ def _greedy_decode(
                         if tuple(generated[j:j + n - 1]) == prefix:
                             banned = generated[j + n - 1]
                             logits[0, banned] = -float("inf")
-            if eos_boost > 0 and len(generated) > expected_len:
-                overshoot = (len(generated) - expected_len) / expected_len
+            if eos_boost > 0 and len(generated) > sample_expected_len:
+                overshoot = (len(generated) - sample_expected_len) / max(sample_expected_len, 1)
                 logits[0, model._eos_id] += eos_boost * overshoot
             next_tok = logits.argmax(dim=-1, keepdim=True)
             if next_tok.item() == model._eos_id:

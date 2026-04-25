@@ -43,19 +43,22 @@ def main() -> None:
     cfg_dict["dataset_path"] = "/home/daniel/projects/lfm/data/datasets/english-dep-trees-v16"
     cfg_dict["spm_model_path"] = "/home/daniel/projects/lfm/data/models/v15b_ipa/spm.model"
     cfg_dict["output_dir"] = "/tmp/probe_dummy"
-    cfg = DepTreeVAEConfig(**cfg_dict)
-    sp = spm.SentencePieceProcessor(model_file=cfg.spm_model_path)
+    sp = spm.SentencePieceProcessor(model_file=cfg_dict["spm_model_path"])
     spm_size = sp.get_piece_size()  # 8000
 
     # vocab size matches "vocab=8050" reported by trainer
     vocab_size = 8050
 
-    # ---- model ----
+    # Peek at the checkpoint so we can disable training-only heads that
+    # weren't present in this older state dict.
+    ckpt_path = "/home/daniel/projects/lfm/data/models/dep_tree_vae_v1/best.pt"
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if not any(k.startswith("length_head") for k in ckpt["model_state"]):
+        cfg_dict["length_pred_weight"] = 0.0
+        cfg_dict["use_predicted_length_at_decode"] = False
+
+    cfg = DepTreeVAEConfig(**cfg_dict)
     model = DepTreeVAE(cfg, vocab_size).to(device)
-    ckpt = torch.load(
-        "/home/daniel/projects/lfm/data/models/dep_tree_vae_v1/best.pt",
-        map_location=device, weights_only=False,
-    )
     model.load_state_dict(ckpt["model_state"], strict=False)
     model.eval()
     print(f"Loaded best.pt from step {ckpt.get('global_step', '?')}")

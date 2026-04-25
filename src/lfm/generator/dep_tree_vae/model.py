@@ -45,16 +45,20 @@ class DepTreeVAEOutput:
     hidden: Tensor | None = None
     logits: Tensor | None = None
     content_mask: Tensor | None = None
+    length_loss: Tensor | None = None
 
     @property
     def total_loss(self) -> Tensor:
-        return (
+        total = (
             self.recon_loss
             + self.skeleton_loss
             + self.kl_loss
             + self.dip_loss
             + self.disentangle["total"]
         )
+        if self.length_loss is not None:
+            total = total + self.length_loss
+        return total
 
 
 class DepTreeVAE(nn.Module):
@@ -136,6 +140,17 @@ class DepTreeVAE(nn.Module):
                 nn.Linear(h, h),
                 nn.GELU(),
                 nn.Linear(h, cfg.latent.total_dim),
+            )
+
+        # Length-prediction head (only when length_pred_weight > 0).
+        # Predicts the number of content tokens directly from z, providing
+        # an explicit length signal that can replace the global expected_len
+        # at decode time.
+        if cfg.length_pred_weight > 0:
+            self.length_head = nn.Sequential(
+                nn.Linear(cfg.latent.total_dim, 128),
+                nn.GELU(),
+                nn.Linear(128, cfg.max_seq_len),
             )
 
         self._pad_id = 0
@@ -242,6 +257,15 @@ class DepTreeVAE(nn.Module):
             tokens, lengths, memory, content_tokens, content_lengths,
         )
 
+        # 5b. Length prediction (auxiliary)
+        length_loss: Tensor | None = None
+        if hasattr(self, "length_head") and self.cfg.length_pred_weight > 0:
+            length_logits = self.length_head(z)  # (B, max_seq_len)
+            target_len = content_lengths.clamp(max=self.cfg.max_seq_len - 1)
+            length_loss = self.cfg.length_pred_weight * F.cross_entropy(
+                length_logits, target_len,
+            )
+
         # 6. KL divergence
         kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - 1 - logvar)
         if self.cfg.kl_free_bits > 0:
@@ -276,6 +300,7 @@ class DepTreeVAE(nn.Module):
             hidden=hidden,
             logits=logits,
             content_mask=content_mask,
+            length_loss=length_loss,
         )
 
     def _split_roles_and_content(
@@ -398,8 +423,15 @@ class DepTreeVAE(nn.Module):
         flat_targets = content_tokens[:, :cs].reshape(-1)
         flat_mask = mask.reshape(-1)
 
+        # Optional EOS upweighting in CE — sharpens termination at the
+        # GT EOS position without disturbing content-token gradients.
+        ce_weight: Tensor | None = None
+        if self.cfg.eos_class_weight != 1.0:
+            ce_weight = torch.ones(self._decoder_vocab, device=device)
+            ce_weight[self._eos_id] = self.cfg.eos_class_weight
+
         loss = F.cross_entropy(
-            flat_logits[flat_mask], flat_targets[flat_mask],
+            flat_logits[flat_mask], flat_targets[flat_mask], weight=ce_weight,
         )
         return loss, hidden, logits, mask
 

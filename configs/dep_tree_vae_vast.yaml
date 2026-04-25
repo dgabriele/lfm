@@ -72,9 +72,28 @@ rep_penalty_weight: 0.5
 completeness_scorer_path: ""
 completeness_weight: 0.0
 
+# EOS sharpening — upweight EOS token in next-token CE so termination
+# is decisive at the GT EOS position.
+eos_class_weight: 3.0
+
+# Length-prediction head — z encodes the target token count.
+# When use_predicted_length_at_decode is true, _greedy_decode takes
+# the per-sample prediction as expected_len, replacing the global default.
+length_pred_weight: 0.1
+use_predicted_length_at_decode: true
+
+# Decode-time defaults (used by _greedy_decode and downstream pipelines).
+# Empirically tuned via DecodeAutotuner; with the length head + EOS
+# class weight active these become fallbacks rather than primary fixes.
+eos_boost: 8.0
+expected_len: 10
+ngram_block: [2, 3, 4]
+
+# Word dropout fully anneals to 0 by the last epoch — eliminates the
+# train/inference distribution mismatch that biases decoder confidence.
 word_dropout: 0.3
-word_dropout_min: 0.05
-word_dropout_anneal_epochs: 3
+word_dropout_min: 0.0
+word_dropout_anneal_epochs: 4
 
 batch_size: 176
 gradient_accumulation_steps: 2
