@@ -60,6 +60,38 @@ def adjacent_repeats(words: list[str]) -> int:
     return sum(1 for i in range(1, len(words)) if words[i] == words[i - 1])
 
 
+# Vowels in the IPA-ish romanization the trainer uses (matches respell output).
+_VOWELS = set("aeiouäàèéìíîòóùúëïöüÿɑɛɪɔʊə")
+
+
+def syllable_count(word: str) -> int:
+    """Count vowel groups; rough syllable approximation for the respelled IPA."""
+    if not word:
+        return 0
+    n = 0
+    in_vowel = False
+    for ch in word.lower():
+        if ch in _VOWELS:
+            if not in_vowel:
+                n += 1
+                in_vowel = True
+        else:
+            in_vowel = False
+    return max(n, 1)
+
+
+def mean_syllables(words: list[str]) -> float:
+    if not words:
+        return 0.0
+    return float(np.mean([syllable_count(w) for w in words]))
+
+
+def mean_chars(words: list[str]) -> float:
+    if not words:
+        return 0.0
+    return float(np.mean([len(w) for w in words]))
+
+
 def longest_verbatim_run(rec: list[str], gt: list[str]) -> int:
     """Longest contiguous span of rec that appears verbatim in gt."""
     if not rec or not gt:
@@ -215,6 +247,20 @@ def main() -> None:
                 int(length_pred[j].item()) - s["gt_len"]
                 if length_pred is not None else None
             )
+            # Linguistic-quality metrics
+            ttr = len(set(rec_words)) / max(len(rec_words), 1)
+            gt_ttr = len(set(gt_words)) / max(len(gt_words), 1)
+            rec_chars = mean_chars(rec_words)
+            gt_chars = mean_chars(gt_words)
+            rec_syl = mean_syllables(rec_words)
+            gt_syl = mean_syllables(gt_words)
+            # Fraction of decoded tokens that are length-1 chars (single-letter)
+            mono_char_frac = sum(1 for w in rec_words if len(w) <= 1) / max(len(rec_words), 1)
+            # Fraction of decoded tokens that are <=2 chars
+            short_frac = sum(1 for w in rec_words if len(w) <= 2) / max(len(rec_words), 1)
+            # Fraction of decoded tokens that are 1 syllable
+            mono_syl_frac = sum(1 for w in rec_words if syllable_count(w) == 1) / max(len(rec_words), 1)
+
             out.append({
                 "rarity": s["rarity"],
                 "gt_len": s["gt_len"],
@@ -227,6 +273,16 @@ def main() -> None:
                 "z_norm": float(z[j].norm()),
                 "logvar_mean": float(logvar[j].mean()),
                 "logvar_max": float(logvar[j].max()),
+                # Linguistic quality
+                "ttr": ttr,
+                "gt_ttr": gt_ttr,
+                "rec_chars_per_word": rec_chars,
+                "gt_chars_per_word": gt_chars,
+                "rec_syllables_per_word": rec_syl,
+                "gt_syllables_per_word": gt_syl,
+                "mono_char_frac": mono_char_frac,
+                "short_frac": short_frac,
+                "mono_syl_frac": mono_syl_frac,
             })
         return out
 
@@ -252,13 +308,26 @@ def main() -> None:
         z_norm_m = np.mean([r["z_norm"] for r in rrs])
         logvar_m = np.mean([r["logvar_mean"] for r in rrs])
 
+        ttr = np.mean([r["ttr"] for r in rrs])
+        gt_ttr = np.mean([r["gt_ttr"] for r in rrs])
+        rec_syl = np.mean([r["rec_syllables_per_word"] for r in rrs])
+        gt_syl = np.mean([r["gt_syllables_per_word"] for r in rrs])
+        rec_ch = np.mean([r["rec_chars_per_word"] for r in rrs])
+        gt_ch = np.mean([r["gt_chars_per_word"] for r in rrs])
+        mono_syl = np.mean([r["mono_syl_frac"] for r in rrs])
+        short = np.mean([r["short_frac"] for r in rrs])
+
         print(
             f"\n[{label:>10}]  rarity={mean_rare:>6.2f}  "
-            f"cycle_rate={cycle_rate:.0%}  "
+            f"cycle={cycle_rate:.0%}  "
             f"len_err={mean_len_err:+5.2f}  abs={mean_abs_err:4.2f}  "
-            f"verbatim={verbatim:4.2f}  "
-            f"lh_err={lh_err:4.2f}  "
-            f"z_norm={z_norm_m:5.2f}  logvar={logvar_m:+.3f}"
+            f"verbatim={verbatim:4.2f}"
+        )
+        print(
+            f"             ttr rec/gt={ttr:.2f}/{gt_ttr:.2f}  "
+            f"syl rec/gt={rec_syl:.2f}/{gt_syl:.2f}  "
+            f"chars rec/gt={rec_ch:.1f}/{gt_ch:.1f}  "
+            f"mono_syl={mono_syl:.0%}  short(≤2 chars)={short:.0%}"
         )
 
     # ---- correlations ----

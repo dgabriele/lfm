@@ -508,15 +508,42 @@ def _checkpoint_digest(
     )
     eos_count = sum(1 for _, eos in recon_results if eos)
 
-    for i in range(min(4, n_recon)):
+    gt_texts: list[str] = []
+    rec_texts: list[str] = []
+    for i in range(n_recon):
         n_tok = lengths[i].item()
         gt_ids = [t for t in tokens[i, :n_tok].tolist() if 0 < t < spm_size]
         gt_text = respell(sp.DecodeIds(gt_ids))
         gen_text = respell(recon_results[i][0])
-        logger.info("  [%d] GT:  %s", i, gt_text)
-        logger.info("  [%d] Rec: %s", i, gen_text)
+        gt_texts.append(gt_text)
+        rec_texts.append(gen_text)
+        if i < 4:
+            logger.info("  [%d] GT:  %s", i, gt_text)
+            logger.info("  [%d] Rec: %s", i, gen_text)
 
     logger.info("  eos_rate=%.0f%%", eos_count / n_recon * 100)
+
+    # ── LINGUISTIC QUALITY ───────────────────────────────────────
+    # Robust, citable measures: chrF (recon quality), Distinct-1/2
+    # (n-gram diversity), mean chars/word and syllables/word
+    # (lexical complexity).
+    logger.info("── Linguistic Quality ──")
+    try:
+        import lfm.generator.dep_tree_vae._lingmetrics as _lm
+        chrf = _lm.mean_chrf(rec_texts, gt_texts)
+        d1 = _lm.distinct_n(rec_texts, n=1)
+        d2 = _lm.distinct_n(rec_texts, n=2)
+        rec_syl = _lm.mean_syllables(rec_texts)
+        gt_syl = _lm.mean_syllables(gt_texts)
+        rec_ch = _lm.mean_chars(rec_texts)
+        gt_ch = _lm.mean_chars(gt_texts)
+        logger.info(
+            "  chrF=%.3f  distinct1=%.3f  distinct2=%.3f  "
+            "syl_rec/gt=%.2f/%.2f  chars_rec/gt=%.2f/%.2f",
+            chrf, d1, d2, rec_syl, gt_syl, rec_ch, gt_ch,
+        )
+    except Exception as e:
+        logger.warning("Linguistic metric computation failed: %s", e)
 
     # ── POSTERIOR INTERPOLATION ──────────────────────────────────
     logger.info("── Posterior Interpolation (n=%d pairs) ──", n_interp)

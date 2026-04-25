@@ -202,6 +202,20 @@ class DepTreeVAEConfig(LFMBaseConfig):
     tokens_per_role_weight: float = 0.0
     max_tokens_per_role: int = 12  # categorical bucket cap (0..N inclusive)
 
+    # Per-token role conditioning at decoder input. When True, an embedding
+    # of the source role is added to each decoder input position. Default
+    # False after empirical evidence showed this constrains expressivity
+    # without proportional reconstruction wins.
+    use_decoder_role_emb: bool = False
+
+    # Differentiable well-formedness regularizer: KL divergence between the
+    # model's batch-marginal next-token distribution and the training-corpus
+    # unigram distribution. Penalizes peaked outputs (cycling) by pulling
+    # toward Zipfian-natural language. Requires a precomputed unigram .npy
+    # at ``corpus_unigram_path`` (set both to enable).
+    corpus_kl_weight: float = 0.0
+    corpus_unigram_path: str = ""
+
     # Decode-time defaults (also consumed as fallbacks by ``_greedy_decode``).
     eos_boost: float = 3.0
     expected_len: int = 13

@@ -69,36 +69,40 @@ interp_weight: 0.0
 # the argmax toward high-prior fillers (cycling cause).
 entropy_floor: 0.0
 entropy_weight: 0.0
-# Repetition penalty — DROPPED. Cosine-sim of consecutive logit vectors
-# wasn't catching the actual cycling we observed (adjacent identical
-# argmax tokens from prior-dominated distributions). Role conditioning
-# + per-role token-count head address the structural cause directly.
+# All disabled: cycling on common tokens persisted with these on, and the
+# rep_penalty's cosine-sim formulation didn't catch the actual failure mode.
 rep_penalty_weight: 0.0
-# Completeness scorer
 completeness_scorer_path: ""
 completeness_weight: 0.0
 
-# EOS sharpening — upweight EOS token in next-token CE so termination
-# is decisive at the GT EOS position.
-eos_class_weight: 3.0
+# EOS class weight reset to 1.0. The 3.0 upweight was over-constraining
+# termination — pushing the model to commit hard on EOS at the cost of
+# expressivity. We have no diagnostic evidence that 3.0 helped.
+eos_class_weight: 1.0
 
-# Length-prediction head — z encodes the target token count.
-# When use_predicted_length_at_decode is true, _greedy_decode takes
-# the per-sample prediction as expected_len, replacing the global default.
-# Bumped 0.1 → 0.5: at 0.1 the head's gradient was too weak vs recon's 1.0,
-# producing oscillating per-sample length predictions and propagating
-# the instability through the count head's renormalization.
-length_pred_weight: 0.5
-use_predicted_length_at_decode: true
+# Length-prediction head DISABLED. v3.3/v3.4 added this without proven
+# improvement on linguistic-quality metrics. Reconstruction at v1
+# baseline (no length head) was val=2.85; v3.3 with length head was 3.00.
+length_pred_weight: 0.0
+use_predicted_length_at_decode: false
 
-# Per-role token-count head — predicts tokens-per-role from per-role memory.
-# At inference, replaces the uniform monotonic role-to-position mapping
-# with a non-uniform distribution matching the training data, eliminating
-# the failure mode where multiple consecutive positions receive the same
-# role and the decoder cycles on role-typical fillers.
-# Bumped 0.1 → 0.3 to give stronger head training signal.
-tokens_per_role_weight: 0.3
+# Per-role token-count head DISABLED. Same reason: added complexity
+# without proven win on diversity / well-formedness measures.
+tokens_per_role_weight: 0.0
 max_tokens_per_role: 12
+
+# Per-token role conditioning at decoder input DISABLED. The decoder
+# already gets the role sequence via per-role memory cross-attention;
+# the additional input embedding constrains output to be role-typical
+# at every position, which empirically degrades expressivity.
+use_decoder_role_emb: false
+
+# Differentiable well-formedness regularizer: KL between batch-marginal
+# next-token distribution and training-corpus unigram. Penalizes peaked
+# outputs (cycling on common tokens) by pulling the model's marginal
+# back toward Zipfian natural language. Requires precomputed unigram.
+corpus_kl_weight: 0.1
+corpus_unigram_path: /workspace/lfm/data/datasets/english-dep-trees-v16-depth4/cache/unigram.npy
 
 # Decode-time defaults (used by _greedy_decode and downstream pipelines).
 # Empirically tuned via DecodeAutotuner; with the length head + EOS

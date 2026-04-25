@@ -47,6 +47,7 @@ class DepTreeVAEOutput:
     content_mask: Tensor | None = None
     length_loss: Tensor | None = None
     tokens_per_role_loss: Tensor | None = None
+    corpus_kl_loss: Tensor | None = None
 
     @property
     def total_loss(self) -> Tensor:
@@ -61,6 +62,8 @@ class DepTreeVAEOutput:
             total = total + self.length_loss
         if self.tokens_per_role_loss is not None:
             total = total + self.tokens_per_role_loss
+        if self.corpus_kl_loss is not None:
+            total = total + self.corpus_kl_loss
         return total
 
 
@@ -159,13 +162,11 @@ class DepTreeVAE(nn.Module):
                 nn.Linear(128, cfg.max_seq_len),
             )
 
-        # Per-token role conditioning: every decoder input position is
-        # told which dependency role the token it's about to predict
-        # belongs to. Without this, the AR decoder must infer the
-        # current role from cross-attention alone — which fragments at
-        # tail positions where multiple similar roles produce ambiguous
-        # attention, causing high-prior tokens to win the argmax.
-        self.decoder_role_emb = nn.Embedding(NUM_DEP_RELATIONS, h)
+        # Per-token role conditioning at decoder input. Gated by
+        # ``cfg.use_decoder_role_emb`` so the architecture can be reverted
+        # to the simpler "memory cross-attention only" path when desired.
+        if cfg.use_decoder_role_emb:
+            self.decoder_role_emb = nn.Embedding(NUM_DEP_RELATIONS, h)
 
         # Per-role token-count head — predicts how many tokens each dep role
         # spans. Reads per-role memory concatenated with logvar (broadcast
@@ -189,6 +190,29 @@ class DepTreeVAE(nn.Module):
         self.register_buffer("_z_struct_std", torch.ones(cfg.latent.struct_dim))
         self.register_buffer("_z_content_mean", torch.zeros(cfg.latent.content_dim))
         self.register_buffer("_z_content_std", torch.ones(cfg.latent.content_dim))
+
+        # Corpus unigram distribution for the differentiable well-formedness
+        # regularizer (KL between batch-marginal predicted distribution and
+        # training-corpus unigram). Requires precomputed file.
+        if cfg.corpus_kl_weight > 0 and cfg.corpus_unigram_path:
+            try:
+                import numpy as _np
+                arr = _np.load(cfg.corpus_unigram_path)
+                if arr.shape[0] == decoder_vocab:
+                    self.register_buffer(
+                        "corpus_unigram",
+                        torch.tensor(arr, dtype=torch.float32),
+                    )
+                else:
+                    logger.warning(
+                        "corpus_unigram size %d != decoder_vocab %d; disabling",
+                        arr.shape[0], decoder_vocab,
+                    )
+            except FileNotFoundError:
+                logger.warning(
+                    "corpus_unigram_path %s not found; disabling",
+                    cfg.corpus_unigram_path,
+                )
 
         # Load pretrained decoder if configured
         if cfg.pretrained_decoder_path:
@@ -293,6 +317,26 @@ class DepTreeVAE(nn.Module):
                 length_logits, target_len,
             )
 
+        # 5d. Corpus-distribution KL — well-formedness regularizer.
+        # Penalizes model's batch-marginal output distribution from drifting
+        # away from the training-corpus unigram. Targets cycling directly:
+        # cycled tokens get inflated marginal mass, KL blows up, gradient
+        # pulls toward Zipfian natural language.
+        corpus_kl_loss: Tensor | None = None
+        if (
+            logits is not None
+            and content_mask is not None
+            and hasattr(self, "corpus_unigram")
+            and self.cfg.corpus_kl_weight > 0
+        ):
+            log_probs = F.log_softmax(logits, dim=-1)
+            probs = log_probs.exp()
+            valid = content_mask.unsqueeze(-1).float()
+            marginal = (probs * valid).sum(dim=(0, 1)) / valid.sum().clamp(min=1)
+            corpus_p = self.corpus_unigram.clamp(min=1e-10)
+            kl = (marginal * ((marginal + 1e-10).log() - corpus_p.log())).sum()
+            corpus_kl_loss = self.cfg.corpus_kl_weight * kl
+
         # 5c. Per-role token-count prediction (auxiliary). Same logvar-aware
         # input as length_head — broadcast logvar to (B, R, total_dim) and
         # concat with memory.
@@ -363,6 +407,7 @@ class DepTreeVAE(nn.Module):
             content_mask=content_mask,
             length_loss=length_loss,
             tokens_per_role_loss=tokens_per_role_loss,
+            corpus_kl_loss=corpus_kl_loss,
         )
 
     def _split_roles_and_content(
