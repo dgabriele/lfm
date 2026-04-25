@@ -322,13 +322,14 @@ def _greedy_decode(
     ngram_block: tuple[int, ...] | None = None,
     eos_boost: float | None = None,
     expected_len: int | None = None,
+    logvar: torch.Tensor | None = None,
 ) -> list[tuple[str, bool]]:
     """Greedy AR decode from z vectors. Returns list of (text, hit_eos).
 
-    When ``ngram_block``/``eos_boost``/``expected_len`` are ``None``, falls
-    back to the corresponding ``cfg`` fields. If the model has a
-    ``length_head`` and ``cfg.use_predicted_length_at_decode`` is set, the
-    per-sample length prediction overrides ``expected_len``.
+    Optional ``logvar`` is fed into the length and count heads so they can
+    condition on encoder uncertainty. When not provided, defaults to zeros
+    (interpreted as "fully confident"); this preserves backward compatibility
+    with callers that only have z.
     """
     from lfm.generator.dep_tree_vae.config import DEP_RELATIONS
     from lfm.generator.dep_tree_vae.skeleton import SKEL_BOS, SKEL_EOS
@@ -345,6 +346,8 @@ def _greedy_decode(
         max_len = cfg.max_seq_len - 1
 
     b = z.size(0)
+    if logvar is None:
+        logvar = torch.zeros_like(z)
     z_struct, z_content = model.latent.split(z)
     skel_tokens = model.skeleton_decoder(z_struct)[0]
     spm_size = sp.get_piece_size()
@@ -355,9 +358,9 @@ def _greedy_decode(
         getattr(cfg, "use_predicted_length_at_decode", False)
         and hasattr(model, "length_head")
     ):
-        predicted_lens = model.length_head(z).argmax(dim=-1).clamp(
-            min=2, max=cfg.max_seq_len - 1,
-        )
+        predicted_lens = model.length_head(
+            torch.cat([z, logvar], dim=-1)
+        ).argmax(dim=-1).clamp(min=2, max=cfg.max_seq_len - 1)
 
     results = []
     for i in range(b):
@@ -394,8 +397,11 @@ def _greedy_decode(
 
             counts: list[int] | None = None
             if hasattr(model, "tokens_per_role_head"):
-                # memory has shape (1, n_roles, h); predict count per role
-                role_count_logits = model.tokens_per_role_head(memory)
+                # memory has shape (1, n_roles, h); concat per-sample logvar.
+                lv_b = logvar[i:i+1].unsqueeze(1).expand(-1, n_roles, -1)
+                role_count_logits = model.tokens_per_role_head(
+                    torch.cat([memory, lv_b], dim=-1)
+                )
                 pred_counts = role_count_logits.argmax(dim=-1).clamp(min=1).squeeze(0)
                 # Trim to actual role count present
                 pred_counts = pred_counts[:n_roles].tolist()
@@ -497,7 +503,9 @@ def _checkpoint_digest(
 
     # ── RECONSTRUCTION ───────────────────────────────────────────
     logger.info("── Reconstruction (n=%d) ──", n_recon)
-    recon_results = _greedy_decode(model, z[:n_recon], device, cfg, sp)
+    recon_results = _greedy_decode(
+        model, z[:n_recon], device, cfg, sp, logvar=logvar[:n_recon],
+    )
     eos_count = sum(1 for _, eos in recon_results if eos)
 
     for i in range(min(4, n_recon)):

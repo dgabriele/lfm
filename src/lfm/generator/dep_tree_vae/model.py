@@ -146,12 +146,15 @@ class DepTreeVAE(nn.Module):
             )
 
         # Length-prediction head (only when length_pred_weight > 0).
-        # Predicts the number of content tokens directly from z, providing
-        # an explicit length signal that can replace the global expected_len
-        # at decode time.
+        # Reads ``(z, logvar)`` so the head knows how confident the encoder is.
+        # Empirical: at v1 and v3.3 best.pts, ``|len_err| ↔ logvar`` correlation
+        # is -0.5 to -0.6 — encoder uncertainty is the dominant predictor of
+        # length-collapse failures, much stronger than token rarity (≈±0.1).
+        # Conditioning on logvar lets the head learn to be conservative on
+        # uncertain inputs instead of confidently predicting wrong lengths.
         if cfg.length_pred_weight > 0:
             self.length_head = nn.Sequential(
-                nn.Linear(cfg.latent.total_dim, 128),
+                nn.Linear(cfg.latent.total_dim * 2, 128),
                 nn.GELU(),
                 nn.Linear(128, cfg.max_seq_len),
             )
@@ -164,14 +167,13 @@ class DepTreeVAE(nn.Module):
         # attention, causing high-prior tokens to win the argmax.
         self.decoder_role_emb = nn.Embedding(NUM_DEP_RELATIONS, h)
 
-        # Per-role token-count head — predicts how many tokens each
-        # dep role spans, from the per-role memory. At training, supervised
-        # against actual counts derived from ``tokens_per_role_pos``.
-        # At inference, replaces the uniform monotonic role-to-position
-        # mapping with a non-uniform distribution that mirrors training.
+        # Per-role token-count head — predicts how many tokens each dep role
+        # spans. Reads per-role memory concatenated with logvar (broadcast
+        # across roles). Same logvar-awareness motivation as length_head:
+        # the head's confident commits should depend on encoder certainty.
         if cfg.tokens_per_role_weight > 0:
             self.tokens_per_role_head = nn.Sequential(
-                nn.Linear(cfg.decoder_hidden_dim, 64),
+                nn.Linear(cfg.decoder_hidden_dim + cfg.latent.total_dim, 64),
                 nn.GELU(),
                 nn.Linear(64, cfg.max_tokens_per_role + 1),
             )
@@ -281,20 +283,25 @@ class DepTreeVAE(nn.Module):
             content_roles=content_roles,
         )
 
-        # 5b. Length prediction (auxiliary)
+        # 5b. Length prediction (auxiliary). Logvar concatenated with z so
+        # the head can learn to be uncertain on uncertain inputs.
         length_loss: Tensor | None = None
         if hasattr(self, "length_head") and self.cfg.length_pred_weight > 0:
-            length_logits = self.length_head(z)  # (B, max_seq_len)
+            length_logits = self.length_head(torch.cat([z, logvar], dim=-1))
             target_len = content_lengths.clamp(max=self.cfg.max_seq_len - 1)
             length_loss = self.cfg.length_pred_weight * F.cross_entropy(
                 length_logits, target_len,
             )
 
-        # 5c. Per-role token-count prediction (auxiliary)
+        # 5c. Per-role token-count prediction (auxiliary). Same logvar-aware
+        # input as length_head — broadcast logvar to (B, R, total_dim) and
+        # concat with memory.
         tokens_per_role_loss: Tensor | None = None
         if hasattr(self, "tokens_per_role_head") and self.cfg.tokens_per_role_weight > 0:
             r_count = memory.size(1)
-            count_logits = self.tokens_per_role_head(memory)  # (B, R, max_count+1)
+            logvar_b = logvar.unsqueeze(1).expand(-1, r_count, -1)
+            count_in = torch.cat([memory, logvar_b], dim=-1)
+            count_logits = self.tokens_per_role_head(count_in)  # (B, R, max_count+1)
             # GT: tokens_per_role_pos[b, r] for r in 1..r_count (skip "before any role" at idx 0)
             target_counts = tokens_per_role_pos[:, 1 : r_count + 1].clamp(
                 max=self.cfg.max_tokens_per_role,
