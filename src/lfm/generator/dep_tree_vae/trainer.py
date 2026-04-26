@@ -90,9 +90,18 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
             optimizer.load_state_dict(ckpt["optimizer_state"])
         except (ValueError, RuntimeError) as e:
             logger.warning("Optimizer state incompatible, resetting: %s", e)
-        for pg in optimizer.param_groups:
-            pg["lr"] = cfg.lr
-        scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=cfg.lr_min)
+        # Restore the LR schedule. Without this, the freshly-built
+        # CosineAnnealingLR thinks we're at step 0 and snaps the LR
+        # back to base on the next .step(), undoing all decay so far.
+        if "scheduler_state" in ckpt:
+            try:
+                scheduler.load_state_dict(ckpt["scheduler_state"])
+                cur_lr = scheduler.get_last_lr()[0]
+                logger.info("Restored scheduler state — LR=%.6f", cur_lr)
+            except (KeyError, ValueError) as e:
+                logger.warning("Scheduler state incompatible, restarting decay: %s", e)
+        else:
+            logger.warning("No scheduler_state in checkpoint — restarting decay")
         try:
             scaler.load_state_dict(ckpt["scaler_state"])
         except RuntimeError:
