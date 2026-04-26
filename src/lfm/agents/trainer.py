@@ -352,6 +352,7 @@ class AgentTrainer:
                     ("z_div_loss", "div"),
                     ("bigram_kl", "bkl"),
                     ("adj_div", "adj"),
+                    ("z_prior", "zprior"),
                 ):
                     if _term in out:
                         extra += f"  {_label}={out[_term].item():.3f}"

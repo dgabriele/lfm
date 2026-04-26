@@ -37,6 +37,11 @@ bigram_kl_weight: 0.05
 # distribution at consecutive positions).
 adj_diversity_weight: 0.10
 adj_diversity_target: 0.30
+# z_prior: MMD regularization pulling diffusion z-codes toward the VAE's
+# empirical posterior N(z_mean, z_std²). Addresses the root cause of
+# function-word cycling: z-codes drifting outside the decoder's training
+# distribution, causing it to retreat to high-probability fallback tokens.
+z_prior_weight: 0.1
 llm_pressure_weight: 0.0
 
 contrastive_temperature: 0.07

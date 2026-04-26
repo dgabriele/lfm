@@ -32,7 +32,7 @@ Loss
 ----
 
   total = α·hidden_NCE + β·surface_NCE + γ·topology
-        + δ·z_diversity + ε·bigram_KL + ζ·adj_diversity
+        + δ·z_diversity + ε·bigram_KL + ζ·adj_diversity + η·z_prior
         + η·LLM_pressure
 """
 
@@ -102,6 +102,7 @@ class ContrastiveGameConfig(LFMBaseConfig):
     z_diversity_weight: float = 0.1
     bigram_kl_weight: float = 0.05
     adj_diversity_weight: float = 0.05
+    z_prior_weight: float = 0.0
     adj_diversity_target: float = 0.30
     llm_pressure_weight: float = 0.0
 
@@ -337,6 +338,65 @@ class AdjDiversityLoss(nn.Module):
 
 
 # ===========================================================================
+# Z-prior regularization
+# ===========================================================================
+
+
+def _rbf_kernel(x: Tensor, y: Tensor, sigma: float) -> Tensor:
+    """RBF kernel: exp(-||x - y||² / (2σ²))."""
+    return (-torch.cdist(x, y).pow(2) / (2.0 * sigma ** 2)).exp()
+
+
+def _rbf_mmd(x: Tensor, y: Tensor, sigma: float) -> Tensor:
+    """Unbiased MMD² with a single RBF kernel.
+
+    Uses off-diagonal terms for within-set expectations to remove the
+    trivial self-similarity bias.
+    """
+    n, m = x.size(0), y.size(0)
+    kxx = _rbf_kernel(x, x, sigma)
+    kyy = _rbf_kernel(y, y, sigma)
+    kxy = _rbf_kernel(x, y, sigma)
+    return (
+        (kxx.sum() - kxx.diagonal().sum()) / (n * (n - 1))
+        + (kyy.sum() - kyy.diagonal().sum()) / (m * (m - 1))
+        - 2.0 * kxy.mean()
+    ).clamp(min=0.0)
+
+
+class ZPriorLoss(nn.Module):
+    """MMD regularization: pulls diffusion z-codes toward the VAE's
+    empirical posterior distribution.
+
+    Without this, the diffusion model can drift z-codes into regions
+    the frozen decoder was not trained on.  The decoder's response to
+    out-of-distribution z is to retreat to its highest-probability
+    tokens — exactly the function-word cycling pathology.
+
+    Input z-codes are normalized by the stored prior statistics before
+    kernel evaluation, so the bandwidth sigma = sqrt(D) is always
+    well-calibrated regardless of the raw z scale.
+    """
+
+    def __init__(self, prior_mean: Tensor, prior_std: Tensor) -> None:
+        super().__init__()
+        self.register_buffer("prior_mean", prior_mean.clone())
+        self.register_buffer("prior_std", prior_std.clone())
+        self._sigma = math.sqrt(prior_mean.size(-1))
+
+    def forward(self, z_seq: Tensor) -> Tensor:
+        """Compute MMD² between z_seq samples and the VAE prior.
+
+        Args:
+            z_seq: ``(B, K, D)`` diffusion-generated z-codes.
+        """
+        z = z_seq.flatten(0, 1)                          # (B*K, D)
+        z_norm = (z - self.prior_mean) / self.prior_std  # ≈ N(0, I)
+        z_prior = torch.randn_like(z_norm)               # exact N(0, I)
+        return _rbf_mmd(z_norm, z_prior, self._sigma)
+
+
+# ===========================================================================
 # Game
 # ===========================================================================
 
@@ -392,6 +452,7 @@ class ContrastiveGame(nn.Module):
 
         # Optional regularizers as nn.Module sub-objects.
         self.z_diversity = self._build_z_diversity(vae)
+        self.z_prior = self._build_z_prior(vae)
         self.bigram_kl = BigramKLLoss(
             Path(config.bigram_kl_path) if config.bigram_kl_path else None,
             self._vocab_size,
@@ -428,6 +489,11 @@ class ContrastiveGame(nn.Module):
         if self.config.z_diversity_weight <= 0:
             return None
         return ZDiversityLoss(vae._z_struct_mean, vae._z_struct_std)
+
+    def _build_z_prior(self, vae: DepTreeVAE) -> Optional[ZPriorLoss]:
+        if self.config.z_prior_weight <= 0:
+            return None
+        return ZPriorLoss(vae._z_struct_mean, vae._z_struct_std)
 
     def _build_llm_pressure(self) -> Optional[LLMPressureScorer]:
         if self.config.llm_pressure_weight <= 0:
@@ -772,6 +838,7 @@ class ContrastiveGame(nn.Module):
             "bigram_kl":    agg.bigram_kl,
             "adj_div":      agg.adj_diversity,
             "llm_pressure": self._llm_pressure_loss(expr),
+            "z_prior":      self._z_prior_loss(expr),
         }
         return terms, hidden_logits
 
@@ -816,6 +883,11 @@ class ContrastiveGame(nn.Module):
         loss, _ = self.z_diversity(expr.z_seq, expr.z_weights)
         return loss
 
+    def _z_prior_loss(self, expr: ExpressionOutput) -> Tensor:
+        if self.z_prior is None:
+            return expr.hidden.new_zeros(())
+        return self.z_prior(expr.z_seq)
+
     def _llm_pressure_loss(self, expr: ExpressionOutput) -> Tensor:
         if self.llm_pressure is None:
             return expr.hidden.new_zeros(())
@@ -840,6 +912,7 @@ class ContrastiveGame(nn.Module):
             "bigram_kl":    cfg.bigram_kl_weight,
             "adj_div":      cfg.adj_diversity_weight,
             "llm_pressure": cfg.llm_pressure_weight,
+            "z_prior":      cfg.z_prior_weight,
         }
 
     def _aggregate(self, terms: dict[str, Tensor]) -> Tensor:
