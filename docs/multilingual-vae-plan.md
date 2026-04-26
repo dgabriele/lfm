@@ -52,7 +52,7 @@ become a weighted average of incommensurable per-language distributions.
 1. Each sample needs a language ID (one of 12 or whatever set is used).
    The v7 multilingual data pipeline already has this; the AR DepTreeVAE
    data pipeline currently doesn't preserve it from cache → trainer.
-2. `lingdiag.py` and the periodic checkpoint digest should accept the
+2. `scripts/diagnostics/lingdiag.py` and the periodic checkpoint digest should accept the
    per-sample language tag and stratify all language-sensitive metrics
    by it. Output: per-language tables of mean_syllables, mean_chars,
    mono_syl_pct, etc.
@@ -79,7 +79,7 @@ cross-lingual interference if reused naively.**
 
 **Required changes:**
 
-1. **Precompute per-language unigrams.** Modify `compute_corpus_unigram.py`
+1. **Precompute per-language unigrams.** Modify `scripts/preprocessing/compute_corpus_unigram.py`
    to optionally read a language tag from each sample and produce
    per-language probability vectors. Output shape changes from `(V,)` to
    `(num_languages, V)` indexed by language ID. Save as
@@ -179,7 +179,7 @@ total steps, not more epochs.
 
 ## 5. Measurement framework adjustments
 
-### 5.1 Add per-language stratification to `lingdiag.py`
+### 5.1 Add per-language stratification to `scripts/diagnostics/lingdiag.py`
 
 The script currently produces a single posterior + prior generation set
 and aggregates across all of it. For multilingual it needs:
@@ -195,7 +195,7 @@ and aggregates across all of it. For multilingual it needs:
 
 A specific multilingual failure mode worth measuring: does generating
 from a `language_id=fin` z accidentally produce English tokens? Add to
-`lingdiag.py`:
+`scripts/diagnostics/lingdiag.py`:
 
 - For each sample, conditioning on language ID L, compute the fraction
   of generated tokens that appear in *that language's* training
@@ -216,7 +216,7 @@ Recommended sequence for the multilingual extension:
    engineering.
 
 2. **Per-language unigram precompute.** Modify
-   `compute_corpus_unigram.py` to produce `(L, V)` tensor + language
+   `scripts/preprocessing/compute_corpus_unigram.py` to produce `(L, V)` tensor + language
    mapping. Tests on the depth-filtered cache.
 
 3. **Model architectural changes** (in order of necessity):
@@ -227,14 +227,14 @@ Recommended sequence for the multilingual extension:
    3. Language embedding added to z (or fed into skeleton head).
       Improves performance.
 
-4. **Measurement updates.** `lingdiag.py` per-language stratification +
+4. **Measurement updates.** `scripts/diagnostics/lingdiag.py` per-language stratification +
    cross-lingual interference metric. Periodic digest gets per-language
    chrF/distinct.
 
 5. **Training.** Restart from scratch; the architectural changes
    require a new run.
 
-6. **Validation.** Run `lingdiag.py` per-language. Bar to clear: each
+6. **Validation.** Run `scripts/diagnostics/lingdiag.py` per-language. Bar to clear: each
    language individually has chrF/distinct/mean-syllables roughly
    matching its training distribution. Cross-lingual interference
    metric should show diagonal > 90%.
@@ -270,7 +270,7 @@ Recommended sequence for the multilingual extension:
 | SPM tokenizer | reuse v7's multilingual SPM | low |
 | Latent dim | optionally widen, or rely on language conditioning | low |
 | Data pipeline | add language ID to cache + collation | low |
-| `lingdiag.py` | per-language stratification + interference metric | low |
+| `scripts/diagnostics/lingdiag.py` | per-language stratification + interference metric | low |
 
 The dangerous one is `corpus_kl_weight`. Everything else is either
 already language-agnostic or a presentation-layer change. The

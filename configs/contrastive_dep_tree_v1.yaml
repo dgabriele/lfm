@@ -1,0 +1,62 @@
+# Contrastive game over the dep_tree_vae v1 frozen decoder.
+# Six-term loss: hidden_NCE + surface_NCE + topology + z_div + corpus_KL + LLM_pressure.
+
+vae_checkpoint: data/models/dep_tree_vae_v1/best_ep5_v4.pt
+vae_config: configs/dep_tree_vae_vast.yaml
+spm_path: data/models/v15b_ipa/spm.model
+
+embedding_dim: 384
+embedding_store_dir: data/embeddings
+
+# Diffusion z-generator (matches the dep_tree_vae's latent_dim=384).
+z_hidden_dim: 512
+max_phrases: 4
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+variable_phrases: true
+target_phrases: 2.5
+
+max_tokens_per_phrase: 32
+
+encoder:
+  num_layers: 2
+  num_heads: 8
+
+# Six-term loss weights — start at the principled defaults.
+hidden_infonce_weight: 1.0
+surface_infonce_weight: 1.0
+topology_weight: 0.1
+z_diversity_weight: 0.1
+corpus_kl_weight: 0.05
+llm_pressure_weight: 0.0  # off until smoke-validated; loading Qwen costs ~3GB
+
+contrastive_temperature: 0.07
+
+# Reuse the precomputed unigram from dep_tree_vae's training cache.
+corpus_unigram_path: data/datasets/english-dep-trees-v16/cache_depth4/unigram.npy
+
+# Game / training
+num_distractors: 15
+batch_size: 16
+gradient_accumulation_steps: 4
+steps: 4000
+gru_lr: 0.0001
+receiver_lr: 0.0003
+max_grad_norm: 1.0
+
+phase2_chunk: 8
+
+curriculum:
+  enabled: true
+  warmup_steps: 500
+  start_hard_ratio: 0.0
+  end_hard_ratio: 1.0
+
+checkpoint_every: 100
+log_every: 25
+
+output_dir: data/contrastive_dep_tree_v1
+
+device: cuda
+seed: 42

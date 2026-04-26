@@ -16,7 +16,7 @@ mode dominates and what the failure correlates with — guiding architectural
 recommendations rather than guessing at config tweaks.
 
 Usage (on vast or local with the model present):
-    python diagnose_v3.py [--ckpt PATH] [--n SAMPLES]
+    python scripts/diagnostics/diagnose_v3.py [--ckpt PATH] [--n SAMPLES]
 
 Output: structured tables + JSON dump at /tmp/diagnose_v3_results.json
 """

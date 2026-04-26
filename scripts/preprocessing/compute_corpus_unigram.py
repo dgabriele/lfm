@@ -7,7 +7,7 @@ and uses it as the target of a KL regularizer on its batch-marginal output
 distribution (well-formedness pressure).
 
 Usage:
-    python compute_corpus_unigram.py [--cache PATH] [--out PATH]
+    python scripts/preprocessing/compute_corpus_unigram.py [--cache PATH] [--out PATH]
 """
 
 from __future__ import annotations

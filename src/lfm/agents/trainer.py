@@ -343,8 +343,18 @@ class AgentTrainer:
                     extra += f"  z_sim={out['z_intra_sim'].item():.3f}"
                 if "halt_cost" in out:
                     extra += f"  halt={out['halt_cost'].item():.3f}"
-                if "z_div_loss" in out and out["z_div_loss"].item() > 0:
-                    extra += f"  div={out['z_div_loss'].item():.3f}"
+                # ContrastiveGame loss breakdown — print every term so
+                # any non-finite or runaway value is visible per-step.
+                for _term, _label in (
+                    ("hidden_nce", "hnce"),
+                    ("surface_nce", "snce"),
+                    ("topology", "topo"),
+                    ("z_div_loss", "div"),
+                    ("bigram_kl", "bkl"),
+                    ("adj_div", "adj"),
+                ):
+                    if _term in out:
+                        extra += f"  {_label}={out[_term].item():.3f}"
                 if "z_coverage" in out and out["z_coverage"].item() > 0:
                     extra += f"  zcov={out['z_coverage'].item():.2f}"
                 if "hard_overlap" in out:

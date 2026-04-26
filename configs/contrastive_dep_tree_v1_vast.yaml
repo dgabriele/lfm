@@ -1,0 +1,78 @@
+# Contrastive game v2 over the dep_tree_vae v1 frozen decoder, vast.ai paths.
+# Anti-cycling pass: replaces unigram corpus_kl with bigram_kl, adds
+# adj_diversity, enables n-gram blocking at decode.
+
+vae_checkpoint: /workspace/lfm/data/models/dep_tree_vae_v1/best.pt
+vae_config: /workspace/lfm/configs/dep_tree_vae_vast.yaml
+spm_path: /workspace/lfm/data/models/v15b_ipa/spm.model
+
+embedding_dim: 384
+embedding_store_dir: /workspace/lfm/data/embeddings
+
+z_hidden_dim: 512
+max_phrases: 4
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+variable_phrases: true
+target_phrases: 2.5
+
+max_tokens_per_phrase: 32
+
+encoder:
+  num_layers: 2
+  num_heads: 8
+
+# ----- Loss weights -----
+hidden_infonce_weight: 1.0
+surface_infonce_weight: 1.0
+topology_weight: 0.1
+z_diversity_weight: 0.1
+# Bigram-KL replaces unigram corpus_kl (the unigram version was a Goodhart
+# loophole — cycling on `the/of/with` matched the Zipfian unigram target
+# while producing pathological bigrams the corpus never sees).
+bigram_kl_weight: 0.05
+# adj_diversity: cosine hinge between adjacent softmaxes. Direct anti-
+# cycling pressure on the local mode (model wanting to emit the same
+# distribution at consecutive positions).
+adj_diversity_weight: 0.10
+adj_diversity_target: 0.30
+llm_pressure_weight: 0.0
+
+contrastive_temperature: 0.07
+
+bigram_kl_path: /workspace/lfm/data/datasets/english-dep-trees-v16-depth4/cache/bigram_topk.npz
+
+# N-gram blocking at Phase 1 decode. Hard prevention at sampling time —
+# Phase 2 grad rerun then sees a clean, non-cyclic target and learns
+# from that instead of from the cyclic baseline.
+ngram_block: [3, 4]
+
+num_distractors: 15
+batch_size: 256
+gradient_accumulation_steps: 1
+steps: 4000
+gru_lr: 0.00003
+receiver_lr: 0.0001
+max_grad_norm: 0.5
+
+# Throughput: previous run used ~12.5 GB / 24 GB and 60-70% GPU util.
+# Larger phase2_chunk reduces Python loop overhead in the grad rerun
+# (each chunk has fixed CUDA-stream-sync cost; doubling the chunk
+# halves the sync count). Headroom check: per-sample Phase 2 cost
+# at avg_tok≈80 is ~0.1 GB; chunk=64 is well under our budget.
+phase2_chunk: 64
+
+curriculum:
+  enabled: true
+  warmup_steps: 500
+  start_hard_ratio: 0.0
+  end_hard_ratio: 1.0
+
+checkpoint_every: 100
+log_every: 25
+
+output_dir: /workspace/lfm/data/contrastive_dep_tree_v1
+
+device: cuda
+seed: 42

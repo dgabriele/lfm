@@ -162,7 +162,8 @@ class ContrastiveCommand(CLICommand):
             ContrastiveGame, ContrastiveGameConfig,
         )
         from lfm.agents.trainer import AgentTrainer
-        from lfm.faculty.model import LanguageFaculty
+        from lfm.generator.dep_tree_vae.config import DepTreeVAEConfig
+        from lfm.generator.dep_tree_vae.model import DepTreeVAE
 
         cfg_dict: dict = {}
         if args.config is not None:
@@ -182,7 +183,6 @@ class ContrastiveCommand(CLICommand):
         if curriculum_kwargs:
             cfg_dict["curriculum"] = CurriculumConfig(**curriculum_kwargs)
 
-        # CLI overrides.
         for key in ("steps", "batch_size", "device"):
             val = getattr(args, key, None)
             if val is not None:
@@ -193,8 +193,42 @@ class ContrastiveCommand(CLICommand):
 
         import torch
         device = torch.device(config.device)
-        faculty = LanguageFaculty(config.build_faculty_config()).to(device)
-        game = ContrastiveGame(config, faculty).to(device)
+
+        # Build a frozen DepTreeVAE from its own checkpoint.  The vae's
+        # trainer-side config (latent dims, decoder shape, etc.) lives
+        # in a separate YAML so the game config doesn't have to mirror
+        # every architectural knob.
+        vae_cfg_dict = yaml.safe_load(open(config.vae_config))
+        vae_cfg_dict.pop("model_type", None)
+        vae_cfg_dict["spm_model_path"] = config.spm_path
+        vae_cfg_dict["output_dir"] = config.output_dir
+        vae_cfg_dict["corpus_unigram_path"] = ""  # vae-internal KL; agent uses its own
+
+        # Sniff the checkpoint to align optional-head config with what's
+        # actually saved.  DepTreeVAEConfig is frozen, so we adjust the
+        # dict before construction rather than mutating the instance.
+        ckpt = torch.load(config.vae_checkpoint, map_location=device, weights_only=False)
+        state = ckpt["model_state"]
+        if not any(k.startswith("length_head") for k in state):
+            vae_cfg_dict["length_pred_weight"] = 0.0
+            vae_cfg_dict["use_predicted_length_at_decode"] = False
+        if not any(k.startswith("tokens_per_role_head") for k in state):
+            vae_cfg_dict["tokens_per_role_weight"] = 0.0
+        vae_cfg_dict["use_decoder_role_emb"] = any(
+            k.startswith("decoder_role_emb") for k in state
+        )
+        vae_cfg = DepTreeVAEConfig(**vae_cfg_dict)
+
+        # Vocab size matches the cache-derived 8050 the trainer uses.
+        vae = DepTreeVAE(vae_cfg, vocab_size=vae_cfg.spm_vocab_size + 50).to(device)
+        vae.load_state_dict(state, strict=False)
+        logger.info(
+            "Loaded vae from %s @ step %s val_best=%.4f",
+            config.vae_checkpoint, ckpt.get("global_step", "?"),
+            ckpt.get("best_val_loss", float("nan")),
+        )
+
+        game = ContrastiveGame(config, vae).to(device)
         trainer = AgentTrainer(game, config)
         trainer.train(resume=args.resume)
         return 0

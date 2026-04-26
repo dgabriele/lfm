@@ -1,43 +1,34 @@
-"""Contrastive expression game — six-term, surface-grounded loss.
+"""Contrastive expression game on a frozen ``DepTreeVAE`` decoder.
 
-A single agent maps a target embedding to one Expression (a sequence of
-phrase z's, decoded into a multi-phrase IPA surface). Trained against
-the full batch as in-batch negatives via two complementary InfoNCE
-heads — one over decoder hidden states, one over the *surface* (token
-straight-through) representation. The surface head is what guarantees
-the corpus is discriminable to a downstream LLM that only ever sees
-strings.
+The agent maps a target embedding to ``K`` latent z-vectors via a
+diffusion z-generator. Each z is decoded by the frozen dep_tree_vae
+pipeline (skeleton → projector → phrase_decoder) into one IPA
+constituent. ``K`` constituents concatenate into a single expression.
+The expression is scored against in-batch negatives via two
+complementary InfoNCE heads (hidden-state and surface) plus four
+information-theoretically-motivated regularizers.
 
 Loss = α·hidden_NCE + β·surface_NCE + γ·topology + δ·z_diversity
        + ε·corpus_KL + ζ·LLM_pressure
 
-Each term has a distinct, complementary role:
-
-  - **hidden_NCE** (α≈1.0): dense gradient discrimination signal in
-    decoder hidden space. Fast to learn from.
-  - **surface_NCE** (β≈1.0): discrimination signal over the
-    straight-through-embedded *output tokens*. Forces messages to be
-    distinguishable to anything that reads the IPA — the property the
-    downstream Qwen pretraining actually needs.
-  - **topology** (γ≈0.1): Pearson-ρ between target-pairwise-sim and
-    message-pairwise-sim. Ensures latent geometry preserves embedding
-    geometry → compositional generalization.
-  - **z_diversity** (δ≈0.1): pairwise cosine penalty across the K
-    z-positions of one expression. Prevents within-message bandwidth
-    collapse.
-  - **corpus_KL** (ε≈0.05): KL(batch-marginal || training unigram).
-    Keeps surface marginals Zipfian — aligned with the Qwen tokenizer's
-    expectations — preventing discrimination pressure from drifting z
-    into corners of decoder space with unnatural output statistics.
-  - **LLM_pressure** (ζ≈0.05): frozen Qwen as a fluency floor over
-    decoded tokens. Aligns surface forms with what Qwen-7B can learn.
+  - **hidden_NCE**: dense gradient discrimination signal in decoder
+    hidden space.
+  - **surface_NCE**: discrimination over straight-through-embedded
+    output tokens — what the downstream LLM actually sees.
+  - **topology**: 1 − Pearson ρ between target-pairwise and
+    message-pairwise cosine, enforcing compositional latent geometry.
+  - **z_diversity**: pairwise cosine penalty across the K z-positions
+    of one expression — prevents within-message bandwidth collapse.
+  - **corpus_KL**: KL(batch-marginal || training unigram) — pulls
+    aggregate marginals toward Zipfian for tokenizer alignment.
+  - **LLM_pressure**: frozen Qwen NLL — fluency floor aligned with
+    downstream pretraining.
 
 VRAM:
-  - Phase 2 gradient rerun is chunked because it is intrinsically a
-    grad-memory budgeting concern (O(L²) attention with stored
-    activations).
-  - All other OOM recovery is delegated to ``AgentTrainer``, which wraps
-    each step in ``shrink_on_oom`` (utils.oom).
+  - Phase 2 grad re-run is chunked along the batch dim (intrinsic
+    O(L²) attention activation cost).
+  - All other OOM recovery is delegated to ``AgentTrainer`` which
+    wraps each step in ``shrink_on_oom``.
 """
 
 from __future__ import annotations
@@ -58,13 +49,13 @@ from lfm.agents.components import (
     embed_tokens_straight_through,
 )
 from lfm.agents.config import CurriculumConfig, MessageEncoderConfig
-from lfm.agents.decode import ExpressionDecoder, rerun_decoder_multiphrase_with_grad
 from lfm.agents.diffusion import DiffusionZGenerator
 from lfm.agents.llm_pressure import LLMPressureScorer
 from lfm.config.base import LFMBaseConfig
-from lfm.faculty.config import FacultyConfig
-from lfm.faculty.model import LanguageFaculty
-from lfm.generator.config import GeneratorConfig
+from lfm.generator.dep_tree_vae.config import DEP_RELATIONS
+from lfm.generator.dep_tree_vae.model import DepTreeVAE
+from lfm.generator.dep_tree_vae.skeleton import SKEL_BOS, SKEL_EOS
+from lfm.generator.layers import multiscale_causal_mask, precompute_rope_freqs
 
 logger = logging.getLogger(__name__)
 
@@ -75,15 +66,16 @@ logger = logging.getLogger(__name__)
 
 
 class ContrastiveGameConfig(LFMBaseConfig):
-    """Configuration for the contrastive expression game."""
+    """Configuration for the dep_tree_vae contrastive game."""
 
-    # Faculty
+    # Frozen VAE — checkpoint produced by ``lfm pretrain dep_tree_vae``.
+    vae_checkpoint: str = "data/models/dep_tree_vae_v1/best.pt"
+    vae_config: str = "configs/dep_tree_vae_vast.yaml"
+    spm_path: str = "data/models/v15b_ipa/spm.model"
+
+    # Embedding store
     embedding_dim: int = 384
-    decoder_path: str = "data/vae_decoder.pt"
-    spm_path: str = "data/spm.model"
-    num_memory_tokens: int = 8
-    max_output_len: int = 96
-    vq_codebook_path: str | None = None
+    embedding_store_dir: str = "data/embeddings"
 
     # Diffusion z-generator
     z_hidden_dim: int = 512
@@ -93,95 +85,85 @@ class ContrastiveGameConfig(LFMBaseConfig):
     diffusion_heads: int = 8
     variable_phrases: bool = True
     target_phrases: float = 2.5
-    max_tokens_per_phrase: int = 48
 
-    # Surface encoder (also reused as reference shape for both heads)
+    # Per-phrase generation budget
+    max_tokens_per_phrase: int = 32
+
+    # Surface encoder (used by surface InfoNCE head)
     encoder: MessageEncoderConfig = MessageEncoderConfig()
 
-    # ----- Six-term loss weights ------------------------------------------
+    # ----- Loss weights -----
     hidden_infonce_weight: float = 1.0
     surface_infonce_weight: float = 1.0
     topology_weight: float = 0.1
     z_diversity_weight: float = 0.1
-    corpus_kl_weight: float = 0.05
-    llm_pressure_weight: float = 0.05
+    # Bigram-KL replaces unigram corpus_kl. Cycles ("the the", "of of")
+    # produce bigrams not present in the corpus; bigram-KL penalizes
+    # them at the layer where they appear.
+    bigram_kl_weight: float = 0.05
+    # adj_diversity: cosine-similarity hinge between adjacent softmax
+    # distributions. Direct anti-cycling pressure that does not depend
+    # on inter-sample comparisons.
+    adj_diversity_weight: float = 0.05
+    adj_diversity_target: float = 0.30
+    llm_pressure_weight: float = 0.0
 
     # InfoNCE temperature (shared across both heads).
     contrastive_temperature: float = 0.07
 
-    # corpus_kl reference distribution.  If None or missing on disk,
-    # corpus_kl is silently disabled (weight ignored).
-    corpus_unigram_path: str | None = None
+    # Precomputed top-K corpus bigrams (.npz with pairs/probs/oov_prob).
+    # Skipped if missing.
+    bigram_kl_path: str | None = None
 
-    # LLM pressure backend.
+    # N-gram blocking at Phase 1 decode. Empty list disables. List of
+    # n-gram orders to block (e.g. [3, 4] blocks any 3- or 4-gram from
+    # repeating within a phrase).
+    ngram_block: list[int] = [3, 4]
+
+    # Frozen LLM scorer for llm_pressure. Loaded only if weight > 0.
     llm_model_name: str = "Qwen/Qwen2.5-0.5B"
     llm_gumbel_tau: float = 1.0
 
-    # Game
+    # Game / curriculum
     num_distractors: int = 15
-    embedding_store_dir: str = "data/embeddings"
-
-    # Training (consumed by AgentTrainer)
-    batch_size: int = 20
-    gradient_accumulation_steps: int = 12
+    batch_size: int = 16
+    gradient_accumulation_steps: int = 4
     steps: int = 4000
     gru_lr: float = 1e-4
     receiver_lr: float = 3e-4
     max_grad_norm: float = 1.0
     curriculum: CurriculumConfig = CurriculumConfig()
 
-    # Phase 2 grad-memory chunking (NOT OOM recovery).
-    phase2_vram_budget_mb: float = 1500.0
-    phase2_min_chunk: int = 4
+    # Phase 2 grad-rerun chunking (intrinsic — not OOM recovery).
+    phase2_chunk: int = 8
 
     # Output
     checkpoint_every: int = 100
     log_every: int = 50
-    output_dir: str = "data/contrastive_game"
+    output_dir: str = "data/contrastive_dep_tree_v1"
 
     # Runtime
     device: str = "cuda"
     seed: int = 42
 
-    # Generator backend
-    generator_name: str = "multilingual_vae"
-    generator_vocab_size: int | None = None
-
-    # Trainer log-line uses this to know B-way chance.
+    # AgentTrainer log-line uses this to know B-way chance.
     contrastive_scoring: bool = True
-
-    def build_faculty_config(self) -> FacultyConfig:
-        """Construct the LanguageFaculty config."""
-        gen_kwargs = dict(
-            name=self.generator_name,
-            pretrained_decoder_path=self.decoder_path,
-            spm_model_path=self.spm_path,
-            num_memory_tokens=self.num_memory_tokens,
-            max_seq_len=self.max_output_len,
-            vq_codebook_path=self.vq_codebook_path,
-        )
-        if self.generator_vocab_size is not None:
-            gen_kwargs["vocab_size"] = self.generator_vocab_size
-        return FacultyConfig(
-            dim=self.embedding_dim,
-            generator=GeneratorConfig(**gen_kwargs),
-        )
 
 
 # ---------------------------------------------------------------------------
-# Generation output
+# Generation result
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class ExpressionOutput:
-    """Phase-2 hidden states + diagnostics for one Expression."""
+    """Concatenated K-phrase expression with hidden states + diagnostics."""
 
-    hidden: Tensor       # (B, S, H) Phase 2 hidden states (with grad)
+    hidden: Tensor       # (B, S, H) Phase-2 hidden states (with grad)
     mask: Tensor         # (B, S) valid-token mask
     z_seq: Tensor        # (B, K, latent_dim)
-    z_weights: Tensor    # (B, K)
-    num_phrases: Tensor  # (B,) soft phrase count
+    z_weights: Tensor    # (B, K) per-phrase activity
+    num_phrases: Tensor  # (B,) soft phrase count from z-gen
     tokens_cpu: Tensor   # (B, S) on CPU, diagnostics only
     gen_mask_cpu: Tensor # (B, S) on CPU, diagnostics only
 
@@ -192,55 +174,55 @@ class ExpressionOutput:
 
 
 class ContrastiveGame(nn.Module):
-    """Single-Expression contrastive discrimination with surface grounding.
+    """Contrastive expression game over a frozen ``DepTreeVAE``.
 
-    All OOM recovery is delegated to ``AgentTrainer.shrink_on_oom``.
-    Only intrinsic grad-memory chunking lives in this module.
+    All vae parameters are frozen; only the agent-side z-generator,
+    target projection, and loss heads are trainable.
 
     Args:
         config: Game configuration.
-        faculty: Pre-built ``LanguageFaculty`` (already on device).
+        vae: A pre-loaded ``DepTreeVAE`` (already on device).
     """
 
-    def __init__(
-        self, config: ContrastiveGameConfig, faculty: LanguageFaculty,
-    ) -> None:
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+
+    def __init__(self, config: ContrastiveGameConfig, vae: DepTreeVAE) -> None:
         super().__init__()
         self.config = config
-        self.faculty = faculty
+        self.vae = vae.eval()
+        for p in self.vae.parameters():
+            p.requires_grad_(False)
 
-        gen = faculty.generator
-        gen.eval()
-        device = next(gen.parameters()).device
-        with torch.no_grad():
-            faculty(torch.randn(1, config.embedding_dim, device=device))
+        self.latent_dim = vae.cfg.latent.total_dim
+        self.hidden_dim = vae.cfg.decoder_hidden_dim
+        self.vocab_size = vae.cfg.spm_vocab_size + 2
+        self.bos_id = vae._bos_id
+        self.eos_id = vae._eos_id
 
-        self._hidden_dim = gen.config.decoder_hidden_dim
-        self._latent_dim = gen._latent_dim
-        self._vocab_size = gen._full_vocab
-
-        # ---- Submodules ----
+        # ---- z-generator ----
+        z_mean = getattr(vae, "_z_struct_mean", None)
+        z_std = getattr(vae, "_z_struct_std", None)
         self.z_gen = DiffusionZGenerator(
             input_dim=config.embedding_dim,
-            latent_dim=self._latent_dim,
-            hidden_dim=config.z_hidden_dim,
+            latent_dim=self.latent_dim,
+            d_model=config.z_hidden_dim,
             num_layers=config.diffusion_layers,
             num_heads=config.diffusion_heads,
             max_phrases=config.max_phrases,
             num_steps=config.diffusion_steps,
             variable_phrases=config.variable_phrases,
-            z_mean=gen._z_mean if gen._z_stats_initialized else None,
-            z_std=gen._z_std if gen._z_stats_initialized else None,
+            z_mean=z_mean,
+            z_std=z_std,
             target_phrases=config.target_phrases,
         )
-        self.target_proj = nn.Linear(config.embedding_dim, config.embedding_dim)
-        self.phrase_decoder = ExpressionDecoder(gen)
 
-        # Two contrastive heads — one over hidden states, one over the
-        # straight-through-embedded surface tokens.  Shared temperature.
-        self.hidden_proj = nn.Linear(self._hidden_dim, config.embedding_dim)
+        # ---- contrastive heads ----
+        self.target_proj = nn.Linear(config.embedding_dim, config.embedding_dim)
+        self.hidden_proj = nn.Linear(self.hidden_dim, config.embedding_dim)
         self.surface_encoder = MessageEncoder(
-            self._hidden_dim, config.embedding_dim,
+            self.hidden_dim, config.embedding_dim,
             num_heads=config.encoder.num_heads,
             num_layers=config.encoder.num_layers,
         )
@@ -248,47 +230,50 @@ class ContrastiveGame(nn.Module):
             torch.tensor(math.log(1.0 / config.contrastive_temperature)),
         )
 
-        # z-diversity needs the pretrained latent stats to know the
-        # baseline pairwise cosine.  Disabled if unavailable.
-        if config.z_diversity_weight > 0 and gen._z_stats_initialized:
-            self.z_diversity = ZDiversityLoss(gen._z_mean, gen._z_std)
+        # ---- z-diversity (intra-expression hinge) ----
+        if config.z_diversity_weight > 0 and z_mean is not None and z_std is not None:
+            self.z_diversity = ZDiversityLoss(z_mean, z_std)
         else:
             self.z_diversity = None
 
-        # corpus unigram for KL.  Buffer (not param) so it's saved with
-        # checkpoints but never updated.  None → KL skipped.
-        self._corpus_unigram_loaded = False
-        if config.corpus_kl_weight > 0 and config.corpus_unigram_path:
-            path = Path(config.corpus_unigram_path)
+        # ---- precomputed top-K corpus bigrams for bigram_kl ----
+        self._bigram_loaded = False
+        if config.bigram_kl_weight > 0 and config.bigram_kl_path:
+            path = Path(config.bigram_kl_path)
             if path.exists():
-                arr = np.load(path)
-                if arr.shape != (self._vocab_size,):
-                    logger.warning(
-                        "corpus_unigram shape %s != (%d,) — skipping corpus_kl",
-                        arr.shape, self._vocab_size,
-                    )
-                else:
-                    self.register_buffer(
-                        "corpus_unigram",
-                        torch.tensor(arr, dtype=torch.float32).clamp(min=1e-8),
-                    )
-                    self._corpus_unigram_loaded = True
-                    logger.info("Loaded corpus unigram from %s", path)
+                with np.load(path) as f:
+                    pairs = f["pairs"].astype(np.int64)
+                    probs = f["probs"].astype(np.float32)
+                    oov = float(f["oov_prob"])
+                self.register_buffer(
+                    "bigram_pairs", torch.tensor(pairs, dtype=torch.long),
+                )  # (K, 2)
+                self.register_buffer(
+                    "bigram_probs",
+                    torch.tensor(probs, dtype=torch.float32).clamp(min=1e-8),
+                )  # (K,)
+                self.register_buffer(
+                    "bigram_oov_prob",
+                    torch.tensor(max(oov, 1e-8), dtype=torch.float32),
+                )
+                self._bigram_loaded = True
+                logger.info(
+                    "Loaded bigram top-%d from %s (covers %.2f%% of mass)",
+                    pairs.shape[0], path, (1.0 - oov) * 100,
+                )
             else:
                 logger.warning(
-                    "corpus_unigram_path %s missing — corpus_kl disabled", path,
+                    "bigram_kl_path %s missing — bigram_kl disabled", path,
                 )
 
-        # LLM pressure scorer (loads frozen Qwen).  Optional.
+        # ---- frozen LLM scorer ----
         self.llm_pressure: LLMPressureScorer | None = None
         if config.llm_pressure_weight > 0:
-            if gen._tokenizer is None:
-                raise RuntimeError(
-                    "llm_pressure_weight > 0 requires a sentencepiece-backed generator",
-                )
+            import sentencepiece as spm
+            sp = spm.SentencePieceProcessor(model_file=config.spm_path)
             self.llm_pressure = LLMPressureScorer(
-                spm_model=gen._tokenizer._sp,
-                spm_vocab_size=self._vocab_size,
+                spm_model=sp,
+                spm_vocab_size=self.vocab_size,
                 llm_model_name=config.llm_model_name,
             )
 
@@ -296,13 +281,8 @@ class ContrastiveGame(nn.Module):
     # Trainer interface
     # ------------------------------------------------------------------
 
-    @property
-    def gen(self):
-        """Underlying frozen generator."""
-        return self.faculty.generator
-
     def trainable_param_groups(self) -> list[dict]:
-        """Optimizer param groups with per-group LR."""
+        """Per-group LR. Frozen vae params are excluded."""
         cfg = self.config
         groups = [
             {"params": list(self.z_gen.parameters()), "lr": cfg.gru_lr},
@@ -318,14 +298,14 @@ class ContrastiveGame(nn.Module):
         return groups
 
     def checkpoint_state(self) -> dict:
-        """Slim checkpoint dict."""
+        """Slim checkpoint dict — vae weights live in their own checkpoint."""
         state = {
             "z_gen": self.z_gen.state_dict(),
             "target_proj": self.target_proj.state_dict(),
             "hidden_proj": self.hidden_proj.state_dict(),
             "surface_encoder": self.surface_encoder.state_dict(),
             "log_temperature": self.log_temperature.data,
-            "version": 4,
+            "version": 5,
         }
         if self.llm_pressure is not None:
             state["llm_pressure_projection"] = (
@@ -353,158 +333,348 @@ class ContrastiveGame(nn.Module):
                 )
 
     # ------------------------------------------------------------------
+    # Decode helpers — sit inside the game class because their interface
+    # is dep_tree_vae-specific and not reused elsewhere.
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _skeleton_to_roles(self, z: Tensor, max_roles: int) -> Tensor:
+        """Greedy skeleton decode → padded role tensor (Bz, R).
+
+        Each row is the role sequence stripped of BOS/EOS, padded with
+        the last role to ``max_roles`` (so all rows share shape).
+        """
+        skel = self.vae.skeleton_decoder(z)[0]  # (Bz, R+1)
+        Bz = skel.size(0)
+        out = torch.zeros(Bz, max_roles, dtype=torch.long, device=z.device)
+        for i in range(Bz):
+            roles: list[int] = []
+            for t in skel[i]:
+                tv = t.item()
+                if tv == SKEL_BOS:
+                    continue
+                if tv == SKEL_EOS:
+                    break
+                if tv < len(DEP_RELATIONS):
+                    roles.append(tv)
+            if not roles:
+                roles = [DEP_RELATIONS.index("root")]
+            roles = roles[:max_roles]
+            pad = roles[-1]
+            roles += [pad] * (max_roles - len(roles))
+            out[i] = torch.tensor(roles, device=z.device)
+        return out
+
+    def _block_repeated_ngrams(
+        self, logits: Tensor, generated: Tensor, t: int,
+    ) -> Tensor:
+        """Set ``logits[b, banned] = -inf`` for any token that would
+        complete a previously-emitted n-gram, for n in ``cfg.ngram_block``.
+
+        Vectorized: for each n, find positions in the history whose
+        (n-1)-gram matches the current trailing (n-1)-gram; the token
+        right after that match is the banned next token.
+        """
+        ns = self.config.ngram_block or []
+        if not ns or t == 0:
+            return logits
+        Bz = logits.size(0)
+        for n in ns:
+            if t < n - 1:
+                continue
+            prefix = generated[:, t - (n - 1):t]            # (Bz, n-1)
+            if t < n - 1 + 1:
+                continue
+            grams = generated[:, : t].unfold(1, n - 1, 1)   # (Bz, t-(n-2), n-1)
+            matches = (grams == prefix.unsqueeze(1)).all(dim=-1)  # (Bz, M)
+            # The banned next-token after each match position j is at
+            # generated[:, j + (n-1)]. Valid only when j + (n-1) < t.
+            M = matches.size(1)
+            j = torch.arange(M, device=logits.device)
+            valid_j = (j + (n - 1)) < t
+            matches = matches & valid_j.unsqueeze(0)
+            if not matches.any():
+                continue
+            b_idx, j_idx = matches.nonzero(as_tuple=True)
+            banned = generated[b_idx, j_idx + (n - 1)]
+            logits[b_idx, banned] = float("-inf")
+        return logits
+
+    @torch.no_grad()
+    def _ar_decode(self, memory: Tensor, max_len: int) -> tuple[Tensor, Tensor]:
+        """Batched greedy AR token decode through frozen phrase_decoder.
+
+        Includes n-gram blocking (per ``cfg.ngram_block``) at every step
+        so cycles are prevented at sample time, not just penalized in the
+        loss. Phase 2 grad rerun then sees a clean, non-cyclic target.
+
+        Args:
+            memory: ``(Bz, R, H)`` per-role memory.
+            max_len: Hard cap on tokens per phrase (excluding BOS/EOS).
+
+        Returns:
+            tokens: ``(Bz, T)`` token ids (no BOS, EOS truncated).
+            mask: ``(Bz, T)`` boolean (True = valid).
+        """
+        cfg = self.vae.cfg
+        Bz, _, _ = memory.shape
+        device = memory.device
+
+        # Ensure RoPE table is long enough.
+        rope = self.vae._rope_freqs
+        if rope is not None and rope.size(0) < max_len + 1:
+            rope = precompute_rope_freqs(
+                self.hidden_dim // cfg.decoder_num_heads,
+                max_len + 2, device=device,
+            )
+            self.vae._rope_freqs = rope
+
+        tokens = torch.full((Bz, 1), self.bos_id, dtype=torch.long, device=device)
+        finished = torch.zeros(Bz, dtype=torch.bool, device=device)
+        generated = torch.zeros(Bz, max_len, dtype=torch.long, device=device)
+        gen_mask = torch.zeros(Bz, max_len, dtype=torch.bool, device=device)
+
+        for t in range(max_len):
+            tok_emb = self.vae.dec_token_embedding(tokens)
+            seq_len = tok_emb.size(1)
+            tgt_mask = multiscale_causal_mask(
+                seq_len, cfg.decoder_num_heads,
+                tuple(cfg.attention_head_windows),
+                cfg.attention_global_every, device=device,
+            )
+            rope_t = rope[:seq_len] if rope is not None else None
+            hidden = self.vae.phrase_decoder(
+                tok_emb, memory, tgt_mask=tgt_mask, rope_freqs=rope_t,
+            )
+            logits = self.vae.output_head(hidden[:, -1, :])
+            logits = self._block_repeated_ngrams(logits, generated, t)
+            next_tok = logits.argmax(dim=-1)
+
+            # Record for non-finished rows; freeze finished rows.  EOS is
+            # itself a valid token and stays in the mask — excluding it
+            # produced all-False masks for samples that EOS'd at t=0,
+            # which then NaN'd the surface encoder's attention softmax.
+            active = ~finished
+            generated[:, t] = torch.where(active, next_tok, generated[:, t])
+            gen_mask[:, t] = active
+
+            # Mark newly-finished.
+            finished = finished | (next_tok == self.eos_id)
+
+            tokens = torch.cat([tokens, next_tok.unsqueeze(1)], dim=1)
+            if finished.all():
+                # Trim trailing zeros.
+                gen_mask = gen_mask[:, : t + 1]
+                generated = generated[:, : t + 1]
+                break
+
+        return generated, gen_mask
+
+    def _phrase_hidden_with_grad(
+        self, z: Tensor, tokens: Tensor, mask: Tensor, max_roles: int,
+    ) -> Tensor:
+        """Re-run phrase_decoder teacher-forced on (z, tokens) with grad.
+
+        Memory is recomputed from ``z`` (which carries grad), so the
+        gradient flows: hidden → memory → phrase_projector → z.
+        ``phrase_decoder`` itself is frozen.
+        """
+        cfg = self.vae.cfg
+        device = z.device
+
+        with torch.no_grad():
+            roles = self._skeleton_to_roles(z, max_roles)
+
+        # Memory: gradients flow through phrase_projector(z, ...).
+        memory = self.vae.phrase_projector(z, roles)  # (B, R, H)
+
+        # Prepend BOS for teacher-forced input; targets start at position 1.
+        T = tokens.size(1)
+        bos = torch.full((tokens.size(0), 1), self.bos_id, dtype=torch.long, device=device)
+        input_ids = torch.cat([bos, tokens[:, :-1]], dim=1)  # (B, T)
+        tok_emb = self.vae.dec_token_embedding(input_ids)
+
+        rope = self.vae._rope_freqs
+        rope_t = rope[:T] if rope is not None else None
+        tgt_mask = multiscale_causal_mask(
+            T, cfg.decoder_num_heads,
+            tuple(cfg.attention_head_windows),
+            cfg.attention_global_every, device=device,
+        )
+        hidden = self.vae.phrase_decoder(
+            tok_emb, memory, tgt_mask=tgt_mask, rope_freqs=rope_t,
+        )
+        return hidden
+
+    # ------------------------------------------------------------------
     # Generation
     # ------------------------------------------------------------------
 
     def _generate(self, anchor: Tensor) -> ExpressionOutput:
-        """z-gen → Phase 1 (no-grad) decode → Phase 2 (grad) chunked rerun."""
+        """Encode anchor → K z-vectors → K decoded phrases → concat."""
         cfg = self.config
-        batch = anchor.size(0)
+        B = anchor.size(0)
+        max_roles = self.vae.cfg.skeleton.max_roles
+
         conditioning = self.target_proj(anchor)
+        z_seq, z_weights, num_phrases = self.z_gen(conditioning)  # (B, K, D)
+        K = z_seq.size(1)
+        z_flat = z_seq.reshape(B * K, self.latent_dim)
 
-        # Phase 1 — full batch, no grad.
-        z_seq, z_weights, num_phrases = self.z_gen(conditioning)
-        tokens, gen_mask, seg_bounds = self.phrase_decoder.decode(
-            z_seq, z_weights,
-            max_tokens_per_phrase=cfg.max_tokens_per_phrase,
-        )
-        tokens_cpu = tokens.cpu()
-        gen_mask_cpu = gen_mask.cpu()
-
-        # Phase 2 — gradient rerun in grad-memory-bounded chunks.
-        avg_tok = gen_mask.float().sum(-1).mean().item()
-        chunk = self._phase2_chunk(batch, avg_tok)
-        all_hidden, all_mask = [], []
-        max_seq = 0
-        for start in range(0, batch, chunk):
-            end = min(start + chunk, batch)
-            hidden = rerun_decoder_multiphrase_with_grad(
-                self.gen,
-                z_seq[start:end], z_weights[start:end],
-                tokens[start:end], gen_mask[start:end], seg_bounds[start:end],
+        # Phase 1 — no-grad batched skeleton + AR decode.
+        with torch.no_grad():
+            roles_flat = self._skeleton_to_roles(z_flat, max_roles)
+            memory_flat = self.vae.phrase_projector(z_flat, roles_flat)
+            tokens_flat, mask_flat = self._ar_decode(
+                memory_flat, cfg.max_tokens_per_phrase,
             )
-            seq_len = hidden.size(1)
-            max_seq = max(max_seq, seq_len)
-            all_hidden.append(hidden)
-            all_mask.append(gen_mask[start:end, :seq_len])
+        T = tokens_flat.size(1)
 
-        # Pad chunks to common seq length.
-        for i, h in enumerate(all_hidden):
-            if h.size(1) < max_seq:
-                pad = h.new_zeros(h.size(0), max_seq - h.size(1), h.size(2))
-                all_hidden[i] = torch.cat([h, pad], dim=1)
-                m = all_mask[i]
-                mpad = m.new_zeros(m.size(0), max_seq - m.size(1))
-                all_mask[i] = torch.cat([m, mpad], dim=1)
+        # Phase 2 — chunked grad re-run. The per-phrase decode is small
+        # enough that we can chunk over (B*K) without much overhead.
+        chunk = max(cfg.phase2_chunk, 1)
+        hidden_chunks: list[Tensor] = []
+        for s in range(0, B * K, chunk):
+            e = min(s + chunk, B * K)
+            h = self._phrase_hidden_with_grad(
+                z_flat[s:e], tokens_flat[s:e], mask_flat[s:e], max_roles,
+            )
+            hidden_chunks.append(h)
+        hidden_flat = torch.cat(hidden_chunks, dim=0)  # (B*K, T, H)
+
+        # Reshape and concat K phrases along seq dim → one expression per anchor.
+        hidden = hidden_flat.reshape(B, K * T, self.hidden_dim)
+        mask = mask_flat.reshape(B, K * T)
+        tokens = tokens_flat.reshape(B, K * T)
 
         return ExpressionOutput(
-            hidden=torch.cat(all_hidden, dim=0),
-            mask=torch.cat(all_mask, dim=0),
-            z_seq=z_seq, z_weights=z_weights, num_phrases=num_phrases,
-            tokens_cpu=tokens_cpu, gen_mask_cpu=gen_mask_cpu,
+            hidden=hidden,
+            mask=mask,
+            z_seq=z_seq,
+            z_weights=z_weights,
+            num_phrases=num_phrases,
+            tokens_cpu=tokens.detach().cpu(),
+            gen_mask_cpu=mask.detach().cpu(),
         )
 
-    def _phase2_chunk(self, batch: int, avg_tok: float = 50.0) -> int:
-        """Pick a chunk size for Phase 2 gradient rerun.
-
-        Phase 2 attention activation cost grows as O(seq_len²).
-        Calibrated to ~190 MB/sample at 50 tok.
-        """
-        cfg = self.config
-        per_sample_mb = 190.0 * (max(avg_tok, 1.0) / 50.0) ** 2
-        if torch.cuda.is_available():
-            used_mb = torch.cuda.memory_allocated() / (1024 ** 2)
-            total_mb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2)
-            available = total_mb - used_mb - 500.0
-        else:
-            available = cfg.phase2_vram_budget_mb
-        budget = min(available, cfg.phase2_vram_budget_mb)
-        chunk = max(int(budget // per_sample_mb), cfg.phase2_min_chunk)
-        return min(chunk, batch)
-
     # ------------------------------------------------------------------
-    # Loss terms — each a pure function over (expr, anchor).
-    # Returns a scalar tensor; callers weight + sum.
+    # Loss terms — pure functions over (expr, anchor); zero-weight terms
+    # short-circuit to a zero scalar so they're free.
     # ------------------------------------------------------------------
 
     def _pool_hidden(self, expr: ExpressionOutput) -> Tensor:
-        """Mask-mean pool decoder hidden states → (B, H)."""
+        """Mask-mean pool over the (B, S, H) hidden states → (B, H)."""
         m = expr.mask.unsqueeze(-1).float()
         lengths = expr.mask.float().sum(dim=1, keepdim=True).clamp(min=1)
         return (expr.hidden * m).sum(dim=1) / lengths
 
     def _surface_repr(self, expr: ExpressionOutput) -> Tensor:
-        """Straight-through token embedding → MessageEncoder → (B, embedding_dim)."""
+        """Straight-through-embed tokens, encode → (B, embedding_dim).
+
+        Patches any all-False rows in the mask to mark position 0 as
+        valid — an all-False row would NaN the surface encoder's
+        attention softmax and contaminate the whole batch.
+        """
         embedded = embed_tokens_straight_through(
-            expr.hidden, self.gen.output_head, self.gen.token_embedding,
+            expr.hidden, self.vae.output_head, self.vae.dec_token_embedding,
         )
-        return self.surface_encoder(embedded, expr.mask)
+        mask = expr.mask
+        empty_rows = ~mask.any(dim=1)
+        if empty_rows.any():
+            mask = mask.clone()
+            mask[empty_rows, 0] = True
+        return self.surface_encoder(embedded, mask)
 
     def _info_nce(self, msg: Tensor, anchor: Tensor) -> tuple[Tensor, Tensor]:
-        """Symmetric InfoNCE between message and target representations.
-
-        Returns:
-            (loss, logits) — loss is symmetric CE; logits are the (B,B)
-            similarity matrix (msg → target direction) for accuracy.
-        """
+        """Symmetric InfoNCE; returns (loss, msg→tgt similarity logits)."""
         msg_n = F.normalize(msg, dim=-1)
         tgt_n = F.normalize(anchor.detach(), dim=-1)
         temperature = self.log_temperature.exp().clamp(min=0.01, max=100.0)
         sim = msg_n @ tgt_n.t()
         logits = sim / temperature
         labels = torch.arange(logits.size(0), device=logits.device)
-        loss_t = F.cross_entropy(logits, labels)
-        loss_m = F.cross_entropy(logits.t(), labels)
-        return 0.5 * (loss_t + loss_m), logits
+        loss = 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
+        return loss, logits
 
     def _topology_loss(self, msg: Tensor, anchor: Tensor) -> Tensor:
-        """1 - Pearson ρ between msg and target pairwise cosine matrices.
-
-        Drives latent geometry to track embedding geometry → compositional
-        generalization to novel targets via interpolation.
-        """
+        """1 − Pearson ρ between message-pairwise and target-pairwise cosine."""
         msg_n = F.normalize(msg, dim=-1)
         tgt_n = F.normalize(anchor.detach(), dim=-1)
         B = msg_n.size(0)
         idx = torch.triu_indices(B, B, offset=1, device=msg_n.device)
-        msg_pair = (msg_n @ msg_n.t())[idx[0], idx[1]]
-        tgt_pair = (tgt_n @ tgt_n.t())[idx[0], idx[1]]
-        mc = msg_pair - msg_pair.mean()
-        tc = tgt_pair - tgt_pair.mean()
+        mp = (msg_n @ msg_n.t())[idx[0], idx[1]]
+        tp = (tgt_n @ tgt_n.t())[idx[0], idx[1]]
+        mc, tc = mp - mp.mean(), tp - tp.mean()
         denom = (mc.norm() * tc.norm()).clamp(min=1e-8)
-        rho = (mc * tc).sum() / denom
-        return 1.0 - rho
+        return 1.0 - (mc * tc).sum() / denom
 
     def _z_diversity_loss(self, expr: ExpressionOutput) -> Tensor:
-        """Hinge penalty on mean intra-expression z cosine."""
+        """Hinge penalty on intra-expression z cosine."""
         if self.z_diversity is None:
             return expr.hidden.new_tensor(0.0)
         loss, _ = self.z_diversity(expr.z_seq, expr.z_weights)
         return loss
 
-    def _corpus_kl_loss(self, expr: ExpressionOutput) -> Tensor:
-        """KL(batch-marginal next-token || training corpus unigram).
+    def _bigram_kl_loss(self, expr: ExpressionOutput) -> Tensor:
+        """KL(batch-marginal bigram || top-K corpus bigrams) + OOV.
 
-        Pulls the batch's aggregate output distribution toward natural
-        Zipfian, keeping z exploration in the well-calibrated region of
-        the frozen decoder's latent space.
+        Counts only adjacent positions where both tokens are valid.
+        Computes the model's expected mass on each of the K precomputed
+        corpus bigrams plus an OOV bucket for everything else, then
+        KL-divergences against the corpus distribution.
+
+        Catches the unigram-loophole: cycling on `the/of/with` matches
+        a unigram target but produces (`the`,`the`)-style bigrams
+        absent from the corpus — the OOV bucket inflates and pushes
+        back through softmax → logits → memory → z_gen.
         """
-        if not self._corpus_unigram_loaded:
+        if not self._bigram_loaded:
             return expr.hidden.new_tensor(0.0)
-        valid = expr.hidden[expr.mask]
-        if valid.numel() == 0:
-            return expr.hidden.new_tensor(0.0)
-        logits = self.gen.output_head(valid)         # (N, V)
+        logits = self.vae.output_head(expr.hidden)            # (B, S, V)
         probs = F.softmax(logits, dim=-1)
-        p_batch = probs.mean(dim=0).clamp(min=1e-8)  # (V,)
-        target = self.corpus_unigram                 # (V,) buffer
-        return (p_batch * (p_batch.log() - target.log())).sum()
+        p_t = probs[:, :-1]
+        p_t1 = probs[:, 1:]
+        pair_mask = (expr.mask[:, :-1] & expr.mask[:, 1:]).float()
+        n_pairs = pair_mask.sum().clamp(min=1)
+
+        a = self.bigram_pairs[:, 0]
+        b = self.bigram_pairs[:, 1]
+        joint_topK = p_t[..., a] * p_t1[..., b]               # (B, S-1, K)
+        model_topK = (joint_topK * pair_mask.unsqueeze(-1)).sum(dim=(0, 1)) / n_pairs
+        model_topK = model_topK.clamp(min=1e-12)
+        sum_topK = model_topK.sum().clamp(max=1.0 - 1e-8)
+        model_oov = (1.0 - sum_topK).clamp(min=1e-12)
+
+        kl_top = (model_topK * (model_topK.log() - self.bigram_probs.log())).sum()
+        kl_oov = model_oov * (model_oov.log() - self.bigram_oov_prob.log())
+        return kl_top + kl_oov
+
+    def _adj_diversity_loss(self, expr: ExpressionOutput) -> Tensor:
+        """Hinge on cosine similarity between adjacent softmax distributions.
+
+        cos(p_t, p_t+1) is high when the model wants to emit similar
+        token distributions at consecutive positions — exactly the
+        local mode of cycling. Penalizing values above
+        ``adj_diversity_target`` (default 0.30) is direct anti-cycling
+        pressure, no corpus reference needed; complements bigram_kl
+        which catches the same failure at the post-softmax level.
+        """
+        cfg = self.config
+        if cfg.adj_diversity_weight <= 0:
+            return expr.hidden.new_tensor(0.0)
+        logits = self.vae.output_head(expr.hidden)
+        probs = F.softmax(logits, dim=-1)
+        pn = F.normalize(probs, dim=-1, eps=1e-8)
+        cos = (pn[:, :-1] * pn[:, 1:]).sum(dim=-1)            # (B, S-1)
+        pair_mask = (expr.mask[:, :-1] & expr.mask[:, 1:]).float()
+        excess = (cos - cfg.adj_diversity_target).clamp(min=0.0)
+        return (excess * pair_mask).sum() / pair_mask.sum().clamp(min=1)
 
     def _llm_pressure_loss(self, expr: ExpressionOutput) -> Tensor:
-        """Frozen Qwen NLL over the agent's logit sequence."""
+        """Frozen Qwen NLL over agent logits."""
         if self.llm_pressure is None:
             return expr.hidden.new_tensor(0.0)
-        logits = self.gen.output_head(expr.hidden)
+        logits = self.vae.output_head(expr.hidden)
         return self.llm_pressure(
             agent_logits=logits, mask=expr.mask, tau=self.config.llm_gumbel_tau,
         )
@@ -519,26 +689,24 @@ class ContrastiveGame(nn.Module):
     ) -> dict[str, Tensor]:
         """One contrastive step.
 
-        Distractors are kept in the signature for trainer compatibility
-        but are unused — the loss is in-batch InfoNCE.
+        Distractors are kept in the signature for ``AgentTrainer``
+        compatibility but unused — InfoNCE uses in-batch negatives.
         """
         cfg = self.config
-        del distractors, candidate_indices, step  # unused here
+        del distractors, candidate_indices, step
 
-        # 1. Generate one expression per anchor.
         expr = self._generate(anchor)
 
-        # 2. Compute representations once, reuse across heads.
         hidden_msg = self.hidden_proj(self._pool_hidden(expr))
         surface_msg = self._surface_repr(expr)
 
-        # 3. Six-term loss assembly.  Each term is independent + weighted.
         terms: dict[str, Tensor] = {}
         terms["hidden_nce"], hidden_logits = self._info_nce(hidden_msg, anchor)
         terms["surface_nce"], _ = self._info_nce(surface_msg, anchor)
         terms["topology"] = self._topology_loss(surface_msg, anchor)
         terms["z_div_loss"] = self._z_diversity_loss(expr)
-        terms["corpus_kl"] = self._corpus_kl_loss(expr)
+        terms["bigram_kl"] = self._bigram_kl_loss(expr)
+        terms["adj_div"] = self._adj_diversity_loss(expr)
         terms["llm_pressure"] = self._llm_pressure_loss(expr)
 
         weights = {
@@ -546,18 +714,30 @@ class ContrastiveGame(nn.Module):
             "surface_nce":  cfg.surface_infonce_weight,
             "topology":     cfg.topology_weight,
             "z_div_loss":   cfg.z_diversity_weight,
-            "corpus_kl":    cfg.corpus_kl_weight,
+            "bigram_kl":    cfg.bigram_kl_weight,
+            "adj_div":      cfg.adj_diversity_weight,
             "llm_pressure": cfg.llm_pressure_weight,
         }
+
+        # Per-term NaN/Inf guard — names the first culprit so we can
+        # tune that one specifically rather than killing all six.
+        for k, t in terms.items():
+            if torch.isnan(t) or torch.isinf(t):
+                logger.error(
+                    "Non-finite loss term: %s = %s. Other terms: %s",
+                    k, t.item(),
+                    {k2: float(v.detach()) for k2, v in terms.items() if k2 != k},
+                )
+                raise RuntimeError(f"NaN/Inf in loss term '{k}'")
+
         total = sum(weights[k] * terms[k] for k in weights)
 
-        # 4. Diagnostics.
         with torch.no_grad():
             target_idx = torch.arange(hidden_logits.size(0), device=hidden_logits.device)
             accuracy = (hidden_logits.argmax(1) == target_idx).float().mean()
             msg_lengths = expr.mask.float().sum(dim=1).mean()
-            eos = self.gen.eos_id
             seqs = set()
+            eos = self.eos_id
             for row, m in zip(expr.tokens_cpu, expr.gen_mask_cpu):
                 ids = tuple(t.item() for t, v in zip(row, m) if v and t.item() != eos)
                 seqs.add(hash(ids))
@@ -572,7 +752,6 @@ class ContrastiveGame(nn.Module):
             "_tokens": expr.tokens_cpu,
             "_gen_mask": expr.gen_mask_cpu,
         }
-        # Per-term scalars for logging (detached).
         for k, v in terms.items():
             out[k] = v.detach()
         return out
