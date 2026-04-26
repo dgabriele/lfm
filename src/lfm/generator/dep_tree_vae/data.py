@@ -246,8 +246,13 @@ def collate_dep_tree(batch: list[dict]) -> dict[str, Tensor]:
 
 def build_dataloaders(
     cfg: DepTreeVAEConfig,
-) -> tuple[DataLoader, DataLoader, spm.SentencePieceProcessor, int]:
-    """Build train/val DataLoaders from config.
+) -> tuple[DataLoader, DataLoader, DataLoader, spm.SentencePieceProcessor, int]:
+    """Build train / val / train-eval DataLoaders from config.
+
+    The third loader (``train_eval_loader``) draws a fixed subset of the
+    training split sized to match the val set, so an apples-to-apples
+    deterministic-z eval pass over training data can be run alongside
+    val. It uses the same collation but a fixed shuffle seed.
 
     On first run, builds a binary cache from the JSONL source.
     Subsequent runs load the cache directly.
@@ -297,9 +302,23 @@ def build_dataloaders(
         collate_fn=collate_dep_tree,
     )
 
+    # Fixed sample of train indices, sized to match val. Deterministic so
+    # the train-eval number is comparable across epochs.
+    train_eval_n = min(val_size, train_size)
+    eval_gen = torch.Generator().manual_seed(cfg.seed + 1)
+    train_eval_idx = torch.randperm(train_size, generator=eval_gen)[:train_eval_n].tolist()
+    train_eval_ds = torch.utils.data.Subset(train_ds, train_eval_idx)
+    train_eval_loader = DataLoader(
+        train_eval_ds,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        drop_last=False,
+        collate_fn=collate_dep_tree,
+    )
+
     logger.info(
-        "Data: %d train, %d val, vocab=%d (spm=%d + 2 specials + %d roles)",
-        train_size, val_size, vocab_size,
+        "Data: %d train, %d val, %d train-eval, vocab=%d (spm=%d + 2 specials + %d roles)",
+        train_size, val_size, train_eval_n, vocab_size,
         spm_size, len(DEP_REL_TO_ID),
     )
-    return train_loader, val_loader, sp, vocab_size
+    return train_loader, val_loader, train_eval_loader, sp, vocab_size

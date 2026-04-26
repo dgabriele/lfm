@@ -48,7 +48,7 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
     with open(out_dir / "config.yaml", "w") as f:
         yaml.dump(cfg.model_dump(), f, default_flow_style=False)
 
-    train_loader, val_loader, sp, vocab_size = build_dataloaders(cfg)
+    train_loader, val_loader, train_eval_loader, sp, vocab_size = build_dataloaders(cfg)
 
     # Completeness scorer (frozen)
     completeness_scorer = None
@@ -246,10 +246,14 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
                     elapsed = time.time() - batch_start
                     z_std_mean = (0.5 * out.logvar).exp().mean().item()
                     topo_str = f" topo={topo_rho.item():.3f}" if topo_rho.item() != 0 else ""
+                    # `total` matches what _validate() reports (recon + all
+                    # weighted regularizers) so train and val numbers are
+                    # directly comparable.
                     logger.info(
-                        "ep%d step=%d  recon=%.3f skel=%.3f kl=%.3f%s "
+                        "ep%d step=%d  total=%.3f recon=%.3f skel=%.3f kl=%.3f%s "
                         "z_std=%.4f gnorm=%.2f lr=%.6f  [%.1fs]",
                         epoch, global_step,
+                        out.total_loss.item(),
                         out.recon_loss.item(),
                         out.skeleton_loss.item(),
                         out.kl_loss.item(),
@@ -278,8 +282,17 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
             epoch, epoch_loss / max(n_batches, 1),
         )
 
-        val_loss = _validate(model, val_loader, device, cfg, global_step)
-        logger.info("ep%d val_loss=%.4f (best=%.4f)", epoch, val_loss, best_val_loss)
+        val = _validate(model, val_loader, device, cfg, global_step)
+        train_eval = _validate(model, train_eval_loader, device, cfg, global_step)
+        val_loss = val["total"]
+        logger.info(
+            "ep%d val_total=%.4f recon=%.4f skel=%.4f kl=%.4f "
+            "| train_eval_total=%.4f recon=%.4f skel=%.4f kl=%.4f "
+            "| gap=%.4f (best_val_total=%.4f)",
+            epoch, val_loss, val["recon"], val["skel"], val["kl"],
+            train_eval["total"], train_eval["recon"], train_eval["skel"], train_eval["kl"],
+            val_loss - train_eval["total"], best_val_loss,
+        )
 
         _save_checkpoint(model, optimizer, scheduler, scaler, epoch + 1, global_step, best_val_loss, out_dir)
 
@@ -292,8 +305,13 @@ def train_dep_tree_vae(cfg: DepTreeVAEConfig) -> None:
 
 @torch.no_grad()
 def _validate(model, val_loader, device, cfg, global_step):
+    """Return (total_loss, components) averaged across the val set.
+
+    `components` is a dict with the same per-term breakdown the train log
+    emits, so train-vs-val comparisons are like-for-like.
+    """
     model.eval()
-    total_loss = 0.0
+    sums = {"total": 0.0, "recon": 0.0, "skel": 0.0, "kl": 0.0}
     n = 0
     for batch in val_loader:
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -302,10 +320,14 @@ def _validate(model, val_loader, device, cfg, global_step):
             role_ids=batch["role_ids"], role_lengths=batch["role_lengths"],
             kl_weight=_kl_schedule(global_step, cfg),
         )
-        total_loss += out.total_loss.item()
+        sums["total"] += out.total_loss.item()
+        sums["recon"] += out.recon_loss.item()
+        sums["skel"] += out.skeleton_loss.item()
+        sums["kl"] += out.kl_loss.item()
         n += 1
     model.train()
-    return total_loss / max(n, 1)
+    n = max(n, 1)
+    return {k: v / n for k, v in sums.items()}
 
 
 def _kl_schedule(step: int, cfg: DepTreeVAEConfig) -> float:
