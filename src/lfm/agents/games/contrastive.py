@@ -630,20 +630,39 @@ class ContrastiveGame(nn.Module):
         """
         if not self._bigram_loaded:
             return expr.hidden.new_tensor(0.0)
+        # The naïve formulation builds joint = p_t * p_t1 of shape
+        # (B, S-1, K) which at B=256, S=80, K=50000 is ~4 GB fp32 and
+        # blows VRAM at 256-way.  Chunk along the batch dim so peak
+        # activation stays bounded regardless of B.  Each chunk
+        # contributes to the running sum; the divide by total n_pairs
+        # is applied once at the end.
         logits = self.vae.output_head(expr.hidden)            # (B, S, V)
         probs = F.softmax(logits, dim=-1)
-        p_t = probs[:, :-1]
-        p_t1 = probs[:, 1:]
-        pair_mask = (expr.mask[:, :-1] & expr.mask[:, 1:]).float()
-        n_pairs = pair_mask.sum().clamp(min=1)
+        p_t_full = probs[:, :-1]                              # (B, S-1, V)
+        p_t1_full = probs[:, 1:]
+        pair_mask_full = (expr.mask[:, :-1] & expr.mask[:, 1:]).float()
+        n_pairs = pair_mask_full.sum().clamp(min=1)
 
         a = self.bigram_pairs[:, 0]
         b = self.bigram_pairs[:, 1]
-        joint_topK = p_t[..., a] * p_t1[..., b]               # (B, S-1, K)
-        model_topK = (joint_topK * pair_mask.unsqueeze(-1)).sum(dim=(0, 1)) / n_pairs
-        model_topK = model_topK.clamp(min=1e-12)
-        sum_topK = model_topK.sum().clamp(max=1.0 - 1e-8)
-        model_oov = (1.0 - sum_topK).clamp(min=1e-12)
+        K = a.numel()
+
+        B = p_t_full.size(0)
+        # Pick a chunk whose joint tensor is bounded.  Target ~256 MB:
+        # chunk × (S-1) × K × 4B ≤ 256 MB  →  chunk ≤ 256e6 / (80 × K × 4).
+        # For K=50000, S=80, this caps chunk at ~16. Keep chunk modest.
+        chunk = max(1, min(B, int(64_000_000 // max(K * p_t_full.size(1) // 32, 1))))
+
+        sum_topK = p_t_full.new_zeros(K)
+        for s in range(0, B, chunk):
+            e = min(s + chunk, B)
+            jt = p_t_full[s:e, :, a] * p_t1_full[s:e, :, b]   # (c, S-1, K)
+            sum_topK = sum_topK + (jt * pair_mask_full[s:e].unsqueeze(-1)).sum(dim=(0, 1))
+            del jt
+
+        model_topK = (sum_topK / n_pairs).clamp(min=1e-12)
+        sum_top = model_topK.sum().clamp(max=1.0 - 1e-8)
+        model_oov = (1.0 - sum_top).clamp(min=1e-12)
 
         kl_top = (model_topK * (model_topK.log() - self.bigram_probs.log())).sum()
         kl_oov = model_oov * (model_oov.log() - self.bigram_oov_prob.log())
