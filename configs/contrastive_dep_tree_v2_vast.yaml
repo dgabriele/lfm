@@ -1,0 +1,80 @@
+# Contrastive game v2 — fresh run with z_prior_weight=1.0 active from step 0.
+#
+# v1 post-mortem: z_prior at 0.1 was introduced mid-run (~step 800) into
+# an already-committed InfoNCE optimum. The MMD flatlined at 0.015-0.018
+# for 1400+ steps — the gradient contribution (0.017 × 0.1 = 0.0017) was
+# overwhelmed by InfoNCE (~10.6) by a factor of ~6000. The z-gen never
+# escaped the cycling basin it had already settled into.
+#
+# v2 fix: z_prior_weight=1.0 from step 0. At the typical equilibrium MMD
+# (~0.017), this puts z_prior in the same gradient tier as topology
+# (~0.035) and adj_diversity (~0.007) — losses that demonstrably shaped
+# v1 training. Starting fresh means we prevent basin entry rather than
+# trying to escape one; 1.0 is sufficient for that.
+
+vae_checkpoint: /workspace/lfm/data/models/dep_tree_vae_v1/best.pt
+vae_config: /workspace/lfm/configs/dep_tree_vae_vast.yaml
+spm_path: /workspace/lfm/data/models/v15b_ipa/spm.model
+
+embedding_dim: 384
+embedding_store_dir: /workspace/lfm/data/embeddings
+
+z_hidden_dim: 512
+max_phrases: 4
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+variable_phrases: true
+target_phrases: 2.5
+
+max_tokens_per_phrase: 32
+
+encoder:
+  num_layers: 2
+  num_heads: 8
+
+# ----- Loss weights -----
+hidden_infonce_weight: 1.0
+surface_infonce_weight: 1.0
+topology_weight: 0.1
+z_diversity_weight: 0.1
+bigram_kl_weight: 0.05
+adj_diversity_weight: 0.10
+adj_diversity_target: 0.30
+# z_prior at 1.0 from step 0: prevents the z-gen from ever entering the
+# OOD cycling basin, rather than trying to correct after the fact.
+z_prior_weight: 1.0
+llm_pressure_weight: 0.0
+
+contrastive_temperature: 0.07
+
+bigram_kl_path: /workspace/lfm/data/datasets/english-dep-trees-v16-depth4/cache/bigram_topk.npz
+
+ngram_block: [3, 4]
+
+# EOS bias from v1 — proven to shorten phrases naturally (tok/phr 67→48).
+eos_bias_max: 1.5
+
+num_distractors: 15
+batch_size: 256
+gradient_accumulation_steps: 1
+steps: 4000
+gru_lr: 0.00003
+receiver_lr: 0.0001
+max_grad_norm: 0.5
+
+phase2_chunk: 64
+
+curriculum:
+  enabled: true
+  warmup_steps: 500
+  start_hard_ratio: 0.0
+  end_hard_ratio: 1.0
+
+checkpoint_every: 100
+log_every: 25
+
+output_dir: /workspace/lfm/data/contrastive_dep_tree_v2
+
+device: cuda
+seed: 42
