@@ -160,6 +160,8 @@ class ExpressionOutput:
     """Concatenated K-phrase expression with hidden states + diagnostics."""
 
     hidden: Tensor       # (B, S, H) Phase-2 hidden states (with grad)
+    logits: Tensor       # (B, S, V) output_head(hidden), computed ONCE
+    probs: Tensor        # (B, S, V) softmax(logits), computed ONCE
     mask: Tensor         # (B, S) valid-token mask
     z_seq: Tensor        # (B, K, latent_dim)
     z_weights: Tensor    # (B, K) per-phrase activity
@@ -280,6 +282,41 @@ class ContrastiveGame(nn.Module):
     # ------------------------------------------------------------------
     # Trainer interface
     # ------------------------------------------------------------------
+
+    def render_surface(
+        self,
+        token_ids: Tensor,
+        mask: Tensor | None = None,
+        eos_id: int | None = None,
+        output_mode: str = "ipa",
+    ) -> list[str]:
+        """Decode token IDs → IPA strings via the dep_tree_vae's SPM.
+
+        Picked up by ``AgentTrainer`` at every checkpoint to print live
+        samples.  The trainer's ``_respell_ipa`` then converts each
+        string to a Latin-respelled form for readability.  This lets us
+        watch linguistic quality (cycles, well-formedness) per
+        checkpoint and short-circuit a degenerate run instead of
+        burning GPU hours on it.
+        """
+        if not hasattr(self, "_sp"):
+            import sentencepiece as spm
+            self._sp = spm.SentencePieceProcessor(
+                model_file=self.config.spm_path,
+            )
+        sp = self._sp
+        spm_size = sp.get_piece_size()
+        eos = eos_id if eos_id is not None else self.eos_id
+        out: list[str] = []
+        ids_t = token_ids.detach().cpu().tolist()
+        if mask is not None:
+            mask_t = mask.detach().cpu().tolist()
+        else:
+            mask_t = [[True] * len(row) for row in ids_t]
+        for row, mrow in zip(ids_t, mask_t):
+            ids = [int(t) for t, m in zip(row, mrow) if m and int(t) < spm_size and int(t) != eos]
+            out.append(sp.decode(ids).strip())
+        return out
 
     def trainable_param_groups(self) -> list[dict]:
         """Per-group LR. Frozen vae params are excluded."""
@@ -547,8 +584,19 @@ class ContrastiveGame(nn.Module):
         mask = mask_flat.reshape(B, K * T)
         tokens = tokens_flat.reshape(B, K * T)
 
+        # Compute output logits + softmax ONCE — at B=256, S=320, V=8050
+        # this tensor is ~6.6 GB fp32, and was previously being allocated
+        # 3-4 times (in _bigram_kl, _adj_diversity, _surface_repr,
+        # _llm_pressure) during the same forward, which OOM'd the 24 GB
+        # GPU and forced auto-shrink to bs=63.  Cache once on the
+        # ExpressionOutput so all loss callers reuse the same tensor.
+        logits = self.vae.output_head(hidden)
+        probs = F.softmax(logits, dim=-1)
+
         return ExpressionOutput(
             hidden=hidden,
+            logits=logits,
+            probs=probs,
             mask=mask,
             z_seq=z_seq,
             z_weights=z_weights,
@@ -571,13 +619,19 @@ class ContrastiveGame(nn.Module):
     def _surface_repr(self, expr: ExpressionOutput) -> Tensor:
         """Straight-through-embed tokens, encode → (B, embedding_dim).
 
+        Reuses the cached logits/probs from ``expr`` (computed once in
+        ``_generate``) instead of re-running ``output_head(hidden)``.
+
         Patches any all-False rows in the mask to mark position 0 as
         valid — an all-False row would NaN the surface encoder's
         attention softmax and contaminate the whole batch.
         """
-        embedded = embed_tokens_straight_through(
-            expr.hidden, self.vae.output_head, self.vae.dec_token_embedding,
-        )
+        # Straight-through: forward = hard-onehot, backward = soft probs.
+        soft = expr.probs                                          # (B, S, V)
+        hard = F.one_hot(expr.logits.argmax(dim=-1), soft.size(-1)).to(soft.dtype)
+        st = (hard - soft).detach() + soft                          # (B, S, V)
+        embedded = st @ self.vae.dec_token_embedding.weight         # (B, S, H)
+
         mask = expr.mask
         empty_rows = ~mask.any(dim=1)
         if empty_rows.any():
@@ -630,16 +684,11 @@ class ContrastiveGame(nn.Module):
         """
         if not self._bigram_loaded:
             return expr.hidden.new_tensor(0.0)
-        # The naïve formulation builds joint = p_t * p_t1 of shape
-        # (B, S-1, K) which at B=256, S=80, K=50000 is ~4 GB fp32 and
-        # blows VRAM at 256-way.  Chunk along the batch dim so peak
-        # activation stays bounded regardless of B.  Each chunk
-        # contributes to the running sum; the divide by total n_pairs
-        # is applied once at the end.
-        logits = self.vae.output_head(expr.hidden)            # (B, S, V)
-        probs = F.softmax(logits, dim=-1)
-        p_t_full = probs[:, :-1]                              # (B, S-1, V)
-        p_t1_full = probs[:, 1:]
+        # Reuses cached probs from expr.  The naive joint = p_t * p_t1
+        # of shape (B, S-1, K) at B=256, S=320, K=50000 is huge, so we
+        # chunk along the batch dim and accumulate.
+        p_t_full = expr.probs[:, :-1]                         # (B, S-1, V)
+        p_t1_full = expr.probs[:, 1:]
         pair_mask_full = (expr.mask[:, :-1] & expr.mask[:, 1:]).float()
         n_pairs = pair_mask_full.sum().clamp(min=1)
 
@@ -681,9 +730,7 @@ class ContrastiveGame(nn.Module):
         cfg = self.config
         if cfg.adj_diversity_weight <= 0:
             return expr.hidden.new_tensor(0.0)
-        logits = self.vae.output_head(expr.hidden)
-        probs = F.softmax(logits, dim=-1)
-        pn = F.normalize(probs, dim=-1, eps=1e-8)
+        pn = F.normalize(expr.probs, dim=-1, eps=1e-8)
         cos = (pn[:, :-1] * pn[:, 1:]).sum(dim=-1)            # (B, S-1)
         pair_mask = (expr.mask[:, :-1] & expr.mask[:, 1:]).float()
         excess = (cos - cfg.adj_diversity_target).clamp(min=0.0)
@@ -693,9 +740,8 @@ class ContrastiveGame(nn.Module):
         """Frozen Qwen NLL over agent logits."""
         if self.llm_pressure is None:
             return expr.hidden.new_tensor(0.0)
-        logits = self.vae.output_head(expr.hidden)
         return self.llm_pressure(
-            agent_logits=logits, mask=expr.mask, tau=self.config.llm_gumbel_tau,
+            agent_logits=expr.logits, mask=expr.mask, tau=self.config.llm_gumbel_tau,
         )
 
     # ------------------------------------------------------------------
