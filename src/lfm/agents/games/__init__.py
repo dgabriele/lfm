@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-from lfm.agents.games.expression import (
-    ExpressionGame,
-    ExpressionGameConfig,
-    ZSequenceGenerator,
-)
+from lfm.agents.games.contrastive import ContrastiveGame, ContrastiveGameConfig
 from lfm.agents.games.referential import ReferentialGame, ReferentialGameConfig
 
 __all__ = [
-    "ExpressionGame",
-    "ExpressionGameConfig",
+    "ContrastiveGame",
+    "ContrastiveGameConfig",
     "ReferentialGame",
     "ReferentialGameConfig",
-    "ZSequenceGenerator",
 ]

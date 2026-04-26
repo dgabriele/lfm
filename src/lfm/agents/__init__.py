@@ -9,21 +9,16 @@ the frozen linguistic bottleneck.  Each game type lives in
 from __future__ import annotations
 
 from lfm.agents.components import MessageEncoder, Receiver
-from lfm.agents.games.expression import (
-    ExpressionGame,
-    ExpressionGameConfig,
-    ZSequenceGenerator,
-)
+from lfm.agents.games.contrastive import ContrastiveGame, ContrastiveGameConfig
 from lfm.agents.games.referential import ReferentialGame, ReferentialGameConfig
 from lfm.agents.trainer import AgentTrainer
 
 __all__ = [
     "AgentTrainer",
-    "ExpressionGame",
-    "ExpressionGameConfig",
+    "ContrastiveGame",
+    "ContrastiveGameConfig",
     "MessageEncoder",
     "Receiver",
     "ReferentialGame",
     "ReferentialGameConfig",
-    "ZSequenceGenerator",
 ]
