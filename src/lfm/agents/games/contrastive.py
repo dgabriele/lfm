@@ -594,15 +594,17 @@ class ContrastiveGame(nn.Module):
         step: int = 0,
         candidate_indices: Optional[Tensor] = None,
     ) -> dict[str, Tensor]:
-        """One contrastive step. In-batch InfoNCE; ``distractors`` is
-        unused (kept for ``AgentTrainer`` compatibility).
+        """One contrastive step.
+
+        InfoNCE pool = B anchors + B×num_distractors pre-sampled negatives,
+        decoupling contrastive pool size from generation batch size.
         """
-        del distractors, candidate_indices, step
+        del candidate_indices, step
 
         expr = self._generate(anchor)
         agg = self._chunked_logit_pass(expr)
 
-        terms, hidden_logits = self._compute_loss_terms(expr, anchor, agg)
+        terms, hidden_logits = self._compute_loss_terms(expr, anchor, agg, distractors)
         total = self._aggregate(terms)
         self._raise_if_nonfinite(terms)
 
@@ -828,6 +830,7 @@ class ContrastiveGame(nn.Module):
         expr: ExpressionOutput,
         anchor: Tensor,
         agg: LogitAggregations,
+        distractors: Optional[Tensor] = None,
     ) -> tuple[dict[str, Tensor], Tensor]:
         """Each loss is one method. Returns the term dict and the
         hidden-NCE logits matrix for accuracy reporting.
@@ -835,8 +838,8 @@ class ContrastiveGame(nn.Module):
         hidden_msg = self.hidden_proj(self._pool_hidden(expr))
         surface_msg = self._encode_surface(agg.surface_emb, expr.mask)
 
-        hidden_loss, hidden_logits = self._info_nce(hidden_msg, anchor)
-        surface_loss, _ = self._info_nce(surface_msg, anchor)
+        hidden_loss, hidden_logits = self._info_nce(hidden_msg, anchor, distractors)
+        surface_loss, _ = self._info_nce(surface_msg, anchor, distractors)
 
         terms: dict[str, Tensor] = {
             "hidden_nce":   hidden_loss,
@@ -865,13 +868,34 @@ class ContrastiveGame(nn.Module):
             mask[empty, 0] = True
         return self.surface_encoder(surface_emb, mask)
 
-    def _info_nce(self, msg: Tensor, anchor: Tensor) -> tuple[Tensor, Tensor]:
+    def _info_nce(
+        self,
+        msg: Tensor,
+        anchor: Tensor,
+        distractors: Optional[Tensor] = None,
+    ) -> tuple[Tensor, Tensor]:
+        """InfoNCE with optional pre-sampled distractors as extra negatives.
+
+        Without distractors: symmetric B-way in-batch loss.
+        With distractors (B, D, E): forward-only loss over B + B*D targets,
+        decoupling contrastive pool size from generation batch size.
+        """
         msg_n = F.normalize(msg, dim=-1)
         tgt_n = F.normalize(anchor.detach(), dim=-1)
         temperature = self.log_temperature.exp().clamp(min=0.01, max=100.0)
-        logits = (msg_n @ tgt_n.t()) / temperature
-        labels = torch.arange(logits.size(0), device=logits.device)
-        loss = 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
+
+        if distractors is not None:
+            B, D, E = distractors.shape
+            neg_n = F.normalize(distractors.detach().reshape(B * D, E), dim=-1)
+            all_tgt = torch.cat([tgt_n, neg_n], dim=0)          # (B + B*D, E)
+            logits = (msg_n @ all_tgt.t()) / temperature         # (B, B + B*D)
+            labels = torch.arange(msg_n.size(0), device=logits.device)
+            loss = F.cross_entropy(logits, labels)
+        else:
+            logits = (msg_n @ tgt_n.t()) / temperature
+            labels = torch.arange(logits.size(0), device=logits.device)
+            loss = 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
+
         return loss, logits
 
     def _topology(self, msg: Tensor, anchor: Tensor) -> Tensor:

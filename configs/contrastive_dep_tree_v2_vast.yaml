@@ -56,7 +56,10 @@ ngram_block: [3, 4]
 eos_bias_max: 1.5
 
 num_distractors: 15
-batch_size: 256
+# batch_size=128 keeps VRAM safely under 24GB (v2 fresh run at 256 used 22.5GB
+# with only 1.5GB headroom). Contrastive pool = B + B×num_distractors =
+# 128 + 128×15 = 2048-way — harder than v1's 256-way despite smaller batch.
+batch_size: 128
 gradient_accumulation_steps: 1
 steps: 4000
 gru_lr: 0.00003
