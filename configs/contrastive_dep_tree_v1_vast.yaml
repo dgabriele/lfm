@@ -53,6 +53,11 @@ bigram_kl_path: /workspace/lfm/data/datasets/english-dep-trees-v16-depth4/cache/
 # from that instead of from the cyclic baseline.
 ngram_block: [3, 4]
 
+# Position-scaled EOS bias: grows from 0 at t=0 to eos_bias_max at t=max_len-1.
+# Encourages phrases to reach natural EOS before the 32-token hard cap.
+# 1.5 logit units at the final position is a soft nudge, not a hard collapse.
+eos_bias_max: 1.5
+
 num_distractors: 15
 batch_size: 256
 gradient_accumulation_steps: 1

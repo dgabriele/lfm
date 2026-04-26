@@ -115,6 +115,11 @@ class ContrastiveGameConfig(LFMBaseConfig):
     # N-gram orders to suppress at AR-decode time. Empty list disables.
     ngram_block: list[int] = [3, 4]
 
+    # Position-scaled EOS bias. logits[eos] += eos_bias_max * (t / max_len).
+    # Zero at t=0 (no collapse), grows to eos_bias_max at t=max_len-1.
+    # Encourages phrases to close naturally before the hard cap.
+    eos_bias_max: float = 0.0
+
     # Frozen LLM scorer for llm_pressure (loaded only if weight > 0).
     llm_model_name: str = "Qwen/Qwen2.5-0.5B"
     llm_gumbel_tau: float = 1.0
@@ -683,8 +688,11 @@ class ContrastiveGame(nn.Module):
         generated = torch.zeros(Bz, max_len, dtype=torch.long, device=device)
         gen_mask = torch.zeros(Bz, max_len, dtype=torch.bool, device=device)
 
+        eos_bias_max = self.config.eos_bias_max
         for t in range(max_len):
             logits = self._ar_step_logits(tokens, memory, rope, cfg)
+            if eos_bias_max > 0.0 and t > 0:
+                logits[~finished, self._eos_id] += eos_bias_max * (t / max_len)
             logits = self._ngram_blocker(logits, generated, t)
             next_tok = logits.argmax(dim=-1)
 
