@@ -14,6 +14,7 @@ from pathlib import Path
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
+from tokenizers.processors import TemplateProcessing
 from transformers import PreTrainedTokenizerFast
 
 _CONSONANTS = list("bdfghjklmnprstvwz")
@@ -75,6 +76,11 @@ class AlienVocab:
         tok_model = WordLevel(vocab=vocab_dict, unk_token="[UNK]")
         tokenizer = Tokenizer(tok_model)
         tokenizer.pre_tokenizer = WhitespaceSplit()
+        # Append EOS to every sequence so the decoder learns the stop signal.
+        tokenizer.post_processor = TemplateProcessing(
+            single="$A [EOS]",
+            special_tokens=[("[EOS]", EOS_ID)],
+        )
 
         return PreTrainedTokenizerFast(
             tokenizer_object=tokenizer,
