@@ -282,7 +282,9 @@ class CipherTrainer:
 
             self.opt.zero_grad()
             loss = self.model.forward_phase1(**batch)
-            if cfg.phase1_ar_every > 0 and step % cfg.phase1_ar_every == 0:
+            if (cfg.phase1_ar_weight > 0
+                    and cfg.phase1_ar_every > 0
+                    and step % cfg.phase1_ar_every == 0):
                 ar_sents = batch_sentences[: cfg.phase1_ar_batch_size]
                 ar_loss = self._ar_loss(ar_sents)
                 loss = loss + cfg.phase1_ar_weight * ar_loss

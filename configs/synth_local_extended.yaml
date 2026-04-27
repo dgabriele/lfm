@@ -20,7 +20,7 @@ phase1_max_target_len: 64
 phase1_log_every: 200
 phase1_diag_every: 1000
 phase1_ar_every: 10
-phase1_ar_weight: 0.5
+phase1_ar_weight: 0.0
 phase1_ar_batch_size: 8
 phase1_checkpoint_every: 2000
 
