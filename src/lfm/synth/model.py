@@ -85,7 +85,10 @@ class SynthLM(nn.Module):
         mt5.config.decoder_start_token_id = 2  # BOS_ID
         mt5.config.eos_token_id = 3            # EOS_ID
         mt5.config.pad_token_id = 0            # PAD_ID
-        mt5.config.forced_eos_token_id = 3
+        mt5.generation_config.eos_token_id = 3
+        mt5.generation_config.pad_token_id = 0
+        mt5.generation_config.decoder_start_token_id = 2
+        mt5.generation_config.forced_eos_token_id = None
 
         self.mt5 = mt5
         self.projector = EmbeddingProjector(config.source_embedding_dim, d_model, config.n_prefix_tokens)

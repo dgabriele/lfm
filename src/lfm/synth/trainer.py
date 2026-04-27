@@ -37,15 +37,28 @@ logger = logging.getLogger(__name__)
 # Thin data readers (no lfm imports)
 # ---------------------------------------------------------------------------
 
-def _iter_raw_sentences(dataset_dir: str, shuffle: bool = True, seed: int = 42) -> Iterator[str]:
-    """Yield raw English strings from DepTreeVAE HDF5 dataset indefinitely."""
-    h5_path = Path(dataset_dir) / "samples.h5"
+def _iter_raw_sentences(dataset_path: str, shuffle: bool = True, seed: int = 42) -> Iterator[str]:
+    """Yield raw English strings indefinitely.
+
+    Accepts three source formats:
+      * Directory containing ``samples.h5`` (DepTreeVAE HDF5 dataset)
+      * ``.jsonl`` file with ``{"text": "..."}`` objects
+      * ``.txt`` file with one sentence per line
+    """
+    path = Path(dataset_path)
     rng = random.Random(seed)
-    with h5py.File(h5_path, "r") as f:
-        raws = [
-            x.decode("utf-8") if isinstance(x, bytes) else x
-            for x in f["samples"]["raw"][:]
-        ]
+
+    if path.is_dir():
+        with h5py.File(path / "samples.h5", "r") as f:
+            raws = [
+                x.decode("utf-8") if isinstance(x, bytes) else x
+                for x in f["samples"]["raw"][:]
+            ]
+    elif path.suffix == ".jsonl":
+        raws = [json.loads(l)["text"] for l in path.read_text().splitlines() if l.strip()]
+    else:
+        raws = [l.strip() for l in path.read_text().splitlines() if l.strip()]
+
     if shuffle:
         rng.shuffle(raws)
     idx, n = 0, len(raws)
