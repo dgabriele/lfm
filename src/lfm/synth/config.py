@@ -23,6 +23,7 @@ class SynthConfig(BaseModel):
     phase1_max_source_len: int = 128
     phase1_max_target_len: int = 128
     phase1_log_every: int = 500
+    phase1_diag_every: int = 0              # 0 = disabled; diagnostic metrics every N steps
     phase1_checkpoint_every: int = 10_000
 
     # ---- Phase 2: embedding conditioning ----

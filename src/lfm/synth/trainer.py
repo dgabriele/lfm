@@ -13,6 +13,7 @@ Phase 2 — ConditioningTrainer:
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import random
@@ -92,6 +93,8 @@ class CipherTrainer:
     The mT5 encoder is frozen throughout.
     """
 
+    _DIAG_N = 16  # fixed sentences used for diagnostics
+
     def __init__(
         self,
         model: SynthLM,
@@ -107,6 +110,12 @@ class CipherTrainer:
         self.device = torch.device(config.device)
         self._freeze_encoder()
         self.opt = AdamW(self._trainable_params(), lr=config.phase1_lr)
+        # Fixed diagnostic sentences — loaded once, never shuffled, same across runs.
+        if config.phase1_diag_every > 0:
+            self._diag_sentences = list(itertools.islice(
+                _iter_raw_sentences(config.phase1_dataset_dir, shuffle=False),
+                self._DIAG_N,
+            ))
 
     def _freeze_encoder(self) -> None:
         for p in self.model.mt5.encoder.parameters():
@@ -117,6 +126,46 @@ class CipherTrainer:
             list(self.model.mt5.decoder.parameters())
             + list(self.model.mt5.lm_head.parameters())
         )
+
+    @torch.no_grad()
+    def _run_diagnostics(self, step: int) -> None:
+        """Log linguistic fidelity metrics on the fixed diagnostic batch."""
+        self.model.eval()
+        batch = self._make_batch(self._diag_sentences)
+
+        out = self.model.mt5(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+        )
+        pred_ids = out.logits.argmax(dim=-1)   # (B, T)
+        label_ids = batch["labels"]             # (B, T), -100 = pad
+
+        valid = label_ids != -100
+        pred_valid = pred_ids[valid]
+        label_valid = label_ids[valid]
+
+        cipher_acc = (pred_valid == label_valid).float().mean().item()
+
+        vocab_uniq = pred_valid.unique().numel()
+
+        counts = torch.bincount(pred_valid, minlength=len(self.alien_tok)).float()
+        probs = counts / counts.sum()
+        token_entropy = -(probs * (probs + 1e-9).log()).sum().item()
+
+        rep_num = rep_den = 0
+        for b in range(pred_ids.size(0)):
+            toks = pred_ids[b][valid[b]]
+            if toks.numel() > 1:
+                rep_num += (toks[1:] == toks[:-1]).sum().item()
+                rep_den += toks.numel() - 1
+        rep_rate = rep_num / rep_den if rep_den > 0 else 0.0
+
+        logger.info(
+            "phase1 diag  step=%d  cipher_acc=%.3f  vocab_uniq=%d  entropy=%.2f  rep_rate=%.3f",
+            step, cipher_acc, vocab_uniq, token_entropy, rep_rate,
+        )
+        self.model.train()
 
     def _make_batch(self, sentences: list[str]) -> dict[str, torch.Tensor]:
         alien = self.cipher.encode_batch(sentences)
@@ -170,6 +219,9 @@ class CipherTrainer:
                 avg = running_loss / cfg.phase1_log_every
                 logger.info("phase1 step=%d  loss=%.4f", step, avg)
                 running_loss = 0.0
+
+            if cfg.phase1_diag_every > 0 and step % cfg.phase1_diag_every == 0:
+                self._run_diagnostics(step)
 
             if step % cfg.phase1_checkpoint_every == 0:
                 ckpt_path = str(out_dir / f"phase1_step{step}.pt")
