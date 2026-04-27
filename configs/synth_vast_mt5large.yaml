@@ -10,8 +10,8 @@ base_model_name: google/mt5-large
 source_embedding_dim: 384   # all-MiniLM-L6-v2
 n_prefix_tokens: 8
 
-# Phase 1: cipher fine-tuning on 11.6M English constituency parses
-phase1_dataset_dir: data/datasets/constituents-12lang-all
+# Phase 1: cipher fine-tuning on local passages
+phase1_dataset_dir: data/embeddings/passages.jsonl
 phase1_batch_size: 64
 phase1_lr: 0.0001
 phase1_steps: 100000
