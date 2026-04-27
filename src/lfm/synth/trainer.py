@@ -281,6 +281,10 @@ class CipherTrainer:
         self.model.mt5.lm_head.load_state_dict(ckpt["model_lm_head"])
         self.model.mt5.decoder.load_state_dict(ckpt["model_decoder_body"])
         self.opt.load_state_dict(ckpt["optimizer"])
+        for state in self.opt.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(self.device)
         return ckpt["step"]
 
 
@@ -406,4 +410,8 @@ class ConditioningTrainer:
         self.model.projector.load_state_dict(ckpt["model_projector"])
         self.model.length_head.load_state_dict(ckpt["model_length_head"])
         self.opt.load_state_dict(ckpt["optimizer"])
+        for state in self.opt.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(self.device)
         return ckpt["step"]
