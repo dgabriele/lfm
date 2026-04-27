@@ -203,6 +203,43 @@ class CipherTrainer:
         )
         self.model.train()
 
+    def _ar_loss(self, sentences: list[str]) -> torch.Tensor:
+        """CE loss with model's own generated tokens as decoder context.
+
+        Runs generate() under no_grad to get the free-run sequence, then
+        does a differentiable forward pass using that sequence as decoder
+        input against the cipher targets.  Gradient flows through the
+        forward pass only — not through the discrete generate() call.
+        """
+        batch = self._make_batch(sentences)
+        T_label = batch["labels"].size(1)
+
+        with torch.no_grad():
+            gen_ids = self.model.mt5.generate(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                max_length=self.config.phase1_max_target_len,
+                num_beams=1,
+            )  # (B, T_gen) — starts with BOS
+
+        # Align gen_ids length to T_label + 1 (mT5 shifts decoder_input_ids right by 1).
+        T_gen = gen_ids.size(1)
+        if T_gen < T_label + 1:
+            pad = torch.full(
+                (gen_ids.size(0), T_label + 1 - T_gen),
+                self.alien_tok.pad_token_id,
+                device=self.device,
+            )
+            gen_ids = torch.cat([gen_ids, pad], dim=1)
+        decoder_input = gen_ids[:, : T_label + 1]
+
+        return self.model.mt5(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            decoder_input_ids=decoder_input,
+            labels=batch["labels"],
+        ).loss
+
     def _make_batch(self, sentences: list[str]) -> dict[str, torch.Tensor]:
         alien = self.cipher.encode_batch(sentences)
 
@@ -244,6 +281,10 @@ class CipherTrainer:
 
             self.opt.zero_grad()
             loss = self.model.forward_phase1(**batch)
+            if cfg.phase1_ar_every > 0 and step % cfg.phase1_ar_every == 0:
+                ar_sents = batch_sentences[: cfg.phase1_ar_batch_size]
+                ar_loss = self._ar_loss(ar_sents)
+                loss = loss + cfg.phase1_ar_weight * ar_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self._trainable_params(), 1.0)
             self.opt.step()
