@@ -133,6 +133,7 @@ class CipherTrainer:
         self.model.eval()
         batch = self._make_batch(self._diag_sentences)
 
+        # ---- teacher-forced metrics ----
         out = self.model.mt5(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
@@ -147,8 +148,6 @@ class CipherTrainer:
 
         cipher_acc = (pred_valid == label_valid).float().mean().item()
 
-        vocab_uniq = pred_valid.unique().numel()
-
         counts = torch.bincount(pred_valid, minlength=len(self.alien_tok)).float()
         probs = counts / counts.sum()
         token_entropy = -(probs * (probs + 1e-9).log()).sum().item()
@@ -161,9 +160,46 @@ class CipherTrainer:
                 rep_den += toks.numel() - 1
         rep_rate = rep_num / rep_den if rep_den > 0 else 0.0
 
+        # ---- free-run metrics ----
+        gen_ids = self.model.mt5.generate(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            max_length=self.config.phase1_max_target_len,
+            num_beams=1,
+        )
+        # align_acc: token-level accuracy on the shorter of gen vs target
+        free_accs = []
+        for b in range(len(self._diag_sentences)):
+            gen = [t for t in gen_ids[b].tolist()
+                   if t not in (self.alien_tok.bos_token_id,
+                                self.alien_tok.eos_token_id,
+                                self.alien_tok.pad_token_id)]
+            tgt = [t for t in label_ids[b].tolist() if t != -100
+                   and t not in (self.alien_tok.eos_token_id,
+                                 self.alien_tok.pad_token_id)]
+            n = min(len(gen), len(tgt))
+            if n:
+                free_accs.append(sum(g == t for g, t in zip(gen[:n], tgt[:n])) / n)
+        free_cipher_acc = sum(free_accs) / len(free_accs) if free_accs else 0.0
+
+        # mean generated length vs target length
+        mean_gen_len = sum(
+            len([t for t in gen_ids[b].tolist()
+                 if t not in (self.alien_tok.bos_token_id,
+                              self.alien_tok.eos_token_id,
+                              self.alien_tok.pad_token_id)])
+            for b in range(len(self._diag_sentences))
+        ) / len(self._diag_sentences)
+        mean_tgt_len = valid.float().sum(dim=-1).mean().item()
+
         logger.info(
-            "phase1 diag  step=%d  cipher_acc=%.3f  vocab_uniq=%d  entropy=%.2f  rep_rate=%.3f",
-            step, cipher_acc, vocab_uniq, token_entropy, rep_rate,
+            "phase1 diag  step=%d  "
+            "tf_acc=%.3f  free_acc=%.3f  "
+            "entropy=%.2f  rep_rate=%.3f  "
+            "gen_len=%.1f  tgt_len=%.1f",
+            step, cipher_acc, free_cipher_acc,
+            token_entropy, rep_rate,
+            mean_gen_len, mean_tgt_len,
         )
         self.model.train()
 
