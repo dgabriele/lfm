@@ -222,16 +222,17 @@ class CipherTrainer:
                 num_beams=1,
             )  # (B, T_gen) — starts with BOS
 
-        # Align gen_ids length to T_label + 1 (mT5 shifts decoder_input_ids right by 1).
+        # decoder_input_ids must be exactly T_label tokens so logits match labels shape.
+        # gen_ids starts with BOS: [BOS, g1, g2, ...]; take first T_label tokens.
         T_gen = gen_ids.size(1)
-        if T_gen < T_label + 1:
+        if T_gen < T_label:
             pad = torch.full(
-                (gen_ids.size(0), T_label + 1 - T_gen),
+                (gen_ids.size(0), T_label - T_gen),
                 self.alien_tok.pad_token_id,
                 device=self.device,
             )
             gen_ids = torch.cat([gen_ids, pad], dim=1)
-        decoder_input = gen_ids[:, : T_label + 1]
+        decoder_input = gen_ids[:, :T_label]
 
         return self.model.mt5(
             input_ids=batch["input_ids"],
