@@ -16,7 +16,7 @@ class SynthConfig(BaseModel):
     n_prefix_tokens: int = 8              # encoder-side prefix slots
 
     # ---- Phase 1: cipher fine-tuning ----
-    phase1_dataset_dir: str = ""          # path to DepTreeVAE dataset (HDF5)
+    phase1_dataset_dir: str = ""          # path to DepTreeVAE dataset (HDF5) or .jsonl
     phase1_batch_size: int = 32
     phase1_lr: float = 1e-4
     phase1_steps: int = 100_000
@@ -31,6 +31,7 @@ class SynthConfig(BaseModel):
     phase2_batch_size: int = 64
     phase2_lr: float = 1e-3
     phase2_steps: int = 30_000
+    phase2_max_target_len: int = 128
     phase2_length_loss_weight: float = 0.1
     phase2_log_every: int = 250
     phase2_checkpoint_every: int = 5_000

@@ -46,8 +46,7 @@ class TrainPhase1Command(CLICommand):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("config", help="YAML config file")
-        parser.add_argument("--resume", default=None, help="Phase1 checkpoint to resume from")
-        parser.add_argument("--start-step", type=int, default=0, help="Resume training from this step count")
+        parser.add_argument("--resume", default=None, help="Phase1 trainer checkpoint to resume from")
 
     def execute(self, args: argparse.Namespace) -> int:
         import yaml
@@ -64,11 +63,12 @@ class TrainPhase1Command(CLICommand):
         vocab = AlienVocab.load(out_dir)
         tokenizer = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
         model = SynthLM(cfg, alien_vocab_size=len(tokenizer))
+        trainer = CipherTrainer(model, cfg, cipher := WordCipher(vocab), tokenizer)
+        start_step = 0
         if args.resume:
-            model.load_phase1(args.resume)
-            print(f"Resumed from {args.resume}")
-        cipher = WordCipher(vocab)
-        CipherTrainer(model, cfg, cipher, tokenizer).train(start_step=args.start_step)
+            start_step = trainer.load_checkpoint(args.resume)
+            print(f"Resumed from {args.resume} at step {start_step}")
+        trainer.train(start_step=start_step)
         return 0
 
 
@@ -83,8 +83,8 @@ class TrainPhase2Command(CLICommand):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("config", help="YAML config file")
-        parser.add_argument("--phase1-checkpoint", required=True, help="Path to phase1_final.pt")
-        parser.add_argument("--resume", default=None, help="Phase2 checkpoint to resume from")
+        parser.add_argument("--phase1-checkpoint", required=True, help="Path to phase1_final.pt (model weights only)")
+        parser.add_argument("--resume", default=None, help="Phase2 trainer checkpoint to resume from")
 
     def execute(self, args: argparse.Namespace) -> int:
         import yaml
@@ -102,10 +102,12 @@ class TrainPhase2Command(CLICommand):
         tokenizer = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
         model = SynthLM(cfg, alien_vocab_size=len(tokenizer))
         model.load_phase1(args.phase1_checkpoint)
+        trainer = ConditioningTrainer(model, cfg, WordCipher(vocab), tokenizer)
+        start_step = 0
         if args.resume:
-            model.load_phase2(args.resume)
-        cipher = WordCipher(vocab)
-        ConditioningTrainer(model, cfg, cipher, tokenizer).train()
+            start_step = trainer.load_checkpoint(args.resume)
+            print(f"Resumed from {args.resume} at step {start_step}")
+        trainer.train(start_step=start_step)
         return 0
 
 

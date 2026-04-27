@@ -225,11 +225,27 @@ class CipherTrainer:
 
             if step % cfg.phase1_checkpoint_every == 0:
                 ckpt_path = str(out_dir / f"phase1_step{step}.pt")
-                self.model.save_phase1(ckpt_path)
+                self._save_checkpoint(ckpt_path, step)
                 logger.info("phase1 checkpoint -> %s", ckpt_path)
 
         self.model.save_phase1(str(out_dir / "phase1_final.pt"))
         logger.info("phase1 training complete")
+
+    def _save_checkpoint(self, path: str, step: int) -> None:
+        torch.save({
+            "step": step,
+            "model_lm_head": self.model.mt5.lm_head.state_dict(),
+            "model_decoder_body": self.model.mt5.decoder.state_dict(),
+            "optimizer": self.opt.state_dict(),
+        }, path)
+
+    def load_checkpoint(self, path: str) -> int:
+        """Load trainer checkpoint; returns the saved step count."""
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        self.model.mt5.lm_head.load_state_dict(ckpt["model_lm_head"])
+        self.model.mt5.decoder.load_state_dict(ckpt["model_decoder_body"])
+        self.opt.load_state_dict(ckpt["optimizer"])
+        return ckpt["step"]
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +294,7 @@ class ConditioningTrainer:
 
         dec = self.alien_tok(
             alien, padding=True, truncation=True,
-            max_length=self.config.phase1_max_target_len, return_tensors="pt",
+            max_length=self.config.phase2_max_target_len, return_tensors="pt",
         )
         labels = dec["input_ids"].clone()
         labels[labels == self.alien_tok.pad_token_id] = -100
@@ -291,7 +307,7 @@ class ConditioningTrainer:
             "labels": labels.to(self.device),
         }
 
-    def train(self) -> None:
+    def train(self, start_step: int = 0) -> None:
         cfg = self.config
         out_dir = Path(cfg.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -299,9 +315,13 @@ class ConditioningTrainer:
 
         embeddings, texts = _load_store(cfg.phase2_store_dir)
         N = len(texts)
+        # Advance RNG to match start_step so resumed sampling is consistent.
         rng = random.Random(cfg.seed)
+        for _ in range(start_step):
+            rng.sample(range(N), min(cfg.phase2_batch_size, N))
+
         B = cfg.phase2_batch_size
-        step = 0
+        step = start_step
         running_lm = running_len = 0.0
         w_len = cfg.phase2_length_loss_weight
 
@@ -330,8 +350,24 @@ class ConditioningTrainer:
 
             if step % cfg.phase2_checkpoint_every == 0:
                 ckpt_path = str(out_dir / f"phase2_step{step}.pt")
-                self.model.save_phase2(ckpt_path)
+                self._save_checkpoint(ckpt_path, step)
                 logger.info("phase2 checkpoint -> %s", ckpt_path)
 
         self.model.save_phase2(str(out_dir / "phase2_final.pt"))
         logger.info("phase2 training complete")
+
+    def _save_checkpoint(self, path: str, step: int) -> None:
+        torch.save({
+            "step": step,
+            "model_projector": self.model.projector.state_dict(),
+            "model_length_head": self.model.length_head.state_dict(),
+            "optimizer": self.opt.state_dict(),
+        }, path)
+
+    def load_checkpoint(self, path: str) -> int:
+        """Load trainer checkpoint; returns the saved step count."""
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        self.model.projector.load_state_dict(ckpt["model_projector"])
+        self.model.length_head.load_state_dict(ckpt["model_length_head"])
+        self.opt.load_state_dict(ckpt["optimizer"])
+        return ckpt["step"]

@@ -169,15 +169,14 @@ class SynthLM(nn.Module):
     # ---- Persistence helpers ----
 
     def save_phase1(self, path: str) -> None:
+        # decoder_body state_dict already contains embed_tokens weights.
         torch.save({
-            "decoder_embed": self.mt5.decoder.embed_tokens.state_dict(),
             "lm_head": self.mt5.lm_head.state_dict(),
             "decoder_body": self.mt5.decoder.state_dict(),
         }, path)
 
     def load_phase1(self, path: str) -> None:
-        ckpt = torch.load(path, map_location="cpu")
-        self.mt5.decoder.embed_tokens.load_state_dict(ckpt["decoder_embed"])
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
         self.mt5.lm_head.load_state_dict(ckpt["lm_head"])
         self.mt5.decoder.load_state_dict(ckpt["decoder_body"])
 
