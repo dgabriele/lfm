@@ -138,15 +138,19 @@ class CipherTrainer:
             "labels": labels.to(self.device),
         }
 
-    def train(self) -> None:
+    def train(self, start_step: int = 0) -> None:
         cfg = self.config
         out_dir = Path(cfg.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         self.model.to(self.device).train()
 
         data = _iter_raw_sentences(cfg.phase1_dataset_dir, seed=cfg.seed)
+        # Advance the data iterator to match start_step so we don't repeat data.
         B = cfg.phase1_batch_size
-        step = 0
+        for _ in range(start_step * B):
+            next(data)
+
+        step = start_step
         running_loss = 0.0
 
         while step < cfg.phase1_steps:

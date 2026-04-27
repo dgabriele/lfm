@@ -14,7 +14,7 @@ n_prefix_tokens: 8
 phase1_dataset_dir: data/embeddings/passages.jsonl
 phase1_batch_size: 16
 phase1_lr: 0.0001
-phase1_steps: 10000
+phase1_steps: 50000
 phase1_max_source_len: 64
 phase1_max_target_len: 64
 phase1_log_every: 200

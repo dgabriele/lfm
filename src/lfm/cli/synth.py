@@ -47,6 +47,7 @@ class TrainPhase1Command(CLICommand):
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("config", help="YAML config file")
         parser.add_argument("--resume", default=None, help="Phase1 checkpoint to resume from")
+        parser.add_argument("--start-step", type=int, default=0, help="Resume training from this step count")
 
     def execute(self, args: argparse.Namespace) -> int:
         import yaml
@@ -67,7 +68,7 @@ class TrainPhase1Command(CLICommand):
             model.load_phase1(args.resume)
             print(f"Resumed from {args.resume}")
         cipher = WordCipher(vocab)
-        CipherTrainer(model, cfg, cipher, tokenizer).train()
+        CipherTrainer(model, cfg, cipher, tokenizer).train(start_step=args.start_step)
         return 0
 
 
