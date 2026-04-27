@@ -45,6 +45,7 @@ adj_diversity_target: 0.30
 # OOD cycling basin, rather than trying to correct after the fact.
 z_prior_weight: 1.0
 llm_pressure_weight: 0.0
+decoder_fluency_weight: 0.05
 
 contrastive_temperature: 0.07
 
@@ -55,11 +56,12 @@ ngram_block: [3, 4]
 # EOS bias from v1 — proven to shorten phrases naturally (tok/phr 67→48).
 eos_bias_max: 1.5
 
-num_distractors: 15
-# batch_size=128 keeps VRAM safely under 24GB (v2 fresh run at 256 used 22.5GB
-# with only 1.5GB headroom). Contrastive pool = B + B×num_distractors =
-# 128 + 128×15 = 2048-way — harder than v1's 256-way despite smaller batch.
-batch_size: 128
+num_distractors: 7
+# batch_size=192 uses the available headroom (B=256 used 22.5GB, B=192 ≈17GB).
+# Contrastive pool = B + B×num_distractors =
+# 192 + 192×7 = 1536-way at full curriculum ramp.  More in-batch negatives
+# per step → stronger InfoNCE gradient → faster convergence.
+batch_size: 192
 gradient_accumulation_steps: 1
 steps: 4000
 gru_lr: 0.00003
@@ -70,7 +72,7 @@ phase2_chunk: 64
 
 curriculum:
   enabled: true
-  warmup_steps: 500
+  warmup_steps: 1000
   start_hard_ratio: 0.0
   end_hard_ratio: 1.0
 

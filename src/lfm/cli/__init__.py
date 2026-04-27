@@ -72,6 +72,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     register_qwen_targets_group(subparsers)
 
+    # --- synth subcommand group ---
+    from lfm.cli.synth import register_synth_group
+
+    register_synth_group(subparsers)
+
     # --- pretrain command ---
     from lfm.cli.pretrain import PretrainCommand
 

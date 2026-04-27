@@ -195,16 +195,6 @@ class AgentTrainer:
             ckpt = torch.load(resume, map_location=self.device, weights_only=False)
             game.load_checkpoint_state(ckpt)
             start_step = ckpt.get("step", 0)
-            # Restore the actual batch size from when the checkpoint was saved
-            # (may be smaller than config due to prior OOM auto-recovery).
-            if "batch_size" in ckpt:
-                saved_bs = ckpt["batch_size"]
-                if saved_bs < self._batch_size:
-                    logger.info(
-                        "Restored batch_size=%d from checkpoint (config=%d)",
-                        saved_bs, self._batch_size,
-                    )
-                    self._batch_size = saved_bs
             logger.info("Resumed from %s at step %d", resume, start_step)
 
         contrastive = getattr(cfg, "contrastive_scoring", False)
@@ -343,19 +333,25 @@ class AgentTrainer:
                     extra += f"  z_sim={out['z_intra_sim'].item():.3f}"
                 if "halt_cost" in out:
                     extra += f"  halt={out['halt_cost'].item():.3f}"
-                # ContrastiveGame loss breakdown — print every term so
-                # any non-finite or runaway value is visible per-step.
+                # Loss breakdown — printed when present in output dict.
                 for _term, _label in (
+                    ("reconstruction", "recon"),
+                    ("phrase_length", "plen"),
                     ("hidden_nce", "hnce"),
                     ("surface_nce", "snce"),
                     ("topology", "topo"),
                     ("z_div_loss", "div"),
                     ("bigram_kl", "bkl"),
                     ("adj_div", "adj"),
+                    ("tok_conc", "tconc"),
+                    ("uniq_tok", "uniq"),
+                    ("dec_fluency", "dflu"),
                     ("z_prior", "zprior"),
                 ):
                     if _term in out:
                         extra += f"  {_label}={out[_term].item():.3f}"
+                if "n_distractors" in out:
+                    extra += f"  ndist={int(out['n_distractors'].item())}"
                 if "z_coverage" in out and out["z_coverage"].item() > 0:
                     extra += f"  zcov={out['z_coverage'].item():.2f}"
                 if "hard_overlap" in out:
@@ -424,21 +420,20 @@ class AgentTrainer:
                             toks = out["_tokens"]
                             mask = out["_gen_mask"]
                             n = min(5, toks.size(0))
-                            surfaces = _renderer(
-                                toks[:n], mask=mask[:n],
-                            )
-                            for j, surface in enumerate(surfaces):
-                                eng = _respell_ipa(surface)
-                                if eng:
-                                    logger.info(
-                                        "  sample[%d]: %s  (%d tok)\n             → %s",
-                                        j, surface, int(mask[j].sum().item()), eng,
-                                    )
-                                else:
-                                    logger.info(
-                                        "  sample[%d]: %s  (%d tok)",
-                                        j, surface, int(mask[j].sum().item()),
-                                    )
+                            phrase_len = getattr(cfg, "max_tokens_per_phrase", 0)
+                            K = toks.size(1) // phrase_len if phrase_len > 0 else 1
+                            for j in range(n):
+                                parts = []
+                                for k in range(K):
+                                    sl = slice(k * phrase_len, (k + 1) * phrase_len) if phrase_len > 0 else slice(None)
+                                    pt = toks[j:j+1, sl]
+                                    pm = mask[j:j+1, sl]
+                                    surface = _renderer(pt, mask=pm)[0]
+                                    eng = _respell_ipa(surface)
+                                    if eng and eng.strip():
+                                        parts.append(eng.strip().capitalize())
+                                if parts:
+                                    logger.info("  [%d] %s.", j, ". ".join(parts))
                     except Exception:
                         pass
 

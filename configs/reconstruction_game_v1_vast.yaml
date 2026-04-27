@@ -1,0 +1,87 @@
+# Reconstruction game v1 — InverseDecoder as primary training signal.
+#
+# Loss hierarchy:
+#   1. reconstruction (cosine) — primary: does the paragraph encode the
+#      full semantic content?  InverseDecoder(Phase-2 hiddens) → anchor.
+#   2. decoder_fluency (CE) — hard constraint: prevents off-manifold z
+#      codes that produce degenerate cycling while technically low-recon.
+#   3. topology (Pearson r) — secondary: preserves neighbourhood structure
+#      of source embeddings in the expression hidden space.
+#   4. z_diversity + z_prior — tertiary: diversity and manifold regularity.
+#
+# No InfoNCE.  Accuracy metric = mean cosine similarity (higher is better).
+
+vae_checkpoint: /workspace/lfm/data/models/dep_tree_vae_v1/best.pt
+vae_config: /workspace/lfm/configs/dep_tree_vae_vast.yaml
+spm_path: /workspace/lfm/data/models/v15b_ipa/spm.model
+
+embedding_dim: 384
+embedding_store_dir: /workspace/lfm/data/embeddings
+
+z_hidden_dim: 512
+max_phrases: 4
+diffusion_steps: 4
+diffusion_layers: 4
+diffusion_heads: 8
+variable_phrases: true
+target_phrases: 2.5
+
+max_tokens_per_phrase: 32
+
+# InverseDecoder architecture.
+inverse_decoder_layers: 4
+inverse_decoder_heads: 8
+
+# ----- Loss weights -----
+reconstruction_weight: 1.0
+decoder_fluency_weight: 0.5
+topology_weight: 0.1
+z_diversity_weight: 1.0
+z_prior_weight: 1.0
+
+# Surface InfoNCE — prevents private codes / mode collapse.
+surface_infonce_weight: 2.0
+contrastive_temperature: 0.07
+
+# Bigram KL + adj diversity — prevent degenerate token patterns.
+# bigram_kl_path left unset: loss is silently zero if no .npz exists.
+bigram_kl_weight: 0.05
+adj_diversity_weight: 0.05
+adj_diversity_target: 0.30
+
+# Token concentration penalty — Herfindahl index on per-sample marginal softmax.
+# Directly penalises "repeat one dominant token" strategies.
+tok_concentration_weight: 2.0
+
+# N-gram blocking + EOS bias (same as contrastive game).
+ngram_block: [3, 4]
+eos_bias_max: 1.5
+# Hard floor: block EOS for the first 8 positions as a safety net.
+min_tokens_per_phrase: 8
+# Soft phrase-length regulariser: penalise E[length] deviating from target.
+# Target = 24 tokens/phrase (≈ 3/4 of max_tokens_per_phrase=32).
+# Gradient flows through the EOS survival function in the Phase-2 logit pass.
+phrase_length_weight: 0.0
+target_tokens_per_phrase: 24
+
+# No curriculum or distractors — reconstruction is supervision by default.
+num_distractors: 0
+curriculum:
+  enabled: false
+
+batch_size: 128
+gradient_accumulation_steps: 1
+steps: 4000
+gru_lr: 0.00003
+receiver_lr: 0.0001
+max_grad_norm: 0.5
+
+phase2_chunk: 64
+logit_chunk: 64
+
+checkpoint_every: 100
+log_every: 25
+
+output_dir: /workspace/lfm/data/reconstruction_game_v1
+device: cuda
+seed: 42

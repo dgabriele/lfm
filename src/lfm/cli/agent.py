@@ -352,6 +352,82 @@ class DocumentCommand(CLICommand):
         return 0
 
 
+class ReconstructionCommand(CLICommand):
+    """Train the reconstruction expression game."""
+
+    @property
+    def name(self) -> str:
+        return "reconstruction"
+
+    @property
+    def help(self) -> str:
+        return "Train reconstruction game: InverseDecoder recovers source embedding from expression"
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("config", nargs="?", default=None, help="YAML config file")
+        parser.add_argument("--resume", default=None)
+        parser.add_argument("--steps", type=int, default=None)
+        parser.add_argument("--batch-size", type=int, default=None)
+        parser.add_argument("--device", default=None)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
+        from lfm.agents.games.reconstruction_game import (
+            ReconstructionGame, ReconstructionGameConfig,
+        )
+        from lfm.agents.trainer import AgentTrainer
+        from lfm.generator.dep_tree_vae.config import DepTreeVAEConfig
+        from lfm.generator.dep_tree_vae.model import DepTreeVAE
+
+        cfg_dict: dict = {}
+        if args.config is not None:
+            with open(args.config) as f:
+                cfg_dict = yaml.safe_load(f) or {}
+
+        for key in ("steps", "batch_size", "device"):
+            val = getattr(args, key, None)
+            if val is not None:
+                cfg_dict[key] = val
+
+        cfg_dict = _auto_detect_embedding_dim(cfg_dict)
+        config = ReconstructionGameConfig(**cfg_dict)
+
+        import torch
+        device = torch.device(config.device)
+
+        vae_cfg_dict = yaml.safe_load(open(config.vae_config))
+        vae_cfg_dict.pop("model_type", None)
+        vae_cfg_dict["spm_model_path"] = config.spm_path
+        vae_cfg_dict["output_dir"] = config.output_dir
+        vae_cfg_dict["corpus_unigram_path"] = ""
+
+        ckpt = torch.load(config.vae_checkpoint, map_location=device, weights_only=False)
+        state = ckpt["model_state"]
+        if not any(k.startswith("length_head") for k in state):
+            vae_cfg_dict["length_pred_weight"] = 0.0
+            vae_cfg_dict["use_predicted_length_at_decode"] = False
+        if not any(k.startswith("tokens_per_role_head") for k in state):
+            vae_cfg_dict["tokens_per_role_weight"] = 0.0
+        vae_cfg_dict["use_decoder_role_emb"] = any(
+            k.startswith("decoder_role_emb") for k in state
+        )
+        vae_cfg = DepTreeVAEConfig(**vae_cfg_dict)
+
+        vae = DepTreeVAE(vae_cfg, vocab_size=vae_cfg.spm_vocab_size + 50).to(device)
+        vae.load_state_dict(state, strict=False)
+        logger.info(
+            "Loaded vae from %s @ step %s val_best=%.4f",
+            config.vae_checkpoint, ckpt.get("global_step", "?"),
+            ckpt.get("best_val_loss", float("nan")),
+        )
+
+        game = ReconstructionGame(config, vae).to(device)
+        trainer = AgentTrainer(game, config)
+        trainer.train(resume=args.resume)
+        return 0
+
+
 def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
     """Register the ``lfm agent`` subcommand group."""
     agent_parser = parent_subparsers.add_parser(
@@ -370,6 +446,7 @@ def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
         ContrastiveCommand(),
         MultiViewCommand(),
         DocumentCommand(),
+        ReconstructionCommand(),
     ]
 
     for cmd in commands:
