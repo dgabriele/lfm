@@ -7,6 +7,16 @@ import argparse
 from lfm.cli.base import CLICommand
 
 
+def _setup_file_logging(log_path: "Path") -> None:
+    """Add a FileHandler to the root logger so all output goes to log_path too."""
+    import logging
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_path, mode="a")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+    logging.getLogger().addHandler(handler)
+
+
 def _build_model(cfg, alien_vocab_size: int):
     """Construct CausalDecoderBackend + SynthLM from config."""
     import logging
@@ -71,6 +81,7 @@ class TrainPhase1Command(CLICommand):
 
         cfg = SynthConfig(**yaml.safe_load(Path(args.config).read_text()))
         out_dir = Path(cfg.output_dir)
+        _setup_file_logging(out_dir / "train_phase1.log")
         vocab = AlienVocab.load(out_dir)
         alien_tok = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
         model = _build_model(cfg, alien_vocab_size=len(alien_tok))
@@ -109,6 +120,7 @@ class TrainPhase2Command(CLICommand):
 
         cfg = SynthConfig(**yaml.safe_load(Path(args.config).read_text()))
         out_dir = Path(cfg.output_dir)
+        _setup_file_logging(out_dir / "train_phase2.log")
         vocab = AlienVocab.load(out_dir)
         alien_tok = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
         model = _build_model(cfg, alien_vocab_size=len(alien_tok))
