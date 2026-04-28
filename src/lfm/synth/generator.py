@@ -1,12 +1,7 @@
-"""Corpus generator: embedding -> alien sentence at scale.
-
-Loads a fully trained SynthLM (both phases), iterates over an embedding
-store, and writes one alien sentence per embedding to a text file.
-"""
+"""Corpus generator: source embedding → alien sentence at scale."""
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -39,12 +34,8 @@ class CorpusGenerator:
         self.tokenizer = tokenizer
         self.config = config
         self.device = torch.device(config.device)
-
-    def _load_embeddings(self, store_dir: str) -> np.ndarray:
-        return np.load(Path(store_dir) / "embeddings.npy", mmap_mode="r")
-
-    def _decode_batch(self, token_ids: torch.Tensor) -> list[str]:
-        return self.tokenizer.batch_decode(token_ids, skip_special_tokens=True)
+        self._alien_stop_id = tokenizer.eos_token_id
+        self._alien_pad_id = tokenizer.pad_token_id
 
     def generate_corpus(
         self,
@@ -54,15 +45,10 @@ class CorpusGenerator:
     ) -> int:
         """Generate one alien sentence per embedding and write to output_path.
 
-        Args:
-            store_dir: Path to embedding store (must contain embeddings.npy).
-            output_path: Path to write alien sentences (one per line).
-            batch_size: Number of embeddings to process at once.
-
         Returns:
             Number of sentences written.
         """
-        embeddings = self._load_embeddings(store_dir)
+        embeddings = np.load(Path(store_dir) / "embeddings.npy", mmap_mode="r")
         N = len(embeddings)
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,8 +64,12 @@ class CorpusGenerator:
                     dtype=torch.float32,
                     device=self.device,
                 )
-                token_ids = self.model.generate(emb)
-                sentences = self._decode_batch(token_ids)
+                token_ids = self.model.generate(
+                    emb,
+                    alien_stop_id=self._alien_stop_id,
+                    alien_pad_id=self._alien_pad_id,
+                )
+                sentences = self.tokenizer.batch_decode(token_ids, skip_special_tokens=True)
                 for s in sentences:
                     fh.write(s.strip() + "\n")
                 written += len(sentences)

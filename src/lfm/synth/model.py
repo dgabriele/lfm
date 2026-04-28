@@ -1,159 +1,182 @@
-"""SynthLM: mT5-large with alien decoder vocabulary and embedding conditioning.
+"""SynthLM: decoder-only LLM with alien cipher head and prefix conditioning.
 
-Two operating modes:
-  * Phase 1 — uses the mT5 encoder (English text -> encoder hidden states).
-    Only decoder embed_tokens and lm_head are new; encoder is frozen.
-  * Phase 2 — replaces the mT5 encoder with a learned EmbeddingProjector.
-    The mT5 decoder is frozen; only projector and length_head are trained.
+Phase 1 — CipherTrainer:
+  Sequence: [native_tokens | eos_sep | alien_tokens]
+  Built with inputs_embeds; causal LM predicts each alien token from context.
+  Trainable: backend._alien_emb, backend._alien_head.
+  Body: frozen throughout.
 
-The encoder and decoder use *separate* embedding tables so the encoder
-retains its full multilingual English vocabulary while the decoder uses
-the alien syllable vocabulary.
+Phase 2 — ConditioningTrainer:
+  Sequence: [prefix_embeds(n_prefix) | alien_tokens]
+  Prefix comes from PrefixProjector(source_embedding); no native text.
+  Trainable: PrefixProjector, LengthHead.
+  Body + alien emb/head: frozen.
 """
 
 from __future__ import annotations
 
-import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from transformers import MT5ForConditionalGeneration
-from transformers.modeling_outputs import BaseModelOutput
 
+from lfm.synth.backend import DecoderBackend
 from lfm.synth.config import SynthConfig
 
 
-class EmbeddingProjector(nn.Module):
-    """Maps a flat source embedding to n_prefix encoder-like hidden states."""
+class PrefixProjector(nn.Module):
+    """Maps a flat source embedding to n_prefix decoder input embeddings."""
 
-    def __init__(self, embedding_dim: int, d_model: int, n_prefix: int) -> None:
+    def __init__(self, source_dim: int, d_model: int, n_prefix: int) -> None:
         super().__init__()
         self.n_prefix = n_prefix
         self.proj = nn.Sequential(
-            nn.Linear(embedding_dim, d_model),
-            nn.Tanh(),
+            nn.Linear(source_dim, d_model),
+            nn.GELU(),
             nn.Linear(d_model, d_model * n_prefix),
         )
 
-    def forward(self, embedding: Tensor) -> tuple[Tensor, Tensor]:
-        """Returns (hidden_states, attention_mask) — (B, n_prefix, d_model) and (B, n_prefix)."""
+    def forward(self, embedding: Tensor) -> Tensor:
+        """(B, source_dim) → (B, n_prefix, d_model)."""
         B = embedding.size(0)
-        hidden = self.proj(embedding).view(B, self.n_prefix, -1)
-        mask = torch.ones(B, self.n_prefix, device=embedding.device, dtype=torch.long)
-        return hidden, mask
+        return self.proj(embedding).view(B, self.n_prefix, -1)
 
 
 class LengthHead(nn.Module):
     """Predicts alien token count from source embedding."""
 
-    def __init__(self, embedding_dim: int, hidden_dim: int = 256) -> None:
+    def __init__(self, source_dim: int, hidden_dim: int = 256) -> None:
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim),
+            nn.Linear(source_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, embedding: Tensor) -> Tensor:
-        """Returns scalar predicted length per sample — (B,)."""
+        """(B, source_dim) → (B,) scalar predicted length."""
         return self.mlp(embedding).squeeze(-1).clamp(min=4.0)
 
 
 class SynthLM(nn.Module):
-    """mT5-large with alien decoder vocab and two-mode conditioning.
+    """Decoder-only SynthLM: frozen causal LM + alien cipher sub-vocab + prefix projector."""
 
-    Args:
-        config: SynthConfig.
-        alien_vocab_size: Number of tokens in the alien vocabulary.
-    """
-
-    def __init__(self, config: SynthConfig, alien_vocab_size: int) -> None:
+    def __init__(self, backend: DecoderBackend, config: SynthConfig) -> None:
         super().__init__()
+        self.backend = backend
         self.config = config
-
-        mt5: MT5ForConditionalGeneration = MT5ForConditionalGeneration.from_pretrained(
-            config.base_model_name,
-        )
-        d_model: int = mt5.config.d_model
-
-        # Snapshot the pretrained decoder BEFORE replacing embed_tokens.
-        # This frozen copy is the anchor for Phase 1 hidden-state MSE regularisation.
-        # Phase 2 relies on the pretrained decoder's structural prior; if Phase 1
-        # overwrites the transformer layers, the EmbeddingProjector ends up conditioning
-        # a decoder that has drifted from the pretrained regime it was designed to use.
-        # The MSE loss keeps the transformer body in the pretrained distribution so
-        # that Phase 1 learning is redirected into embed_tokens and lm_head only.
-        # Stored via object.__setattr__ so it is NOT a registered submodule —
-        # excluded from state_dict/checkpoints and not moved by .to(device).
-        if config.phase1_hidden_mse_weight > 0:
-            snap = copy.deepcopy(mt5.decoder)
-            snap.embed_tokens = nn.Embedding(1, d_model)  # dummy — we pass inputs_embeds directly
-            for p in snap.parameters():
-                p.requires_grad_(False)
-            snap.eval()
-            object.__setattr__(self, '_frozen_decoder', snap)
-        else:
-            object.__setattr__(self, '_frozen_decoder', None)
-
-        # Detach decoder from the shared English embedding table.
-        mt5.decoder.embed_tokens = nn.Embedding(alien_vocab_size, d_model)
-        mt5.lm_head = nn.Linear(d_model, alien_vocab_size, bias=False)
-        mt5.config.tie_word_embeddings = False
-
-        # Align generation config to alien special token IDs.
-        mt5.config.decoder_start_token_id = 2  # BOS_ID
-        mt5.config.eos_token_id = 3            # EOS_ID
-        mt5.config.pad_token_id = 0            # PAD_ID
-        mt5.generation_config.eos_token_id = 3
-        mt5.generation_config.pad_token_id = 0
-        mt5.generation_config.decoder_start_token_id = 2
-        mt5.generation_config.forced_eos_token_id = None
-
-        self.mt5 = mt5
-        self.projector = EmbeddingProjector(config.source_embedding_dim, d_model, config.n_prefix_tokens)
+        d = backend.d_model
+        self.projector = PrefixProjector(config.source_embedding_dim, d, config.n_prefix_tokens)
         self.length_head = LengthHead(config.source_embedding_dim)
+
+    # ---- Shared helpers ----
+
+    def _phase1_inputs(
+        self,
+        native_ids: Tensor,    # (B, T_native)
+        native_mask: Tensor,   # (B, T_native)
+        alien_labels: Tensor,  # (B, T_alien)
+    ) -> tuple[Tensor, Tensor, int]:
+        """Build inputs_embeds + attention_mask for Phase 1 forward.
+
+        Returns (inputs_embeds, attention_mask, alien_start_pos) where
+        alien_start_pos is the position whose hidden state predicts alien_labels[:, 0].
+        """
+        B, T_native = native_ids.shape
+        T_alien = alien_labels.size(1)
+        device = native_ids.device
+
+        native_embs = self.backend.embed_native(native_ids)
+        eos_ids = torch.full((B, 1), self.backend.eos_token_id, device=device, dtype=torch.long)
+        eos_embs = self.backend.embed_native(eos_ids)
+        # -100 pads → clamp to 0 (arbitrary valid index; loss ignores these positions)
+        alien_embs = self.backend.embed_alien(alien_labels.clamp(min=0))
+
+        inputs_embeds = torch.cat([native_embs, eos_embs, alien_embs], dim=1)
+        attention_mask = torch.cat([
+            native_mask,
+            torch.ones(B, 1 + T_alien, device=device, dtype=native_mask.dtype),
+        ], dim=1)
+        # EOS is at position T_native; its output predicts alien_labels[:, 0]
+        return inputs_embeds, attention_mask, T_native
+
+    def _alien_ce_loss(
+        self,
+        inputs_embeds: Tensor,
+        alien_start_pos: int,
+        alien_labels: Tensor,
+        attention_mask: Tensor | None = None,
+    ) -> Tensor:
+        """CE loss at alien positions.
+
+        hidden[alien_start_pos + i] predicts alien_labels[:, i] for i in 0..T_alien-1.
+        (Causal LM: position i's output predicts the next token, i.e. alien_labels[:, i].)
+        """
+        hidden = self.backend.forward_hidden(inputs_embeds, attention_mask)
+        T_alien = alien_labels.size(1)
+        alien_hidden = hidden[:, alien_start_pos:alien_start_pos + T_alien, :]
+        logits = self.backend.alien_logits(alien_hidden)
+        return F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            alien_labels.reshape(-1),
+            ignore_index=-100,
+        )
 
     # ---- Phase 1 ----
 
     def forward_phase1(
         self,
-        input_ids: Tensor,
-        attention_mask: Tensor,
-        labels: Tensor,
+        native_ids: Tensor,
+        native_mask: Tensor,
+        alien_labels: Tensor,
     ) -> Tensor:
-        """CE loss: English text -> alien tokens via mT5 encoder."""
-        return self.mt5(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        ).loss
+        """CE loss: English → alien tokens via frozen causal LM."""
+        inputs_embeds, attn_mask, alien_start = self._phase1_inputs(
+            native_ids, native_mask, alien_labels
+        )
+        return self._alien_ce_loss(inputs_embeds, alien_start, alien_labels, attn_mask)
+
+    def alien_logits_phase1(
+        self,
+        native_ids: Tensor,
+        native_mask: Tensor,
+        alien_labels: Tensor,
+    ) -> Tensor:
+        """Teacher-forced alien logits (B, T_alien, alien_vocab) — for diagnostics."""
+        inputs_embeds, attn_mask, alien_start = self._phase1_inputs(
+            native_ids, native_mask, alien_labels
+        )
+        hidden = self.backend.forward_hidden(inputs_embeds, attn_mask)
+        T_alien = alien_labels.size(1)
+        alien_hidden = hidden[:, alien_start:alien_start + T_alien, :]
+        return self.backend.alien_logits(alien_hidden)
 
     # ---- Phase 2 ----
 
     def forward_phase2(
         self,
         source_embedding: Tensor,
-        labels: Tensor,
+        alien_labels: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        """CE loss + length MSE: source embedding -> alien tokens via projector.
+        """CE + length loss: source embedding → alien tokens via prefix.
 
-        Returns:
-            (lm_loss, length_loss) — both scalars.
+        Sequence: [prefix(n_prefix) | alien_tokens]
+        The last prefix position predicts alien_labels[:, 0].
+        Returns (lm_loss, length_loss).
         """
-        hidden, mask = self.projector(source_embedding)
-        encoder_outputs = BaseModelOutput(last_hidden_state=hidden)
-        lm_loss = self.mt5(
-            encoder_outputs=encoder_outputs,
-            attention_mask=mask,
-            labels=labels,
-        ).loss
+        n_prefix = self.config.n_prefix_tokens
+
+        # Cast projector output to body dtype (e.g. float32 projector → bfloat16 body)
+        prefix_embs = self.projector(source_embedding).to(self.backend.dtype)
+        alien_embs = self.backend.embed_alien(alien_labels.clamp(min=0))
+        inputs_embeds = torch.cat([prefix_embs, alien_embs], dim=1)
+
+        # Position n_prefix-1 (last prefix) → predicts alien_labels[:, 0]
+        lm_loss = self._alien_ce_loss(inputs_embeds, n_prefix - 1, alien_labels)
 
         length_pred = self.length_head(source_embedding)
-        # Normalise to [0, 1] so length_loss stays O(1) and doesn't dominate
-        # gradient norms relative to lm_loss (~3-7 range).
-        norm = float(labels.size(1))
-        length_target = (labels != -100).float().sum(dim=-1) / norm
+        norm = float(alien_labels.size(1))
+        length_target = (alien_labels != -100).float().sum(dim=-1) / norm
         length_loss = F.mse_loss(length_pred / norm, length_target)
 
         return lm_loss, length_loss
@@ -164,44 +187,101 @@ class SynthLM(nn.Module):
     def generate(
         self,
         source_embedding: Tensor,
+        alien_stop_id: int,
+        alien_pad_id: int = 0,
         max_length: int | None = None,
     ) -> Tensor:
-        """Generate alien token IDs from source embedding.
+        """Greedy decode alien tokens from source embedding (Phase 2 inference).
 
         Args:
-            source_embedding: (B, embedding_dim).
-            max_length: Hard cap on output tokens.  If None, predicted from
-                the length head plus config.length_slack.
+            source_embedding: (B, source_dim).
+            alien_stop_id: Token ID that signals end of sequence.
+            alien_pad_id: Padding ID written after stop (for uniform tensor shape).
+            max_length: Hard cap. If None, predicted from length_head + length_slack.
 
         Returns:
-            (B, T) token ID tensor.
+            (B, T_generated) token ID tensor.
         """
-        hidden, mask = self.projector(source_embedding)
+        B = source_embedding.size(0)
+        device = source_embedding.device
+
         if max_length is None:
-            predicted = self.length_head(source_embedding).round().long()
-            max_length = int(predicted.max().item()) + self.config.length_slack
+            pred_len = self.length_head(source_embedding).round().long()
+            max_length = int(pred_len.max().item()) + self.config.length_slack
 
-        encoder_outputs = BaseModelOutput(last_hidden_state=hidden)
-        return self.mt5.generate(
-            encoder_outputs=encoder_outputs,
-            attention_mask=mask,
-            max_length=max_length,
-            num_beams=1,
-        )
+        context = self.projector(source_embedding).to(self.backend.dtype)  # (B, n_prefix, D)
+        done = torch.zeros(B, dtype=torch.bool, device=device)
+        output_ids: list[Tensor] = []
 
-    # ---- Persistence helpers ----
+        for _ in range(max_length):
+            hidden = self.backend.forward_hidden(context)
+            logits = self.backend.alien_logits(hidden[:, -1:, :])  # (B, 1, V)
+            next_ids = logits[:, 0, :].argmax(dim=-1)              # (B,)
+            next_ids = next_ids.masked_fill(done, alien_pad_id)
+            output_ids.append(next_ids)
+
+            done = done | (next_ids == alien_stop_id)
+            if done.all():
+                break
+
+            next_embs = self.backend.embed_alien(next_ids.unsqueeze(1))
+            context = torch.cat([context, next_embs], dim=1)
+
+        if not output_ids:
+            return torch.zeros(B, 0, dtype=torch.long, device=device)
+        return torch.stack(output_ids, dim=1)  # (B, T_gen)
+
+    @torch.no_grad()
+    def generate_phase1(
+        self,
+        native_ids: Tensor,
+        native_mask: Tensor,
+        alien_stop_id: int,
+        alien_pad_id: int = 0,
+        max_length: int = 64,
+    ) -> Tensor:
+        """Greedy decode alien tokens from English input (Phase 1 diagnostics)."""
+        B = native_ids.size(0)
+        device = native_ids.device
+
+        native_embs = self.backend.embed_native(native_ids)
+        eos_ids = torch.full((B, 1), self.backend.eos_token_id, device=device, dtype=torch.long)
+        eos_embs = self.backend.embed_native(eos_ids)
+        context = torch.cat([native_embs, eos_embs], dim=1)  # (B, T_native+1, D)
+
+        done = torch.zeros(B, dtype=torch.bool, device=device)
+        output_ids: list[Tensor] = []
+
+        for _ in range(max_length):
+            hidden = self.backend.forward_hidden(context)
+            logits = self.backend.alien_logits(hidden[:, -1:, :])
+            next_ids = logits[:, 0, :].argmax(dim=-1)
+            next_ids = next_ids.masked_fill(done, alien_pad_id)
+            output_ids.append(next_ids)
+
+            done = done | (next_ids == alien_stop_id)
+            if done.all():
+                break
+
+            next_embs = self.backend.embed_alien(next_ids.unsqueeze(1))
+            context = torch.cat([context, next_embs], dim=1)
+
+        if not output_ids:
+            return torch.zeros(B, 0, dtype=torch.long, device=device)
+        return torch.stack(output_ids, dim=1)
+
+    # ---- Persistence ----
 
     def save_phase1(self, path: str) -> None:
-        # decoder_body state_dict already contains embed_tokens weights.
         torch.save({
-            "lm_head": self.mt5.lm_head.state_dict(),
-            "decoder_body": self.mt5.decoder.state_dict(),
+            "alien_emb": self.backend._alien_emb.state_dict(),
+            "alien_head": self.backend._alien_head.state_dict(),
         }, path)
 
     def load_phase1(self, path: str) -> None:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        self.mt5.lm_head.load_state_dict(ckpt["lm_head"])
-        self.mt5.decoder.load_state_dict(ckpt["decoder_body"])
+        self.backend._alien_emb.load_state_dict(ckpt["alien_emb"])
+        self.backend._alien_head.load_state_dict(ckpt["alien_head"])
 
     def save_phase2(self, path: str) -> None:
         torch.save({
@@ -210,6 +290,6 @@ class SynthLM(nn.Module):
         }, path)
 
     def load_phase2(self, path: str) -> None:
-        ckpt = torch.load(path, map_location="cpu")
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
         self.projector.load_state_dict(ckpt["projector"])
         self.length_head.load_state_dict(ckpt["length_head"])

@@ -7,6 +7,18 @@ import argparse
 from lfm.cli.base import CLICommand
 
 
+def _build_model(cfg, alien_vocab_size: int):
+    """Construct CausalDecoderBackend + SynthLM from config."""
+    import logging
+    from lfm.synth.backend import CausalDecoderBackend
+    from lfm.synth.model import SynthLM
+
+    logger = logging.getLogger(__name__)
+    logger.info("loading backend model: %s", cfg.base_model_name)
+    backend = CausalDecoderBackend(cfg.base_model_name, alien_vocab_size=alien_vocab_size)
+    return SynthLM(backend, cfg)
+
+
 class BuildVocabCommand(CLICommand):
     @property
     def name(self) -> str:
@@ -46,7 +58,7 @@ class TrainPhase1Command(CLICommand):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("config", help="YAML config file")
-        parser.add_argument("--resume", default=None, help="Phase1 trainer checkpoint to resume from")
+        parser.add_argument("--resume", default=None, help="Phase 1 trainer checkpoint to resume from")
 
     def execute(self, args: argparse.Namespace) -> int:
         import yaml
@@ -54,16 +66,15 @@ class TrainPhase1Command(CLICommand):
         from transformers import PreTrainedTokenizerFast
         from lfm.synth.cipher import WordCipher
         from lfm.synth.config import SynthConfig
-        from lfm.synth.model import SynthLM
         from lfm.synth.trainer import CipherTrainer
         from lfm.synth.vocab import AlienVocab
 
         cfg = SynthConfig(**yaml.safe_load(Path(args.config).read_text()))
         out_dir = Path(cfg.output_dir)
         vocab = AlienVocab.load(out_dir)
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
-        model = SynthLM(cfg, alien_vocab_size=len(tokenizer))
-        trainer = CipherTrainer(model, cfg, cipher := WordCipher(vocab), tokenizer)
+        alien_tok = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
+        model = _build_model(cfg, alien_vocab_size=len(alien_tok))
+        trainer = CipherTrainer(model, cfg, WordCipher(vocab), alien_tok)
         start_step = 0
         if args.resume:
             start_step = trainer.load_checkpoint(args.resume)
@@ -83,8 +94,9 @@ class TrainPhase2Command(CLICommand):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("config", help="YAML config file")
-        parser.add_argument("--phase1-checkpoint", required=True, help="Path to phase1_final.pt (model weights only)")
-        parser.add_argument("--resume", default=None, help="Phase2 trainer checkpoint to resume from")
+        parser.add_argument("--phase1-checkpoint", required=True,
+                            help="Path to phase1_final.pt (alien emb + head weights)")
+        parser.add_argument("--resume", default=None, help="Phase 2 trainer checkpoint to resume from")
 
     def execute(self, args: argparse.Namespace) -> int:
         import yaml
@@ -92,17 +104,16 @@ class TrainPhase2Command(CLICommand):
         from transformers import PreTrainedTokenizerFast
         from lfm.synth.cipher import WordCipher
         from lfm.synth.config import SynthConfig
-        from lfm.synth.model import SynthLM
         from lfm.synth.trainer import ConditioningTrainer
         from lfm.synth.vocab import AlienVocab
 
         cfg = SynthConfig(**yaml.safe_load(Path(args.config).read_text()))
         out_dir = Path(cfg.output_dir)
         vocab = AlienVocab.load(out_dir)
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
-        model = SynthLM(cfg, alien_vocab_size=len(tokenizer))
+        alien_tok = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
+        model = _build_model(cfg, alien_vocab_size=len(alien_tok))
         model.load_phase1(args.phase1_checkpoint)
-        trainer = ConditioningTrainer(model, cfg, WordCipher(vocab), tokenizer)
+        trainer = ConditioningTrainer(model, cfg, WordCipher(vocab), alien_tok)
         start_step = 0
         if args.resume:
             start_step = trainer.load_checkpoint(args.resume)
@@ -134,16 +145,15 @@ class GenerateCorpusCommand(CLICommand):
         from transformers import PreTrainedTokenizerFast
         from lfm.synth.config import SynthConfig
         from lfm.synth.generator import CorpusGenerator
-        from lfm.synth.model import SynthLM
         from lfm.synth.vocab import AlienVocab
 
         cfg = SynthConfig(**yaml.safe_load(Path(args.config).read_text()))
         out_dir = Path(cfg.output_dir)
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
-        model = SynthLM(cfg, alien_vocab_size=len(tokenizer))
+        alien_tok = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
+        model = _build_model(cfg, alien_vocab_size=len(alien_tok))
         model.load_phase1(args.phase1_checkpoint)
         model.load_phase2(args.phase2_checkpoint)
-        n = CorpusGenerator(model, tokenizer, cfg).generate_corpus(
+        n = CorpusGenerator(model, alien_tok, cfg).generate_corpus(
             args.store_dir, args.output, batch_size=args.batch_size,
         )
         print(f"Wrote {n} alien sentences to {args.output}")
@@ -153,8 +163,8 @@ class GenerateCorpusCommand(CLICommand):
 def register_synth_group(parent_subparsers: argparse._SubParsersAction) -> None:
     synth_parser = parent_subparsers.add_parser(
         "synth",
-        help="Pretrained-decoder alien language pipeline",
-        description="Build alien vocab, train, and generate UNMT corpus.",
+        help="Decoder-only alien language pipeline",
+        description="Build alien vocab, train (phase1+phase2), and generate UNMT corpus.",
     )
     synth_subparsers = synth_parser.add_subparsers(
         title="synth commands", dest="synth_cmd",
