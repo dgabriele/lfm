@@ -101,15 +101,18 @@ class AlienLMTrainer:
             {"params": model.backend.cipher_params(), "lr": config.phase1_lr},
             {"params": model.backend.body_params(),   "lr": config.phase1_body_lr},
         ])
+        self.mse_weight = config.phase1_hidden_mse_weight
+        self.grad_accum = max(1, config.phase1_grad_accum)
         logger.info(
-            "AlienLMTrainer  model=%s  batch=%d  cipher_lr=%g  body_lr=%g  "
-            "steps=%d  max_len=%d  diag_every=%d  device=%s  out=%s",
-            config.base_model_name, config.phase1_batch_size,
-            config.phase1_lr, config.phase1_body_lr, config.phase1_steps,
-            config.phase1_max_len, config.phase1_diag_every, config.device, config.output_dir,
+            "AlienLMTrainer  model=%s  batch=%d×%d  cipher_lr=%g  body_lr=%g  "
+            "mse_weight=%g  steps=%d  max_len=%d  diag_every=%d  device=%s  out=%s",
+            config.base_model_name, config.phase1_batch_size, self.grad_accum,
+            config.phase1_lr, config.phase1_body_lr, self.mse_weight,
+            config.phase1_steps, config.phase1_max_len, config.phase1_diag_every,
+            config.device, config.output_dir,
         )
         self._diag_sentences = list(itertools.islice(
-            _iter_raw_sentences(config.phase1_dataset_dir, shuffle=False), self._DIAG_N,
+            _iter_raw_sentences(config.phase1_dataset_dir, shuffle=True, seed=0), self._DIAG_N,
         ))
 
     def _make_batch(self, sentences: list[str]) -> dict[str, torch.Tensor]:
@@ -192,28 +195,39 @@ class AlienLMTrainer:
         out_dir = Path(cfg.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         self.model.to(self.device).train()
+        self.model.backend.move_reference_to(self.device, self.model.backend.dtype)
 
         data = _iter_raw_sentences(cfg.phase1_dataset_dir, seed=cfg.seed)
         for _ in range(start_step * cfg.phase1_batch_size):
             next(data)
 
-        step, running_loss = start_step, 0.0
+        step, running_ce, running_mse = start_step, 0.0, 0.0
 
         while step < cfg.phase1_steps:
-            batch = self._make_batch([next(data) for _ in range(cfg.phase1_batch_size)])
             self.opt.zero_grad()
-            loss = self.model.forward_phase1(**batch)
-            loss.backward()
+            accum_ce = accum_mse = 0.0
+            for _ in range(self.grad_accum):
+                batch = self._make_batch([next(data) for _ in range(cfg.phase1_batch_size)])
+                ce, mse = self.model.forward_phase1(**batch)
+                total = (ce + self.mse_weight * mse) / self.grad_accum
+                total.backward()
+                accum_ce += ce.item() / self.grad_accum
+                accum_mse += mse.item() / self.grad_accum
             torch.nn.utils.clip_grad_norm_(
                 self.model.backend.cipher_params() + self.model.backend.body_params(), 1.0
             )
             self.opt.step()
-            running_loss += loss.item()
+            running_ce += accum_ce
+            running_mse += accum_mse
             step += 1
 
             if step % cfg.phase1_log_every == 0:
-                logger.info("phase1 step=%d  loss=%.4f", step, running_loss / cfg.phase1_log_every)
-                running_loss = 0.0
+                n = cfg.phase1_log_every
+                logger.info(
+                    "phase1 step=%d  ce=%.4f  mse=%.6f",
+                    step, running_ce / n, running_mse / n,
+                )
+                running_ce = running_mse = 0.0
 
             if cfg.phase1_diag_every > 0 and step % cfg.phase1_diag_every == 0:
                 self._run_diagnostics(step)

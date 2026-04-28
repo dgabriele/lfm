@@ -25,7 +25,11 @@ def _build_model(cfg, alien_vocab_size: int):
 
     logger = logging.getLogger(__name__)
     logger.info("loading backend model: %s", cfg.base_model_name)
-    backend = CausalDecoderBackend(cfg.base_model_name, alien_vocab_size=alien_vocab_size)
+    backend = CausalDecoderBackend(
+        cfg.base_model_name,
+        alien_vocab_size=alien_vocab_size,
+        with_reference_body=(cfg.phase1_hidden_mse_weight > 0),
+    )
     return SynthLM(backend, cfg)
 
 
@@ -54,23 +58,20 @@ class BuildVocabCommand(CLICommand):
         vocab = AlienVocab(vocab_size=cfg.vocab_size, seed=cfg.vocab_seed)
         vocab.save(out_dir)
 
-        # Scan corpus to collect all unique alien words (concatenated syllables).
-        print(f"Scanning {cfg.phase1_dataset_dir} for alien word types...")
+        # Encode corpus with the cipher to produce BPE training data.
+        print(f"Encoding {cfg.phase1_dataset_dir} for BPE training...")
         cipher = WordCipher(vocab)
-        alien_words: set[str] = set()
         dataset_path = Path(cfg.phase1_dataset_dir)
         if dataset_path.suffix == ".jsonl":
-            lines = dataset_path.read_text().splitlines()
-            texts = [json.loads(l)["text"] for l in lines if l.strip()]
+            texts = [json.loads(l)["text"] for l in dataset_path.read_text().splitlines() if l.strip()]
         else:
             texts = [l.strip() for l in dataset_path.read_text().splitlines() if l.strip()]
-        for text in texts:
-            alien_words.update(cipher.encode_for_tokenizer(text).split())
+        encoded = cipher.encode_batch(texts)
 
-        words = sorted(alien_words)
-        tokenizer = vocab.build_tokenizer(words)
+        print(f"Training BPE tokenizer (vocab_size={cfg.vocab_size}) on {len(encoded)} sentences...")
+        tokenizer = vocab.build_tokenizer(encoded, vocab_size=cfg.vocab_size)
         tokenizer.save_pretrained(str(out_dir / "alien_tokenizer"))
-        print(f"Alien vocab: {len(vocab.syllables)} syllables, {len(words)} word types → {out_dir}")
+        print(f"Alien vocab: {len(vocab.syllables)} syllables, BPE vocab={cfg.vocab_size} → {out_dir}")
         return 0
 
 

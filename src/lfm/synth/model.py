@@ -68,13 +68,28 @@ class SynthLM(nn.Module):
 
     # ── Phase 1 ───────────────────────────────────────────────────────────────
 
-    def forward_phase1(self, alien_ids: Tensor, alien_labels: Tensor) -> Tensor:
-        """Causal LM on alien token sequence. alien_labels has -100 at pad positions."""
-        hidden = self.backend.forward_hidden(self.backend.embed_alien(alien_ids[:, :-1]))
+    def forward_phase1(
+        self, alien_ids: Tensor, alien_labels: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """Causal LM on alien token sequence.
+
+        Returns:
+            ce_loss:  cross-entropy over non-pad positions.
+            mse_loss: MSE between current and frozen reference body hidden states
+                      (zero tensor if no reference body was initialised).
+        """
+        inputs_embeds = self.backend.embed_alien(alien_ids[:, :-1])
+        hidden = self.backend.forward_hidden(inputs_embeds)
         logits = self.backend.alien_logits(hidden)  # (B, T-1, V)
-        return F.cross_entropy(
+        ce_loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), alien_labels[:, 1:].reshape(-1), ignore_index=-100
         )
+        if self.backend.has_reference:
+            ref_hidden = self.backend.reference_hidden(inputs_embeds)
+            mse_loss = F.mse_loss(hidden, ref_hidden)
+        else:
+            mse_loss = ce_loss.new_zeros(())
+        return ce_loss, mse_loss
 
     def phase1_logits(self, alien_ids: Tensor) -> Tensor:
         """Teacher-forced alien logits for diagnostics. (B, T-1, V)"""

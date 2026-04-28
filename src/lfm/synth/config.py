@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 class SynthConfig(BaseModel):
     # Alien vocabulary
-    vocab_size: int = 8000
+    vocab_size: int = 32_000   # BPE vocab size (controls alien_emb / alien_head dimensions)
     vocab_seed: int = 42
 
     # Base LM
@@ -18,8 +18,10 @@ class SynthConfig(BaseModel):
     # Phase 1: alien LM fine-tuning
     phase1_dataset_dir: str = ""
     phase1_batch_size: int = 32
+    phase1_grad_accum: int = 1
     phase1_lr: float = 1e-4
     phase1_body_lr: float = 3e-5
+    phase1_hidden_mse_weight: float = 0.0
     phase1_steps: int = 100_000
     phase1_max_len: int = 128
     phase1_log_every: int = 500
