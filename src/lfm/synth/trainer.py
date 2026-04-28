@@ -23,6 +23,7 @@ from typing import Iterator
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
@@ -110,6 +111,22 @@ class CipherTrainer:
         self.device = torch.device(config.device)
         self._freeze_encoder()
         self.opt = AdamW(self._trainable_params(), lr=config.phase1_lr)
+        self.mse_weight = config.phase1_hidden_mse_weight
+        self.frozen_decoder = None
+        if self.mse_weight > 0:
+            frozen = model._frozen_decoder
+            if frozen is None:
+                raise ValueError("phase1_hidden_mse_weight > 0 but model._frozen_decoder is None")
+            self.frozen_decoder = frozen.to(self.device)
+        logger.info(
+            "CipherTrainer  model=%s  batch=%d  lr=%g  steps=%d  "
+            "src_len=%d  tgt_len=%d  hidden_mse_weight=%g  ar_weight=%g  "
+            "device=%s  out=%s",
+            config.base_model_name, config.phase1_batch_size, config.phase1_lr,
+            config.phase1_steps, config.phase1_max_source_len,
+            config.phase1_max_target_len, config.phase1_hidden_mse_weight,
+            config.phase1_ar_weight, config.device, config.output_dir,
+        )
         # Fixed diagnostic sentences — loaded once, never shuffled, same across runs.
         if config.phase1_diag_every > 0:
             self._diag_sentences = list(itertools.islice(
@@ -241,6 +258,37 @@ class CipherTrainer:
             labels=batch["labels"],
         ).loss
 
+    def _hidden_mse_loss(
+        self,
+        batch: dict,
+        enc_hidden: torch.Tensor,
+        dec_hidden: torch.Tensor,
+    ) -> torch.Tensor:
+        """MSE between current and frozen pretrained decoder last hidden states.
+
+        Rationale: Phase 2 relies on the pretrained mT5 decoder's structural prior —
+        the EmbeddingProjector is trained to drive *that specific pretrained distribution*
+        into linguistically structured output.  If Phase 1 overwrites the transformer
+        layers with cipher-optimised weights, Phase 2 is conditioning a decoder that
+        has drifted out of the pretrained regime, undermining the entire two-phase
+        design.  This loss is a correctness condition, not a performance optimisation:
+        it keeps the transformer body close to its pretrained state so that vocabulary
+        adaptation (embed_tokens + lm_head) is the primary thing Phase 1 learns.
+
+        Uses inputs_embeds from the current (alien) embed_tokens so both decoders
+        receive identical continuous representations — bypassing vocabulary mismatch.
+        """
+        dec_inp = self.model.mt5._shift_right(batch["labels"])
+        dec_embeds = self.model.mt5.decoder.embed_tokens(dec_inp)
+        with torch.no_grad():
+            frozen_out = self.frozen_decoder(
+                inputs_embeds=dec_embeds.detach(),
+                encoder_hidden_states=enc_hidden.detach(),
+                encoder_attention_mask=batch["attention_mask"],
+            )
+        valid = batch["labels"] != -100
+        return F.mse_loss(dec_hidden[valid], frozen_out.last_hidden_state[valid])
+
     def _make_batch(self, sentences: list[str]) -> dict[str, torch.Tensor]:
         alien = self.cipher.encode_batch(sentences)
 
@@ -274,14 +322,31 @@ class CipherTrainer:
             next(data)
 
         step = start_step
-        running_loss = 0.0
+        running_loss = running_ce = running_mse = 0.0
 
         while step < cfg.phase1_steps:
             batch_sentences = [next(data) for _ in range(B)]
             batch = self._make_batch(batch_sentences)
 
             self.opt.zero_grad()
-            loss = self.model.forward_phase1(**batch)
+            if self.mse_weight > 0:
+                mt5_out = self.model.mt5(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"],
+                    output_hidden_states=True,
+                )
+                ce_loss = mt5_out.loss
+                mse_loss = self._hidden_mse_loss(
+                    batch,
+                    mt5_out.encoder_last_hidden_state,
+                    mt5_out.decoder_hidden_states[-1],
+                )
+                loss = ce_loss + self.mse_weight * mse_loss
+                running_ce += ce_loss.item()
+                running_mse += mse_loss.item()
+            else:
+                loss = self.model.forward_phase1(**batch)
             if (cfg.phase1_ar_weight > 0
                     and cfg.phase1_ar_every > 0
                     and step % cfg.phase1_ar_every == 0):
@@ -296,9 +361,15 @@ class CipherTrainer:
             step += 1
 
             if step % cfg.phase1_log_every == 0:
-                avg = running_loss / cfg.phase1_log_every
-                logger.info("phase1 step=%d  loss=%.4f", step, avg)
-                running_loss = 0.0
+                n = cfg.phase1_log_every
+                if self.mse_weight > 0:
+                    logger.info(
+                        "phase1 step=%d  loss=%.4f  ce=%.4f  hidden_mse=%.4f",
+                        step, running_loss / n, running_ce / n, running_mse / n,
+                    )
+                else:
+                    logger.info("phase1 step=%d  loss=%.4f", step, running_loss / n)
+                running_loss = running_ce = running_mse = 0.0
 
             if cfg.phase1_diag_every > 0 and step % cfg.phase1_diag_every == 0:
                 self._run_diagnostics(step)
@@ -354,10 +425,17 @@ class ConditioningTrainer:
         self.cipher = cipher
         self.alien_tok = alien_tokenizer
         self.device = torch.device(config.device)
-        self._freeze_decoder()
+        self._freeze_mt5()
         self.opt = AdamW(self._trainable_params(), lr=config.phase2_lr)
+        logger.info(
+            "ConditioningTrainer  batch=%d  lr=%g  steps=%d  "
+            "tgt_len=%d  len_weight=%g  device=%s  out=%s",
+            config.phase2_batch_size, config.phase2_lr, config.phase2_steps,
+            config.phase2_max_target_len, config.phase2_length_loss_weight,
+            config.device, config.output_dir,
+        )
 
-    def _freeze_decoder(self) -> None:
+    def _freeze_mt5(self) -> None:
         for p in self.model.mt5.parameters():
             p.requires_grad_(False)
 
@@ -417,7 +495,8 @@ class ConditioningTrainer:
             lm_loss, len_loss = self.model.forward_phase2(**batch)
             loss = lm_loss + w_len * len_loss
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self._trainable_params(), 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.projector.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.length_head.parameters(), 1.0)
             self.opt.step()
 
             running_lm  += lm_loss.item()

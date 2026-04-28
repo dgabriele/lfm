@@ -12,7 +12,7 @@ source_embedding_dim: 384
 n_prefix_tokens: 8
 
 phase1_dataset_dir: data/embeddings/passages.jsonl
-phase1_batch_size: 128
+phase1_batch_size: 88
 phase1_lr: 0.0001
 phase1_steps: 50000
 phase1_max_source_len: 64
@@ -21,13 +21,14 @@ phase1_log_every: 200
 phase1_diag_every: 1000
 phase1_ar_every: 10
 phase1_ar_weight: 0.0
+phase1_hidden_mse_weight: 1.0
 phase1_ar_batch_size: 8
 phase1_checkpoint_every: 2000
 
 phase2_store_dir: data/embeddings
 phase2_batch_size: 32
 phase2_lr: 0.001
-phase2_steps: 2000
+phase2_steps: 100000
 phase2_length_loss_weight: 0.1
 phase2_log_every: 200
 phase2_checkpoint_every: 1000

@@ -13,6 +13,7 @@ the alien syllable vocabulary.
 
 from __future__ import annotations
 
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -76,6 +77,25 @@ class SynthLM(nn.Module):
         )
         d_model: int = mt5.config.d_model
 
+        # Snapshot the pretrained decoder BEFORE replacing embed_tokens.
+        # This frozen copy is the anchor for Phase 1 hidden-state MSE regularisation.
+        # Phase 2 relies on the pretrained decoder's structural prior; if Phase 1
+        # overwrites the transformer layers, the EmbeddingProjector ends up conditioning
+        # a decoder that has drifted from the pretrained regime it was designed to use.
+        # The MSE loss keeps the transformer body in the pretrained distribution so
+        # that Phase 1 learning is redirected into embed_tokens and lm_head only.
+        # Stored via object.__setattr__ so it is NOT a registered submodule —
+        # excluded from state_dict/checkpoints and not moved by .to(device).
+        if config.phase1_hidden_mse_weight > 0:
+            snap = copy.deepcopy(mt5.decoder)
+            snap.embed_tokens = nn.Embedding(1, d_model)  # dummy — we pass inputs_embeds directly
+            for p in snap.parameters():
+                p.requires_grad_(False)
+            snap.eval()
+            object.__setattr__(self, '_frozen_decoder', snap)
+        else:
+            object.__setattr__(self, '_frozen_decoder', None)
+
         # Detach decoder from the shared English embedding table.
         mt5.decoder.embed_tokens = nn.Embedding(alien_vocab_size, d_model)
         mt5.lm_head = nn.Linear(d_model, alien_vocab_size, bias=False)
@@ -130,8 +150,11 @@ class SynthLM(nn.Module):
         ).loss
 
         length_pred = self.length_head(source_embedding)
-        length_target = (labels != -100).float().sum(dim=-1)
-        length_loss = F.mse_loss(length_pred, length_target)
+        # Normalise to [0, 1] so length_loss stays O(1) and doesn't dominate
+        # gradient norms relative to lm_loss (~3-7 range).
+        norm = float(labels.size(1))
+        length_target = (labels != -100).float().sum(dim=-1) / norm
+        length_loss = F.mse_loss(length_pred / norm, length_target)
 
         return lm_loss, length_loss
 

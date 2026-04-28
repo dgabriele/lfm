@@ -27,6 +27,7 @@ class SynthConfig(BaseModel):
     phase1_ar_every: int = 0                # 0 = disabled; AR loss every N steps
     phase1_ar_weight: float = 0.5           # weight of AR loss relative to TF loss
     phase1_ar_batch_size: int = 8           # samples per AR loss step (keep small, involves generate())
+    phase1_hidden_mse_weight: float = 0.0  # MSE between current and frozen pretrained decoder hidden states
     phase1_checkpoint_every: int = 10_000
 
     # ---- Phase 2: embedding conditioning ----
