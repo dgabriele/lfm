@@ -132,16 +132,37 @@ class AlienLMTrainer:
     def _run_diagnostics(self, step: int) -> None:
         self.model.eval()
         batch = self._make_batch(self._diag_sentences)
-        logits = self.model.phase1_logits(batch["alien_ids"])  # (B, T-1, V)
+        inputs_embeds = self.model.backend.embed_alien(batch["alien_ids"][:, :-1])
+        hidden = self.model.backend.forward_hidden(inputs_embeds)
+        logits = self.model.backend.alien_logits(hidden)
         pred_ids = logits.argmax(dim=-1)
         targets = batch["alien_labels"][:, 1:]
         valid = targets != -100
         lm_acc = (pred_ids[valid] == targets[valid]).float().mean().item()
-        logger.info(
-            "phase1 diag  step=%d  lm_acc=%.3f  entropy=%.2f  rep_rate=%.3f",
-            step, lm_acc, self._entropy(pred_ids[valid]), self._rep_rate(pred_ids, valid),
-        )
+        body_drift = self._body_drift(inputs_embeds, hidden) if self.model.backend.has_reference else None
+        if body_drift is not None:
+            cos, rel_rmse = body_drift
+            logger.info(
+                "phase1 diag  step=%d  lm_acc=%.3f  entropy=%.2f  rep_rate=%.3f  body_cos=%.4f  body_rel_rmse=%.3f",
+                step, lm_acc, self._entropy(pred_ids[valid]), self._rep_rate(pred_ids, valid), cos, rel_rmse,
+            )
+        else:
+            logger.info(
+                "phase1 diag  step=%d  lm_acc=%.3f  entropy=%.2f  rep_rate=%.3f",
+                step, lm_acc, self._entropy(pred_ids[valid]), self._rep_rate(pred_ids, valid),
+            )
         self.model.train()
+
+    def _body_drift(self, inputs_embeds: torch.Tensor, hidden: torch.Tensor) -> tuple[float, float]:
+        """Cosine similarity (direction) and relative RMSE (magnitude) between
+        trainable body and frozen reference body hidden states. Scale-aware drift readout."""
+        ref_hidden = self.model.backend.reference_hidden(inputs_embeds)
+        cos = torch.nn.functional.cosine_similarity(hidden, ref_hidden, dim=-1).mean().item()
+        rel_rmse = (
+            (hidden - ref_hidden).pow(2).mean().sqrt()
+            / ref_hidden.pow(2).mean().sqrt().clamp(min=1e-8)
+        ).item()
+        return cos, rel_rmse
 
     @torch.no_grad()
     def _log_samples(self, step: int) -> None:
