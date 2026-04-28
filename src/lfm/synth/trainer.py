@@ -103,11 +103,19 @@ class CipherTrainer:
         self.alien_tok = alien_tokenizer
         self.native_tok = AutoTokenizer.from_pretrained(config.base_model_name)
         self.device = torch.device(config.device)
-        self.opt = AdamW(model.backend.cipher_params(), lr=config.phase1_lr)
+        # Unfreeze body so the transformer layers learn to produce alien tokens.
+        # alien_emb+head use phase1_lr (random init, needs fast updates);
+        # body layers use phase1_body_lr (pretrained, nudge gently).
+        model.backend.unfreeze_body()
+        self.opt = AdamW([
+            {"params": model.backend.cipher_params(), "lr": config.phase1_lr},
+            {"params": model.backend.body_params(),   "lr": config.phase1_body_lr},
+        ])
         logger.info(
-            "CipherTrainer  model=%s  batch=%d  lr=%g  steps=%d  "
+            "CipherTrainer  model=%s  batch=%d  cipher_lr=%g  body_lr=%g  steps=%d  "
             "src_len=%d  tgt_len=%d  diag_every=%d  device=%s  out=%s",
-            config.base_model_name, config.phase1_batch_size, config.phase1_lr,
+            config.base_model_name, config.phase1_batch_size,
+            config.phase1_lr, config.phase1_body_lr,
             config.phase1_steps, config.phase1_max_source_len,
             config.phase1_max_target_len, config.phase1_diag_every,
             config.device, config.output_dir,
@@ -223,7 +231,8 @@ class CipherTrainer:
             self.opt.zero_grad()
             loss = self.model.forward_phase1(**batch)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.backend.cipher_params(), 1.0)
+            all_p1_params = self.model.backend.cipher_params() + self.model.backend.body_params()
+            torch.nn.utils.clip_grad_norm_(all_p1_params, 1.0)
             self.opt.step()
 
             running_loss += loss.item()
@@ -252,6 +261,7 @@ class CipherTrainer:
             "step": step,
             "alien_emb": self.model.backend._alien_emb.state_dict(),
             "alien_head": self.model.backend._alien_head.state_dict(),
+            "body": self.model.backend._body.state_dict(),
             "optimizer": self.opt.state_dict(),
         }, path)
 
@@ -259,6 +269,7 @@ class CipherTrainer:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
         self.model.backend._alien_emb.load_state_dict(ckpt["alien_emb"])
         self.model.backend._alien_head.load_state_dict(ckpt["alien_head"])
+        self.model.backend._body.load_state_dict(ckpt["body"])
         self.opt.load_state_dict(ckpt["optimizer"])
         for state in self.opt.state.values():
             for k, v in state.items():
@@ -300,7 +311,8 @@ class ConditioningTrainer:
         )
 
     def _freeze_cipher(self) -> None:
-        """Freeze Phase 1 trained weights; only projector + length_head train."""
+        """Freeze all Phase 1 trained weights; only projector + length_head train."""
+        self.model.backend.freeze_body()
         for p in self.model.backend._alien_emb.parameters():
             p.requires_grad_(False)
         for p in self.model.backend._alien_head.parameters():

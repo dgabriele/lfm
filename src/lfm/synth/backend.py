@@ -1,9 +1,15 @@
 """Decoder backend abstraction for SynthLM.
 
 DecoderBackend(ABC) defines the interface any causal-LM backend must implement.
-CausalDecoderBackend wraps any HuggingFace AutoModelForCausalLM; the LM body is
-always fully frozen.  Only the alien embedding table and alien projection head
-are trainable.
+CausalDecoderBackend wraps any HuggingFace AutoModelForCausalLM.
+
+Body freeze state is managed explicitly:
+  - __init__: body frozen (safe default for Phase 2).
+  - unfreeze_body(): called by CipherTrainer so Phase 1 can fine-tune the body.
+  - freeze_body(): called by ConditioningTrainer to lock the body for Phase 2.
+
+embed_tokens is kept frozen throughout — native embedding space must stay
+consistent so the Phase 2 projector can map into it reliably.
 
 To add a new backend: subclass DecoderBackend and implement all abstract methods.
 """
@@ -18,7 +24,7 @@ from torch import Tensor
 
 
 class DecoderBackend(nn.Module, ABC):
-    """Interface: frozen LM body with trainable alien cipher sub-vocabulary."""
+    """Interface: LM body (freeze-controlled) with trainable alien cipher sub-vocabulary."""
 
     @abstractmethod
     def embed_native(self, input_ids: Tensor) -> Tensor:
@@ -34,7 +40,7 @@ class DecoderBackend(nn.Module, ABC):
         inputs_embeds: Tensor,
         attention_mask: Tensor | None = None,
     ) -> Tensor:
-        """(B, T, D) → (B, T, D) last hidden states from the frozen LM body."""
+        """(B, T, D) → (B, T, D) last hidden states from the LM body."""
 
     @abstractmethod
     def alien_logits(self, hidden: Tensor) -> Tensor:
@@ -52,7 +58,20 @@ class DecoderBackend(nn.Module, ABC):
 
     @abstractmethod
     def cipher_params(self) -> list[nn.Parameter]:
-        """Phase 1 trainable parameters: alien_emb + alien_head only."""
+        """alien_emb + alien_head parameters (always trainable)."""
+
+    @abstractmethod
+    def body_params(self) -> list[nn.Parameter]:
+        """Transformer layer parameters (trainable during Phase 1, frozen during Phase 2).
+        Excludes embed_tokens and lm_head."""
+
+    @abstractmethod
+    def freeze_body(self) -> None:
+        """Set body transformer layers to requires_grad=False."""
+
+    @abstractmethod
+    def unfreeze_body(self) -> None:
+        """Set body transformer layers to requires_grad=True."""
 
     @property
     @abstractmethod
@@ -61,11 +80,12 @@ class DecoderBackend(nn.Module, ABC):
 
 
 class CausalDecoderBackend(DecoderBackend):
-    """Wraps any HuggingFace AutoModelForCausalLM. The LM body is always frozen.
+    """Wraps any HuggingFace AutoModelForCausalLM.
 
-    The alien embedding table (_alien_emb) and alien projection head (_alien_head)
-    are separate from the native LM vocabulary and are trainable.  Native lm_head
-    and embed_tokens are frozen.
+    alien_emb and alien_head are always trainable.
+    embed_tokens and lm_head are always frozen.
+    Transformer layers (body_params) are frozen by default; call unfreeze_body()
+    before Phase 1 training and freeze_body() before Phase 2.
 
     Body detection tries: ('model', 'transformer', 'gpt_neox', 'decoder').
     Embed detection tries: ('embed_tokens', 'wte', 'word_embeddings').
@@ -84,7 +104,6 @@ class CausalDecoderBackend(DecoderBackend):
 
         self._lm = lm
         d = lm.config.hidden_size
-        # Match alien modules to the model's dtype (e.g. bfloat16 for Qwen).
         dtype = next(lm.parameters()).dtype
 
         self._alien_emb = nn.Embedding(alien_vocab_size, d).to(dtype)
@@ -92,6 +111,10 @@ class CausalDecoderBackend(DecoderBackend):
 
         self._body = self._find(lm, self._BODY_ATTRS, 'transformer body')
         self._embed_fn: nn.Embedding = self._find(self._body, self._EMBED_ATTRS, 'embed_tokens')
+        # Prefix used to exclude native embed_tokens from body_params.
+        self._embed_prefix: str = next(
+            a for a in self._EMBED_ATTRS if hasattr(self._body, a)
+        )
 
     @staticmethod
     def _find(obj: object, attrs: tuple[str, ...], label: str) -> nn.Module:
@@ -101,6 +124,24 @@ class CausalDecoderBackend(DecoderBackend):
         raise AttributeError(
             f"Cannot locate {label} on {type(obj).__name__}. Tried: {attrs}"
         )
+
+    def _layer_params(self) -> list[nn.Parameter]:
+        """Transformer layers + norm, excluding native embed_tokens."""
+        return [
+            p for name, p in self._body.named_parameters()
+            if not name.startswith(self._embed_prefix)
+        ]
+
+    def freeze_body(self) -> None:
+        for p in self._layer_params():
+            p.requires_grad_(False)
+
+    def unfreeze_body(self) -> None:
+        for p in self._layer_params():
+            p.requires_grad_(True)
+
+    def body_params(self) -> list[nn.Parameter]:
+        return [p for p in self._layer_params() if p.requires_grad]
 
     def embed_native(self, input_ids: Tensor) -> Tensor:
         return self._embed_fn(input_ids)
@@ -126,7 +167,6 @@ class CausalDecoderBackend(DecoderBackend):
     @property
     def eos_token_id(self) -> int:
         eos = self._lm.config.eos_token_id
-        # Some models return a list of EOS ids; take the first.
         return eos[0] if isinstance(eos, (list, tuple)) else eos
 
     def cipher_params(self) -> list[nn.Parameter]:

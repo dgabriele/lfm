@@ -19,6 +19,7 @@ class SynthConfig(BaseModel):
     phase1_dataset_dir: str = ""          # path to DepTreeVAE dataset (HDF5) or .jsonl
     phase1_batch_size: int = 32
     phase1_lr: float = 1e-4
+    phase1_body_lr: float = 1e-5              # lower lr for the body during Phase 1
     phase1_steps: int = 100_000
     phase1_max_source_len: int = 128
     phase1_max_target_len: int = 128
