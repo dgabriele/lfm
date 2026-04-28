@@ -249,9 +249,9 @@ class CipherTrainer:
                 self._run_diagnostics(step)
 
             if step % cfg.phase1_checkpoint_every == 0:
-                ckpt_path = str(out_dir / f"phase1_step{step}.pt")
+                ckpt_path = str(out_dir / "phase1_checkpoint.pt")
                 self._save_checkpoint(ckpt_path, step)
-                logger.info("phase1 checkpoint -> %s", ckpt_path)
+                logger.info("phase1 checkpoint -> %s  (step %d)", ckpt_path, step)
 
         self.model.save_phase1(str(out_dir / "phase1_final.pt"))
         logger.info("phase1 training complete")
@@ -259,17 +259,13 @@ class CipherTrainer:
     def _save_checkpoint(self, path: str, step: int) -> None:
         torch.save({
             "step": step,
-            "alien_emb": self.model.backend._alien_emb.state_dict(),
-            "alien_head": self.model.backend._alien_head.state_dict(),
-            "body": self.model.backend._body.state_dict(),
+            "model": self.model.phase1_state(),
             "optimizer": self.opt.state_dict(),
         }, path)
 
     def load_checkpoint(self, path: str) -> int:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        self.model.backend._alien_emb.load_state_dict(ckpt["alien_emb"])
-        self.model.backend._alien_head.load_state_dict(ckpt["alien_head"])
-        self.model.backend._body.load_state_dict(ckpt["body"])
+        self.model.load_phase1_state(ckpt["model"])
         self.opt.load_state_dict(ckpt["optimizer"])
         for state in self.opt.state.values():
             for k, v in state.items():
@@ -388,9 +384,9 @@ class ConditioningTrainer:
                 running_lm = running_len = 0.0
 
             if step % cfg.phase2_checkpoint_every == 0:
-                ckpt_path = str(out_dir / f"phase2_step{step}.pt")
+                ckpt_path = str(out_dir / "phase2_checkpoint.pt")
                 self._save_checkpoint(ckpt_path, step)
-                logger.info("phase2 checkpoint -> %s", ckpt_path)
+                logger.info("phase2 checkpoint -> %s  (step %d)", ckpt_path, step)
 
         self.model.save_phase2(str(out_dir / "phase2_final.pt"))
         logger.info("phase2 training complete")
@@ -398,15 +394,13 @@ class ConditioningTrainer:
     def _save_checkpoint(self, path: str, step: int) -> None:
         torch.save({
             "step": step,
-            "projector": self.model.projector.state_dict(),
-            "length_head": self.model.length_head.state_dict(),
+            "model": self.model.phase2_state(),
             "optimizer": self.opt.state_dict(),
         }, path)
 
     def load_checkpoint(self, path: str) -> int:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        self.model.projector.load_state_dict(ckpt["projector"])
-        self.model.length_head.load_state_dict(ckpt["length_head"])
+        self.model.load_phase2_state(ckpt["model"])
         self.opt.load_state_dict(ckpt["optimizer"])
         for state in self.opt.state.values():
             for k, v in state.items():

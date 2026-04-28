@@ -272,26 +272,38 @@ class SynthLM(nn.Module):
 
     # ---- Persistence ----
 
-    def save_phase1(self, path: str) -> None:
-        torch.save({
+    # ---- Persistence helpers ----
+
+    def phase1_state(self) -> dict:
+        return {
             "alien_emb": self.backend._alien_emb.state_dict(),
             "alien_head": self.backend._alien_head.state_dict(),
-            "body": self.backend._body.state_dict(),
-        }, path)
+            "body":       self.backend._body.state_dict(),
+        }
+
+    def load_phase1_state(self, state: dict) -> None:
+        self.backend._alien_emb.load_state_dict(state["alien_emb"])
+        self.backend._alien_head.load_state_dict(state["alien_head"])
+        self.backend._body.load_state_dict(state["body"])
+
+    def phase2_state(self) -> dict:
+        return {
+            "projector":   self.projector.state_dict(),
+            "length_head": self.length_head.state_dict(),
+        }
+
+    def load_phase2_state(self, state: dict) -> None:
+        self.projector.load_state_dict(state["projector"])
+        self.length_head.load_state_dict(state["length_head"])
+
+    def save_phase1(self, path: str) -> None:
+        torch.save(self.phase1_state(), path)
 
     def load_phase1(self, path: str) -> None:
-        ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        self.backend._alien_emb.load_state_dict(ckpt["alien_emb"])
-        self.backend._alien_head.load_state_dict(ckpt["alien_head"])
-        self.backend._body.load_state_dict(ckpt["body"])
+        self.load_phase1_state(torch.load(path, map_location="cpu", weights_only=True))
 
     def save_phase2(self, path: str) -> None:
-        torch.save({
-            "projector": self.projector.state_dict(),
-            "length_head": self.length_head.state_dict(),
-        }, path)
+        torch.save(self.phase2_state(), path)
 
     def load_phase2(self, path: str) -> None:
-        ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        self.projector.load_state_dict(ckpt["projector"])
-        self.length_head.load_state_dict(ckpt["length_head"])
+        self.load_phase2_state(torch.load(path, map_location="cpu", weights_only=True))

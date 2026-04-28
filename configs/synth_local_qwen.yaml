@@ -21,7 +21,7 @@ phase1_max_source_len: 64
 phase1_max_target_len: 64
 phase1_log_every: 200
 phase1_diag_every: 1000
-phase1_checkpoint_every: 10000
+phase1_checkpoint_every: 2000
 
 # Phase 2
 phase2_store_dir: data/embeddings
