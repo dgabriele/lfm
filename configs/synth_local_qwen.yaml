@@ -2,7 +2,7 @@
 # Phase 1: alien LM — causal next-token prediction on cipher-encoded text.
 # Phase 2: embedding conditioning — source_emb → alien sentence via prefix.
 
-vocab_size: 32000
+vocab_size: 8000
 vocab_seed: 42
 
 base_model_name: Qwen/Qwen2.5-0.5B
@@ -13,10 +13,10 @@ n_prefix_tokens: 8
 # Phase 1
 phase1_dataset_dir: data/embeddings_qwen/passages.jsonl
 phase1_batch_size: 16
-phase1_grad_accum: 2
-phase1_lr: 0.0001
+phase1_grad_accum: 4
+phase1_lr: 0.0003
 phase1_body_lr: 0.00003
-phase1_hidden_mse_weight: 0.1
+phase1_hidden_mse_weight: 0.01
 phase1_steps: 50000
 phase1_max_len: 64
 phase1_log_every: 200

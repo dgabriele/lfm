@@ -8,13 +8,15 @@ from lfm.cli.base import CLICommand
 
 
 def _setup_file_logging(log_path: "Path") -> None:
-    """Add a FileHandler to the root logger so all output goes to log_path too."""
+    """Route all logging exclusively to log_path, removing any StreamHandlers."""
     import logging
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    root.handlers = [h for h in root.handlers if not isinstance(h, logging.StreamHandler)]
     handler = logging.FileHandler(log_path, mode="a")
     handler.setLevel(logging.INFO)
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
-    logging.getLogger().addHandler(handler)
+    root.addHandler(handler)
 
 
 def _build_model(cfg, alien_vocab_size: int):
