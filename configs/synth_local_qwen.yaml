@@ -1,7 +1,6 @@
 # Local run — Qwen2.5-0.5B on RTX 3060 Ti (8 GB)
-# Decoder-only architecture: frozen LM body + alien cipher head + prefix projector.
-# Phase 1: cipher fine-tuning (English → alien). Trains: _alien_emb, _alien_head.
-# Phase 2: embedding conditioning (source_emb → alien). Trains: projector, length_head.
+# Phase 1: alien LM — causal next-token prediction on cipher-encoded text.
+# Phase 2: embedding conditioning — source_emb → alien sentence via prefix.
 
 vocab_size: 2000
 vocab_seed: 42
@@ -13,12 +12,11 @@ n_prefix_tokens: 8
 
 # Phase 1
 phase1_dataset_dir: data/embeddings/passages.jsonl
-phase1_batch_size: 16
+phase1_batch_size: 32
 phase1_lr: 0.0001
-phase1_body_lr: 0.00001
+phase1_body_lr: 0.00003
 phase1_steps: 50000
-phase1_max_source_len: 64
-phase1_max_target_len: 64
+phase1_max_len: 64
 phase1_log_every: 200
 phase1_diag_every: 1000
 phase1_checkpoint_every: 2000

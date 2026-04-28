@@ -66,8 +66,8 @@ class CorpusGenerator:
                 )
                 token_ids = self.model.generate(
                     emb,
-                    alien_stop_id=self._alien_stop_id,
-                    alien_pad_id=self._alien_pad_id,
+                    eos_id=self._alien_stop_id,
+                    pad_id=self._alien_pad_id,
                 )
                 sentences = self.tokenizer.batch_decode(token_ids, skip_special_tokens=True)
                 for s in sentences:

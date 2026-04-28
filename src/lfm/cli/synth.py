@@ -76,7 +76,7 @@ class TrainPhase1Command(CLICommand):
         from transformers import PreTrainedTokenizerFast
         from lfm.synth.cipher import WordCipher
         from lfm.synth.config import SynthConfig
-        from lfm.synth.trainer import CipherTrainer
+        from lfm.synth.trainer import AlienLMTrainer
         from lfm.synth.vocab import AlienVocab
 
         cfg = SynthConfig(**yaml.safe_load(Path(args.config).read_text()))
@@ -85,7 +85,7 @@ class TrainPhase1Command(CLICommand):
         vocab = AlienVocab.load(out_dir)
         alien_tok = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
         model = _build_model(cfg, alien_vocab_size=len(alien_tok))
-        trainer = CipherTrainer(model, cfg, WordCipher(vocab), alien_tok)
+        trainer = AlienLMTrainer(model, cfg, WordCipher(vocab), alien_tok)
         start_step = 0
         if args.resume:
             start_step = trainer.load_checkpoint(args.resume)
