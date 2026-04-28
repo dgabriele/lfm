@@ -55,11 +55,11 @@ Input: alien syllable tokens only — no English tokens anywhere.
 Body learns: "given alien token context, predict the next alien token."
 Body has no source-position prior, no expectation of what precedes the alien sequence.
 
-### Why Phase 2 transition is clean
-Phase 2 prepends 8 learned prefix tokens to alien context.
-Body has never seen anything in those prefix positions → no conflicting prior.
-PrefixProjector gradients flow through a body that is genuinely sensitive to prefix content.
-This is extension, not replacement.
+### Why prefix conditioning is clean (applies to game approach)
+Phase 1 trains on alien tokens with no prefix — the body has no prior on what occupies prefix
+positions. Prepending learned prefix tokens is pure extension. This applies equally to the
+supervised Phase 2 design (now abandoned) and to the contrastive game approach (current direction):
+PrefixProjector gradients flow through a body that is genuinely open to prefix conditioning.
 
 ### Convergence vs ARCH-1
 ARCH-1 after 20,000 steps: loss ~4.83, tf_acc plateau ~0.355.
@@ -67,9 +67,67 @@ ARCH-2 after 1,800 steps: loss 4.15, lm_acc 0.362 — already past ARCH-1 ceilin
 Each step ~31s/200 vs comparable hardware. Alien LM is standard domain adaptation; ARCH-1 was memorization.
 
 ### Target diagnostics for Phase 2 readiness
-Theoretical lm_acc ceiling ~0.55–0.65: word-boundary positions are bounded by English LM uncertainty,
-within-word continuations approach ~0.9. Targets: lm_acc <0.35 bad, 0.45–0.55 good, 0.55–0.65 excellent, >0.65 suspect overfit.
-rep_rate <0.05 and entropy >4.5 are equally load-bearing — a fluent diverse prior matters more than raw accuracy.
+With the 232K word-type vocab, lm_acc is next-word prediction over a large vocabulary — theoretical
+ceiling is low (~0.10–0.25). Loss is the primary metric. rep_rate <0.05 and entropy staying high
+are equally load-bearing. A fluent diverse prior matters more than raw top-1 accuracy.
+
+---
+
+## DECISION-4: Phase 2 (supervised CE) abandoned — use Phase 1 in contrastive game
+
+**Status: ACTIVE DIRECTION as of 2026-04-28**
+
+### What Phase 2 was
+Train a PrefixProjector (2-layer MLP: source_embedding → 8 prefix tokens) via cross-entropy
+against `cipher(sentence)` — supervised next-token prediction on the exact alien encoding of the
+source sentence.
+
+### Why we are not doing it
+
+**Training signal ambiguity (primary):**
+CE against `cipher(sentence)` treats one specific surface form as ground truth. But the source
+embedding is a Qwen mean-pool — it encodes semantic content, not a specific sentence. Any alien
+paraphrase that preserves the semantics is equally valid, but CE penalises all of them. The model
+is optimising toward a single arbitrary target among many valid ones.
+
+**Bijective cipher ceiling:**
+The cipher maps English words → alien words deterministically. Training a model to reproduce
+cipher(sentence) from sentence_embedding is, at best, learning a noisy inversion of the cipher
+table — not genuine semantic grounding. An LLM trained on such a corpus risks learning cipher
+decoding rather than semantic interpretation.
+
+**Previous Phase 2 failure (ARCH-1):**
+Phase 2 never converged in the seq2seq architecture (ARCH-1). The current decoder-only setup has
+better theoretical odds (same-model embeddings, simpler projector, MSE-preserved body geometry)
+but the supervised CE approach still has the fundamental ambiguity problem above.
+
+### What we do instead: contrastive game
+
+Use Phase 1 alien LM as a frozen voice box in the existing contrastive discrimination game
+framework, directly analogous to how the frozen PhraseDecoder is used in the expression/dialogue
+games.
+
+**Architecture:**
+- PrefixProjector (same as Phase 2): source_embedding → 8 prefix tokens
+- Frozen Phase 1 alien LM: prefix tokens condition autoregressive generation
+- Alien token hidden states mean-pooled through frozen Qwen body → alien_embedding (in Qwen's space)
+- Contrastive loss: maximize cosine(alien_embedding, source_embedding) vs distractors
+
+**Why this is better:**
+- Directly optimises discriminability — what UNMT actually needs
+- Eliminates the single-target ambiguity: any alien text whose Qwen encoding matches the source
+  embedding is rewarded equally
+- The game drives semantic grounding rather than surface reproduction
+- The Phase 1 LM's learned phrase-level structure is preserved (frozen body); word order is free
+  to organise itself, but clause/phrase patterns remain as information channels
+- Round-trip consistency is the objective: Qwen(generated_alien) ≈ source_embedding
+
+**Differentiability:** straight-through token embeddings (`embed_tokens_straight_through`,
+already in agents/components.py).
+
+**Key constraint preserved:** Phase 1 LM stays frozen during game training. This is what keeps
+the alien language structurally coherent — the LM's autoregressive distribution enforces phrase
+patterns; the game only shapes which patterns are activated via prefix conditioning.
 
 ---
 
@@ -120,6 +178,21 @@ Tokenizer consequence: the WordLevel vocab is now built from corpus-derived word
 (all unique alien words found in the training corpus) rather than individual syllables.
 `AlienVocab.build_tokenizer(words)` takes the sorted word list; `BuildVocabCommand` scans
 the corpus and passes it. Vocab size is now corpus-derived (~50-100K), not fixed at 2000.
+
+---
+
+## SESSION-2026-04-28 digest
+
+- Killed old 300K MiniLM embedding store; generated 1M Qwen2.5-0.5B mean-pool embeddings
+  (896-dim, L2-normalized) from Leipzig English corpora (news 2023, Wikipedia 2016, news 2020).
+  ~35 minutes at batch=512.
+- Fixed cipher surface representation: syllables now concatenated within words (sâznãrùz)
+  instead of space-separated (sâz nã rùz). Preserves word-boundary morphological signal for UNMT.
+- Rebuilt tokenizer as corpus-derived WordLevel vocab (232K word types) to match new format.
+- Config updated: source_embedding_dim 384→896, dataset/store dirs point to data/embeddings_qwen.
+- Added checkpoint-boundary diagnostics: 5 English/alien pairs (ground-truth cipher vs model generation).
+- lm_acc diagnostic thresholds invalidated by vocab change (2K→232K); loss is now primary metric.
+- Phase 1 training restarted from scratch on new corpus.
 
 ---
 
