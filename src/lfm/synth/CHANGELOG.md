@@ -107,6 +107,22 @@ the source text is grammatically complete English.
 
 ---
 
+## CHANGE-1: Cipher word concatenation (morphological boundary fix)
+
+Syllables within a word are now concatenated directly: "economy" → `sâznãrùz` (one space-delimited token)
+instead of `sâz nã rùz` (three separate tokens). Word boundaries are preserved via spaces.
+
+Why: the old representation lost word-boundary information — all tokens appeared monosyllabic,
+destroying the length-to-word-class signal (short=function word, long=content word) that UNMT
+relies on for syntactic role discovery.
+
+Tokenizer consequence: the WordLevel vocab is now built from corpus-derived word types
+(all unique alien words found in the training corpus) rather than individual syllables.
+`AlienVocab.build_tokenizer(words)` takes the sorted word list; `BuildVocabCommand` scans
+the corpus and passes it. Vocab size is now corpus-derived (~50-100K), not fixed at 2000.
+
+---
+
 ## Surface structure reference
 
 Cipher rules: word ≤2 chars → 1 syllable, 3–5 chars → 2 syllables, ≥6 chars → 3 syllables.

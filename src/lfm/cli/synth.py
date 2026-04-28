@@ -42,8 +42,10 @@ class BuildVocabCommand(CLICommand):
         parser.add_argument("config", help="YAML config file")
 
     def execute(self, args: argparse.Namespace) -> int:
+        import json
         import yaml
         from pathlib import Path
+        from lfm.synth.cipher import WordCipher
         from lfm.synth.config import SynthConfig
         from lfm.synth.vocab import AlienVocab
 
@@ -51,9 +53,24 @@ class BuildVocabCommand(CLICommand):
         out_dir = Path(cfg.output_dir)
         vocab = AlienVocab(vocab_size=cfg.vocab_size, seed=cfg.vocab_seed)
         vocab.save(out_dir)
-        tokenizer = vocab.build_tokenizer()
+
+        # Scan corpus to collect all unique alien words (concatenated syllables).
+        print(f"Scanning {cfg.phase1_dataset_dir} for alien word types...")
+        cipher = WordCipher(vocab)
+        alien_words: set[str] = set()
+        dataset_path = Path(cfg.phase1_dataset_dir)
+        if dataset_path.suffix == ".jsonl":
+            lines = dataset_path.read_text().splitlines()
+            texts = [json.loads(l)["text"] for l in lines if l.strip()]
+        else:
+            texts = [l.strip() for l in dataset_path.read_text().splitlines() if l.strip()]
+        for text in texts:
+            alien_words.update(cipher.encode_for_tokenizer(text).split())
+
+        words = sorted(alien_words)
+        tokenizer = vocab.build_tokenizer(words)
         tokenizer.save_pretrained(str(out_dir / "alien_tokenizer"))
-        print(f"Alien vocabulary ({len(vocab.syllables)} syllables) saved to {out_dir}")
+        print(f"Alien vocab: {len(vocab.syllables)} syllables, {len(words)} word types → {out_dir}")
         return 0
 
 

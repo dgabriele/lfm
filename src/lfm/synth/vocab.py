@@ -68,9 +68,15 @@ class AlienVocab:
     def syllables(self) -> list[str]:
         return list(self._syllables)
 
-    def build_tokenizer(self) -> PreTrainedTokenizerFast:
-        """Build a HuggingFace tokenizer over the alien syllable vocabulary."""
-        all_tokens = SPECIAL_TOKENS + PUNCT_TOKENS + self._syllables
+    def build_tokenizer(self, words: list[str]) -> PreTrainedTokenizerFast:
+        """Build a HuggingFace WordLevel tokenizer over corpus-derived alien words.
+
+        Args:
+            words: Sorted list of unique alien word types from the training corpus.
+                   Each word is a concatenation of 1-3 syllables as produced by
+                   WordCipher (e.g. 'sâznãrùz'). Must not include special tokens.
+        """
+        all_tokens = SPECIAL_TOKENS + PUNCT_TOKENS + words
         vocab_dict = {tok: i for i, tok in enumerate(all_tokens)}
 
         tok_model = WordLevel(vocab=vocab_dict, unk_token="[UNK]")

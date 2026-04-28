@@ -82,6 +82,7 @@ class AlienLMTrainer:
     """
 
     _DIAG_N = 16
+    _SAMPLE_N = 5
 
     def __init__(
         self,
@@ -107,10 +108,9 @@ class AlienLMTrainer:
             config.phase1_lr, config.phase1_body_lr, config.phase1_steps,
             config.phase1_max_len, config.phase1_diag_every, config.device, config.output_dir,
         )
-        if config.phase1_diag_every > 0:
-            self._diag_sentences = list(itertools.islice(
-                _iter_raw_sentences(config.phase1_dataset_dir, shuffle=False), self._DIAG_N,
-            ))
+        self._diag_sentences = list(itertools.islice(
+            _iter_raw_sentences(config.phase1_dataset_dir, shuffle=False), self._DIAG_N,
+        ))
 
     def _make_batch(self, sentences: list[str]) -> dict[str, torch.Tensor]:
         dec = self.alien_tok(
@@ -138,6 +138,37 @@ class AlienLMTrainer:
             "phase1 diag  step=%d  lm_acc=%.3f  entropy=%.2f  rep_rate=%.3f",
             step, lm_acc, self._entropy(pred_ids[valid]), self._rep_rate(pred_ids, valid),
         )
+        self.model.train()
+
+    @torch.no_grad()
+    def _log_samples(self, step: int) -> None:
+        """Log 5 English/alien pairs: ground-truth cipher vs model's autoregressive output."""
+        self.model.eval()
+        sentences = self._diag_sentences[:self._SAMPLE_N]
+        eos_id = self.alien_tok.eos_token_id
+        pad_id = self.alien_tok.pad_token_id
+
+        for sent in sentences:
+            ground_truth = self.cipher.encode_sentence(sent)
+            # Seed with first cipher token, generate the rest autoregressively.
+            seed_ids = self.alien_tok(
+                self.cipher.encode_for_tokenizer(sent),
+                return_tensors="pt",
+            )["input_ids"][:, :1].to(self.device)
+            context = self.model.backend.embed_alien(seed_ids)
+            generated = [seed_ids[0, 0].item()]
+            for _ in range(self.config.phase1_max_len):
+                hidden  = self.model.backend.forward_hidden(context)
+                next_id = self.model.backend.alien_logits(hidden[:, -1:]).squeeze(1).argmax(-1)
+                generated.append(next_id.item())
+                if next_id.item() == eos_id:
+                    break
+                context = torch.cat([context, self.model.backend.embed_alien(next_id.unsqueeze(1))], dim=1)
+            gen_text = self.alien_tok.decode(generated, skip_special_tokens=True)
+            logger.info("sample  EN: %s", sent)
+            logger.info("        GT: %s", ground_truth)
+            logger.info("       GEN: %s", gen_text)
+
         self.model.train()
 
     @staticmethod
@@ -191,6 +222,7 @@ class AlienLMTrainer:
                 ckpt = str(out_dir / "phase1_checkpoint.pt")
                 self._save_checkpoint(ckpt, step)
                 logger.info("phase1 checkpoint -> %s  (step %d)", ckpt, step)
+                self._log_samples(step)
 
         self.model.save_phase1(str(out_dir / "phase1_final.pt"))
         logger.info("phase1 training complete")

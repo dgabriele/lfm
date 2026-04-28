@@ -63,7 +63,7 @@ class WordCipher:
             sylls = self.word_syllables(tok)
             if capitalize and tok[0].isupper():
                 sylls = [sylls[0][0].upper() + sylls[0][1:]] + sylls[1:]
-            parts.extend(sylls)
+            parts.append("".join(sylls))
         return " ".join(parts)
 
     def encode_for_tokenizer(self, sentence: str) -> str:
