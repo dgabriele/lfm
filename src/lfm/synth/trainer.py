@@ -123,14 +123,31 @@ class AlienLMTrainer:
         self.alien_tok = alien_tokenizer
         self.device = torch.device(config.device)
         model.backend.unfreeze_body()
+        # cipher_params group includes the coherence head (small head trained
+        # alongside alien_emb / alien_head at the same LR).
+        cipher_group = (
+            list(model.backend.cipher_params())
+            + list(model.coherence_head.parameters())
+        )
         self.opt = AdamW([
-            {"params": model.backend.cipher_params(), "lr": config.phase1_lr},
+            {"params": cipher_group,                  "lr": config.phase1_lr},
             {"params": model.backend.body_params(),   "lr": config.phase1_body_lr},
         ])
         self.mse_weight = config.phase1_hidden_mse_weight
+        self.coh_weight = config.phase1_coherence_weight
+        self.coh_frac = config.phase1_coherence_replace_frac
         self.grad_accum = max(1, config.phase1_grad_accum)
         self.warmup_steps = max(0, config.phase1_body_warmup_steps)
         self._body_frozen = False  # mirrors the actual freeze state of the body
+        # Cache vocab size for random-token corruption sampling
+        self._vocab_size = len(alien_tokenizer)
+        self._special_ids = torch.tensor([
+            i for i in (
+                alien_tokenizer.pad_token_id, alien_tokenizer.eos_token_id,
+                alien_tokenizer.bos_token_id, alien_tokenizer.sep_token_id,
+                alien_tokenizer.unk_token_id, alien_tokenizer.mask_token_id,
+            ) if i is not None
+        ], dtype=torch.long)
         logger.info(
             "AlienLMTrainer  model=%s  batch=%d×%d  cipher_lr=%g  body_lr=%g  "
             "lr_min=%g  lr_schedule=%s  body_warmup=%d  mse_weight=%g  steps=%d  "
@@ -173,6 +190,24 @@ class AlienLMTrainer:
         self.opt.param_groups[0]["lr"] = cipher_lr
         self.opt.param_groups[1]["lr"] = body_lr
         return cipher_lr, body_lr
+
+    def _corrupt_for_rtd(
+        self, alien_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Replace a fraction of non-special tokens with random vocab tokens.
+
+        Returns:
+            corrupted_ids: same shape as alien_ids, with some tokens replaced.
+            replace_mask:  same shape, 1.0 where replaced, 0.0 elsewhere.
+        """
+        device = alien_ids.device
+        special = self._special_ids.to(device)
+        is_special = (alien_ids.unsqueeze(-1) == special).any(dim=-1)
+        rand = torch.rand_like(alien_ids, dtype=torch.float)
+        replace = (rand < self.coh_frac) & ~is_special
+        rand_tokens = torch.randint(0, self._vocab_size, alien_ids.shape, device=device)
+        corrupted = torch.where(replace, rand_tokens, alien_ids)
+        return corrupted, replace.float()
 
     def _filter_truncated(self, sentences: list[str]) -> list[str]:
         """Drop sentences whose cipher tokenisation would exceed phase1_max_len."""
@@ -305,22 +340,35 @@ class AlienLMTrainer:
         for _ in range(start_step * cfg.phase1_batch_size * self.grad_accum):
             next(data)
 
-        step, running_ce, running_mse = start_step, 0.0, 0.0
+        step, running_ce, running_mse, running_coh = start_step, 0.0, 0.0, 0.0
 
         while step < cfg.phase1_steps:
             cipher_lr, body_lr = self._apply_schedule(step)
             try:
                 self.opt.zero_grad()
-                accum_ce = accum_mse = 0.0
+                accum_ce = accum_mse = accum_coh = 0.0
                 for _ in range(self.grad_accum):
                     batch = self._make_batch([next(data) for _ in range(cfg.phase1_batch_size)])
-                    ce, mse = self.model.forward_phase1(**batch)
-                    total = (ce + self.mse_weight * mse) / self.grad_accum
+                    if self.coh_weight > 0:
+                        # Corrupt input for RTD; LM target stays clean (denoising-LM flavour).
+                        corrupted, replace_mask = self._corrupt_for_rtd(batch["alien_ids"])
+                        ce, mse, coh = self.model.forward_phase1(
+                            alien_ids=corrupted,
+                            alien_labels=batch["alien_labels"],
+                            replace_mask=replace_mask[:, :-1],
+                        )
+                    else:
+                        ce, mse, coh = self.model.forward_phase1(**batch)
+                    total = (ce + self.mse_weight * mse + self.coh_weight * coh) / self.grad_accum
                     total.backward()
                     accum_ce += ce.item() / self.grad_accum
                     accum_mse += mse.item() / self.grad_accum
+                    accum_coh += coh.item() / self.grad_accum
                 torch.nn.utils.clip_grad_norm_(
-                    self.model.backend.cipher_params() + self.model.backend.body_params(), 1.0
+                    list(self.model.backend.cipher_params())
+                    + list(self.model.coherence_head.parameters())
+                    + list(self.model.backend.body_params()),
+                    1.0,
                 )
                 self.opt.step()
             except torch.cuda.OutOfMemoryError as e:
@@ -340,15 +388,16 @@ class AlienLMTrainer:
 
             running_ce += accum_ce
             running_mse += accum_mse
+            running_coh += accum_coh
             step += 1
 
             if step % cfg.phase1_log_every == 0:
                 n = cfg.phase1_log_every
                 logger.info(
-                    "phase1 step=%d  ce=%.4f  mse=%.6f  cipher_lr=%.2e  body_lr=%.2e",
-                    step, running_ce / n, running_mse / n, cipher_lr, body_lr,
+                    "phase1 step=%d  ce=%.4f  mse=%.6f  coh=%.4f  cipher_lr=%.2e  body_lr=%.2e",
+                    step, running_ce / n, running_mse / n, running_coh / n, cipher_lr, body_lr,
                 )
-                running_ce = running_mse = 0.0
+                running_ce = running_mse = running_coh = 0.0
 
             if cfg.phase1_diag_every > 0 and step % cfg.phase1_diag_every == 0:
                 self._run_diagnostics(step)

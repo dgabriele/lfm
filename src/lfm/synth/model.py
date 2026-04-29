@@ -91,18 +91,37 @@ class SynthLM(nn.Module):
         d = backend.d_model
         self.projector = PrefixProjector(config.source_embedding_dim, d, config.n_prefix_tokens)
         self.length_head = LengthHead(config.source_embedding_dim)
+        # Phase 1 coherence (RTD) discriminator: per-position "is this token a
+        # corruption?" binary classifier. Trained jointly with LM CE so the body
+        # learns within-sentence coherence features alongside next-token statistics.
+        self.coherence_head = nn.Linear(d, 1).to(backend.dtype)
 
     # ── Phase 1 ───────────────────────────────────────────────────────────────
 
     def forward_phase1(
-        self, alien_ids: Tensor, alien_labels: Tensor
-    ) -> tuple[Tensor, Tensor]:
-        """Causal LM on alien token sequence.
+        self,
+        alien_ids: Tensor,
+        alien_labels: Tensor,
+        replace_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Causal LM on alien token sequence with optional coherence (RTD) loss.
+
+        Args:
+            alien_ids: (B, T) input ids — may contain corruption (random tokens
+                substituted at some positions). Length T includes the trailing
+                target position.
+            alien_labels: (B, T) clean labels with -100 at pad positions. Used as
+                the LM target for predict-next-token.
+            replace_mask: optional (B, T-1) {0,1} float mask matching alien_ids[:, :-1];
+                1.0 at positions where the input token was replaced. When provided,
+                the coherence head is trained to detect corruption.
 
         Returns:
             ce_loss:  cross-entropy over non-pad positions.
             mse_loss: MSE between current and frozen reference body hidden states
                       (zero tensor if no reference body was initialised).
+            coh_loss: BCE on per-position corruption detection (zero tensor if no
+                      replace_mask provided).
         """
         inputs_embeds = self.backend.embed_alien(alien_ids[:, :-1])
         hidden = self.backend.forward_hidden(inputs_embeds)
@@ -115,7 +134,16 @@ class SynthLM(nn.Module):
             mse_loss = F.mse_loss(hidden, ref_hidden)
         else:
             mse_loss = ce_loss.new_zeros(())
-        return ce_loss, mse_loss
+        if replace_mask is not None:
+            coh_logits = self.coherence_head(hidden).squeeze(-1)  # (B, T-1)
+            valid = (alien_labels[:, 1:] != -100).float()
+            coh_loss = F.binary_cross_entropy_with_logits(
+                coh_logits.float(), replace_mask.float(),
+                weight=valid, reduction="sum",
+            ) / valid.sum().clamp(min=1)
+        else:
+            coh_loss = ce_loss.new_zeros(())
+        return ce_loss, mse_loss, coh_loss
 
     def phase1_logits(self, alien_ids: Tensor) -> Tensor:
         """Teacher-forced alien logits for diagnostics. (B, T-1, V)"""

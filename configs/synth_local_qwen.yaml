@@ -20,6 +20,8 @@ phase1_lr_min: 0.00003        # cosine decay endpoint
 phase1_lr_schedule: cosine
 phase1_body_warmup_steps: 3000  # body frozen for first 3K steps; alien_emb/head settle on frozen Qwen
 phase1_hidden_mse_weight: 0.01
+phase1_coherence_weight: 0.1            # RTD discriminator weight (0 = off)
+phase1_coherence_replace_frac: 0.10     # fraction of input tokens corrupted per batch
 phase1_steps: 50000
 phase1_max_len: 80
 phase1_filter_truncated: true   # drop sentences whose tokenisation exceeds max_len (no truncated samples)

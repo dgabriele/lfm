@@ -25,6 +25,8 @@ class SynthConfig(BaseModel):
     phase1_lr_schedule: str = "constant" # "constant" or "cosine"
     phase1_body_warmup_steps: int = 0    # body frozen for first N steps (0 = always trainable)
     phase1_hidden_mse_weight: float = 0.0
+    phase1_coherence_weight: float = 0.0     # weight for RTD coherence loss (0 = off)
+    phase1_coherence_replace_frac: float = 0.10  # fraction of input tokens to corrupt
     phase1_steps: int = 100_000
     phase1_max_len: int = 128
     phase1_filter_truncated: bool = False  # if True, drop sentences whose tokenisation > max_len
