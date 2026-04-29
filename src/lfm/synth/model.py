@@ -25,20 +25,46 @@ from lfm.synth.config import SynthConfig
 
 
 class PrefixProjector(nn.Module):
-    """Maps a source embedding to n_prefix decoder input embeddings."""
+    """Maps a source representation to n_prefix decoder input embeddings.
+
+    Supports two source formats:
+      - flat (B, source_dim): legacy mean-pool; projected via single MLP
+      - multi-position (B, n_source, source_dim): last_k_concat-style; each
+        source slot is projected with shared weights, preserving per-position
+        structure end-to-end (no compression bottleneck).
+    """
 
     def __init__(self, source_dim: int, d_model: int, n_prefix: int) -> None:
         super().__init__()
         self.n_prefix = n_prefix
+        self.source_dim = source_dim
+        self.d_model = d_model
+        # Shared per-position MLP — handles both flat and multi-position inputs.
         self.proj = nn.Sequential(
             nn.Linear(source_dim, d_model),
             nn.GELU(),
-            nn.Linear(d_model, d_model * n_prefix),
+            nn.Linear(d_model, d_model),
         )
+        # When source is flat (mean-pool legacy), expand to n_prefix tokens.
+        self.expand = nn.Linear(d_model, d_model * n_prefix)
 
-    def forward(self, embedding: Tensor) -> Tensor:
-        """(B, source_dim) → (B, n_prefix, d_model)"""
-        return self.proj(embedding).view(embedding.size(0), self.n_prefix, -1)
+    def forward(self, source: Tensor) -> Tensor:
+        """source: (B, source_dim) or (B, n_source, source_dim) → (B, n_prefix, d_model).
+
+        Multi-position path requires n_source == n_prefix; the per-position MLP
+        is shared across slots and the source structure passes through directly.
+        """
+        if source.dim() == 3:
+            B, n_source, _ = source.shape
+            if n_source != self.n_prefix:
+                raise ValueError(
+                    f"multi-position source has n_source={n_source} but n_prefix={self.n_prefix}; "
+                    f"these must match for the per-position projection."
+                )
+            return self.proj(source)  # (B, n_prefix, d_model)
+        # Flat fallback (legacy mean-pool source).
+        x = self.proj(source)         # (B, d_model)
+        return self.expand(x).view(source.size(0), self.n_prefix, self.d_model)
 
 
 class LengthHead(nn.Module):

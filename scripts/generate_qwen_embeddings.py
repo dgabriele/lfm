@@ -71,11 +71,28 @@ def load_sentences(paths: list[str], n_samples: int) -> list[str]:
     return texts
 
 
-# ── mean pooling ──────────────────────────────────────────────────────────────
+# ── pooling strategies ───────────────────────────────────────────────────────
 
 def _mean_pool(hidden: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    """(B, T, D) → (B, D)"""
     mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
     return (hidden * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+
+
+def _last_k_concat(
+    hidden: torch.Tensor, attention_mask: torch.Tensor, k: int
+) -> torch.Tensor:
+    """(B, T, D) → (B, K, D). Take the last K non-pad positions per sequence.
+    For sequences shorter than K, the missing leading positions are padded
+    with zeros so the output retains a fixed (K, D) shape."""
+    B, T, D = hidden.shape
+    seq_lens = attention_mask.sum(dim=1).long()
+    out = torch.zeros(B, k, D, device=hidden.device, dtype=hidden.dtype)
+    for i in range(B):
+        L = int(seq_lens[i])
+        kk = min(k, L)
+        out[i, k - kk : k] = hidden[i, L - kk : L]
+    return out
 
 
 # ── pipeline threads ──────────────────────────────────────────────────────────
@@ -97,9 +114,13 @@ def _tokenizer(model_name: str, max_len: int, text_q: queue.Queue, tok_q: queue.
         tok_q.put((item, enc["input_ids"], enc["attention_mask"]))
 
 
-def _writer(out_dir: Path, n_samples: int, embed_dim: int, write_q: queue.Queue) -> None:
+def _writer(
+    out_dir: Path, n_samples: int, embed_shape: tuple, write_q: queue.Queue
+) -> None:
+    """embed_shape is the per-sample shape (e.g. (D,) for mean or (K, D) for last_k_concat)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    emb_map = np.memmap(out_dir / "embeddings.npy", dtype=np.float16, mode="w+", shape=(n_samples, embed_dim))
+    full_shape = (n_samples, *embed_shape)
+    emb_map = np.memmap(out_dir / "embeddings.npy", dtype=np.float16, mode="w+", shape=full_shape)
     written = 0
     with (out_dir / "passages.jsonl").open("w", buffering=1 << 20) as jf:
         while True:
@@ -115,7 +136,7 @@ def _writer(out_dir: Path, n_samples: int, embed_dim: int, write_q: queue.Queue)
             if written % 50_000 == 0:
                 logger.info("written %d / %d", written, n_samples)
     emb_map.flush()
-    logger.info("embeddings → %s  shape=(%d, %d)", out_dir / "embeddings.npy", n_samples, embed_dim)
+    logger.info("embeddings → %s  shape=%s", out_dir / "embeddings.npy", full_shape)
     logger.info("passages   → %s  (%d lines)", out_dir / "passages.jsonl", written)
 
 
@@ -129,8 +150,14 @@ def main(args: argparse.Namespace) -> None:
     logger.info("encoding %d sentences with %s", n_samples, args.model_name)
 
     model = AutoModel.from_pretrained(args.model_name, torch_dtype=torch.float16).to(device).eval()
-    embed_dim = model.config.hidden_size
-    logger.info("embed_dim=%d  device=%s", embed_dim, device)
+    d_model = model.config.hidden_size
+    if args.pool == "mean":
+        embed_shape: tuple = (d_model,)
+    elif args.pool == "last_k_concat":
+        embed_shape = (args.last_k, d_model)
+    else:
+        raise ValueError(f"unknown pool: {args.pool}")
+    logger.info("pool=%s  per_sample_shape=%s  device=%s", args.pool, embed_shape, device)
 
     out_dir = Path(args.output_dir)
     text_q:  queue.Queue = queue.Queue(maxsize=8)
@@ -139,7 +166,7 @@ def main(args: argparse.Namespace) -> None:
 
     threading.Thread(target=_reader,    args=(texts, args.batch_size, text_q),               daemon=True).start()
     threading.Thread(target=_tokenizer, args=(args.model_name, args.max_len, text_q, tok_q), daemon=True).start()
-    writer_t = threading.Thread(target=_writer, args=(out_dir, n_samples, embed_dim, write_q), daemon=True)
+    writer_t = threading.Thread(target=_writer, args=(out_dir, n_samples, embed_shape, write_q), daemon=True)
     writer_t.start()
 
     processed = 0
@@ -149,13 +176,23 @@ def main(args: argparse.Namespace) -> None:
             if item is _SENTINEL:
                 break
             texts_batch, input_ids, attention_mask = item
+            mask = attention_mask.to(device)
             hidden = model(
                 input_ids=input_ids.to(device),
-                attention_mask=attention_mask.to(device),
+                attention_mask=mask,
             ).last_hidden_state
-            emb = _mean_pool(hidden, attention_mask.to(device))
-            if args.normalize:
-                emb = torch.nn.functional.normalize(emb, dim=-1)
+            if args.pool == "mean":
+                emb = _mean_pool(hidden, mask)
+                if args.normalize:
+                    emb = torch.nn.functional.normalize(emb, dim=-1)
+            else:  # last_k_concat
+                emb = _last_k_concat(hidden, mask, args.last_k)  # (B, K, D)
+                if args.normalize:
+                    # Normalise the flattened (K*D,) vector so cosine in projector
+                    # input space corresponds to cosine on the concatenated source.
+                    flat = emb.reshape(emb.size(0), -1)
+                    flat = torch.nn.functional.normalize(flat, dim=-1)
+                    emb = flat.view_as(emb)
             write_q.put((texts_batch, emb.cpu().to(torch.float16).numpy()))
             processed += len(texts_batch)
 
@@ -174,4 +211,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-len",    type=int, default=128)
     parser.add_argument("--device",     default="cuda")
     parser.add_argument("--normalize",  action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--pool",       choices=["mean", "last_k_concat"], default="last_k_concat",
+                        help="Source pooling: mean-pool (legacy) or last K hidden states concatenated.")
+    parser.add_argument("--last-k",     type=int, default=8,
+                        help="K for last_k_concat pooling — number of trailing positions to keep.")
     main(parser.parse_args())

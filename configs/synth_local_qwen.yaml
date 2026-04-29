@@ -7,8 +7,8 @@ vocab_seed: 42
 
 base_model_name: Qwen/Qwen2.5-0.5B
 
-source_embedding_dim: 896    # Qwen2.5-0.5B mean-pool
-n_prefix_tokens: 8
+source_embedding_dim: 896    # per-position dim of last_k_concat source (Qwen2.5-0.5B hidden)
+n_prefix_tokens: 8           # also = K for last_k_concat (one prefix per source position)
 
 # Phase 1
 phase1_dataset_dir: data/embeddings_qwen/passages.jsonl
