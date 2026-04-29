@@ -19,11 +19,15 @@ class SynthConfig(BaseModel):
     phase1_dataset_dir: str = ""
     phase1_batch_size: int = 32
     phase1_grad_accum: int = 1
-    phase1_lr: float = 1e-4
-    phase1_body_lr: float = 3e-5
+    phase1_lr: float = 1e-4              # peak cipher_lr (alien_emb + alien_head)
+    phase1_body_lr: float = 3e-5         # peak body lr after warmup ends
+    phase1_lr_min: float = 0.0           # final lr at end of cosine decay (for both groups)
+    phase1_lr_schedule: str = "constant" # "constant" or "cosine"
+    phase1_body_warmup_steps: int = 0    # body frozen for first N steps (0 = always trainable)
     phase1_hidden_mse_weight: float = 0.0
     phase1_steps: int = 100_000
     phase1_max_len: int = 128
+    phase1_filter_truncated: bool = False  # if True, drop sentences whose tokenisation > max_len
     phase1_log_every: int = 500
     phase1_diag_every: int = 0
     phase1_checkpoint_every: int = 10_000

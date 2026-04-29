@@ -10,15 +10,19 @@ base_model_name: Qwen/Qwen2.5-0.5B
 source_embedding_dim: 896    # per-position dim of last_k_concat source (Qwen2.5-0.5B hidden)
 n_prefix_tokens: 8           # also = K for last_k_concat (one prefix per source position)
 
-# Phase 1
+# Phase 1 (v2: cosine schedule + body warmup + filtered corpus + max_len 80)
 phase1_dataset_dir: data/embeddings_qwen/passages.jsonl
 phase1_batch_size: 16
 phase1_grad_accum: 4
-phase1_lr: 0.0003
-phase1_body_lr: 0.00003
+phase1_lr: 0.0005             # peak cipher_lr; cosine-decayed to phase1_lr_min
+phase1_body_lr: 0.00003       # peak body lr after warmup; cosine-decayed
+phase1_lr_min: 0.00003        # cosine decay endpoint
+phase1_lr_schedule: cosine
+phase1_body_warmup_steps: 3000  # body frozen for first 3K steps; alien_emb/head settle on frozen Qwen
 phase1_hidden_mse_weight: 0.01
 phase1_steps: 50000
-phase1_max_len: 64
+phase1_max_len: 80
+phase1_filter_truncated: true   # drop sentences whose tokenisation exceeds max_len (no truncated samples)
 phase1_log_every: 200
 phase1_diag_every: 1000
 phase1_checkpoint_every: 2000

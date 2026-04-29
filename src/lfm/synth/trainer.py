@@ -14,6 +14,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import math
 import os
 import random
 from pathlib import Path
@@ -55,6 +56,31 @@ def _iter_raw_sentences(dataset_path: str, shuffle: bool = True, seed: int = 42)
         idx += 1
         if shuffle and idx % n == 0:
             rng.shuffle(raws)
+
+
+def _load_all_sentences(dataset_path: str) -> list[str]:
+    """Load every sentence from the corpus into memory (no shuffle, no loop)."""
+    path = Path(dataset_path)
+    if path.is_dir():
+        with h5py.File(path / "samples.h5", "r") as f:
+            return [x.decode("utf-8") if isinstance(x, bytes) else x for x in f["samples"]["raw"][:]]
+    if path.suffix == ".jsonl":
+        return [json.loads(l)["text"] for l in path.read_text().splitlines() if l.strip()]
+    return [l.strip() for l in path.read_text().splitlines() if l.strip()]
+
+
+def _iter_in_memory(items: list[str], shuffle: bool, seed: int) -> Iterator[str]:
+    """Cycle through an in-memory list indefinitely with optional reshuffle each pass."""
+    rng = random.Random(seed)
+    pool = list(items)
+    if shuffle:
+        rng.shuffle(pool)
+    idx, n = 0, len(pool)
+    while True:
+        yield pool[idx % n]
+        idx += 1
+        if shuffle and idx % n == 0:
+            rng.shuffle(pool)
 
 
 def _load_store(store_dir: str) -> tuple[np.ndarray, list[str]]:
@@ -103,17 +129,57 @@ class AlienLMTrainer:
         ])
         self.mse_weight = config.phase1_hidden_mse_weight
         self.grad_accum = max(1, config.phase1_grad_accum)
+        self.warmup_steps = max(0, config.phase1_body_warmup_steps)
+        self._body_frozen = False  # mirrors the actual freeze state of the body
         logger.info(
             "AlienLMTrainer  model=%s  batch=%d×%d  cipher_lr=%g  body_lr=%g  "
-            "mse_weight=%g  steps=%d  max_len=%d  diag_every=%d  device=%s  out=%s",
+            "lr_min=%g  lr_schedule=%s  body_warmup=%d  mse_weight=%g  steps=%d  "
+            "max_len=%d  filter_truncated=%s  diag_every=%d  device=%s  out=%s",
             config.base_model_name, config.phase1_batch_size, self.grad_accum,
-            config.phase1_lr, config.phase1_body_lr, self.mse_weight,
-            config.phase1_steps, config.phase1_max_len, config.phase1_diag_every,
-            config.device, config.output_dir,
+            config.phase1_lr, config.phase1_body_lr, config.phase1_lr_min,
+            config.phase1_lr_schedule, self.warmup_steps, self.mse_weight,
+            config.phase1_steps, config.phase1_max_len, config.phase1_filter_truncated,
+            config.phase1_diag_every, config.device, config.output_dir,
         )
         self._diag_sentences = list(itertools.islice(
             _iter_raw_sentences(config.phase1_dataset_dir, shuffle=True, seed=0), self._DIAG_N,
         ))
+
+    def _scheduled_lr(self, step: int, peak_lr: float) -> float:
+        """Cosine decay from peak_lr to phase1_lr_min over phase1_steps. Constant if disabled."""
+        cfg = self.config
+        if cfg.phase1_lr_schedule != "cosine":
+            return peak_lr
+        progress = min(1.0, step / max(cfg.phase1_steps, 1))
+        return cfg.phase1_lr_min + 0.5 * (peak_lr - cfg.phase1_lr_min) * (1 + math.cos(math.pi * progress))
+
+    def _apply_schedule(self, step: int) -> tuple[float, float]:
+        """Set per-group LRs and freeze/unfreeze body to match warmup phase.
+
+        Freezing the body (requires_grad=False) during warmup avoids allocating
+        gradient and Adam-state memory for the body — important on tight VRAM.
+        """
+        in_warmup = step < self.warmup_steps
+        if in_warmup and not self._body_frozen:
+            self.model.backend.freeze_body()
+            self._body_frozen = True
+            logger.info("body FROZEN at step %d (warmup until step %d)", step, self.warmup_steps)
+        elif not in_warmup and self._body_frozen:
+            self.model.backend.unfreeze_body()
+            self._body_frozen = False
+            logger.info("body UNFROZEN at step %d", step)
+        cipher_lr = self._scheduled_lr(step, self.config.phase1_lr)
+        body_lr = 0.0 if in_warmup else self._scheduled_lr(step, self.config.phase1_body_lr)
+        self.opt.param_groups[0]["lr"] = cipher_lr
+        self.opt.param_groups[1]["lr"] = body_lr
+        return cipher_lr, body_lr
+
+    def _filter_truncated(self, sentences: list[str]) -> list[str]:
+        """Drop sentences whose cipher tokenisation would exceed phase1_max_len."""
+        ml = self.config.phase1_max_len
+        cipher_texts = self.cipher.encode_batch(sentences)
+        encs = self.alien_tok(cipher_texts, padding=False, truncation=False, add_special_tokens=True)["input_ids"]
+        return [s for s, ids in zip(sentences, encs) if len(ids) <= ml]
 
     def _make_batch(self, sentences: list[str]) -> dict[str, torch.Tensor]:
         dec = self.alien_tok(
@@ -220,26 +286,58 @@ class AlienLMTrainer:
         self.model.to(self.device).train()
         self.model.backend.move_reference_to(self.device, self.model.backend.dtype)
 
-        data = _iter_raw_sentences(cfg.phase1_dataset_dir, seed=cfg.seed)
-        for _ in range(start_step * cfg.phase1_batch_size):
+        # Build the training corpus once. If filter_truncated is set, drop any
+        # sentence whose tokenised form would exceed max_len — keeps every batch
+        # composed of naturally-terminating samples (no truncation artefacts).
+        if cfg.phase1_filter_truncated:
+            all_sents = _load_all_sentences(cfg.phase1_dataset_dir)
+            n_before = len(all_sents)
+            logger.info("filtering corpus by tokenised length ≤ %d (%d sentences)...", cfg.phase1_max_len, n_before)
+            filtered: list[str] = []
+            chunk = 1024
+            for i in range(0, n_before, chunk):
+                filtered.extend(self._filter_truncated(all_sents[i : i + chunk]))
+            logger.info("kept %d / %d sentences (%.1f%%)", len(filtered), n_before, 100 * len(filtered) / max(n_before, 1))
+            data = _iter_in_memory(filtered, shuffle=True, seed=cfg.seed)
+        else:
+            data = _iter_raw_sentences(cfg.phase1_dataset_dir, seed=cfg.seed)
+
+        for _ in range(start_step * cfg.phase1_batch_size * self.grad_accum):
             next(data)
 
         step, running_ce, running_mse = start_step, 0.0, 0.0
 
         while step < cfg.phase1_steps:
-            self.opt.zero_grad()
-            accum_ce = accum_mse = 0.0
-            for _ in range(self.grad_accum):
-                batch = self._make_batch([next(data) for _ in range(cfg.phase1_batch_size)])
-                ce, mse = self.model.forward_phase1(**batch)
-                total = (ce + self.mse_weight * mse) / self.grad_accum
-                total.backward()
-                accum_ce += ce.item() / self.grad_accum
-                accum_mse += mse.item() / self.grad_accum
-            torch.nn.utils.clip_grad_norm_(
-                self.model.backend.cipher_params() + self.model.backend.body_params(), 1.0
-            )
-            self.opt.step()
+            cipher_lr, body_lr = self._apply_schedule(step)
+            try:
+                self.opt.zero_grad()
+                accum_ce = accum_mse = 0.0
+                for _ in range(self.grad_accum):
+                    batch = self._make_batch([next(data) for _ in range(cfg.phase1_batch_size)])
+                    ce, mse = self.model.forward_phase1(**batch)
+                    total = (ce + self.mse_weight * mse) / self.grad_accum
+                    total.backward()
+                    accum_ce += ce.item() / self.grad_accum
+                    accum_mse += mse.item() / self.grad_accum
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.backend.cipher_params() + self.model.backend.body_params(), 1.0
+                )
+                self.opt.step()
+            except torch.cuda.OutOfMemoryError as e:
+                logger.warning("CUDA OOM at step %d (cipher_lr=%g body_lr=%g): %s", step, cipher_lr, body_lr, e)
+                torch.cuda.empty_cache()
+                # If micro-batch is already at 4, give up — the user must intervene.
+                if cfg.phase1_batch_size <= 4:
+                    raise
+                new_bs = max(4, cfg.phase1_batch_size // 2)
+                new_accum = self.grad_accum * (cfg.phase1_batch_size // new_bs)
+                logger.warning("OOM recovery: batch %d → %d, grad_accum %d → %d (effective batch unchanged)",
+                               cfg.phase1_batch_size, new_bs, self.grad_accum, new_accum)
+                # Mutate config in-memory; persists for the rest of the run.
+                object.__setattr__(cfg, "phase1_batch_size", new_bs)
+                self.grad_accum = new_accum
+                continue  # retry this step with the smaller batch
+
             running_ce += accum_ce
             running_mse += accum_mse
             step += 1
@@ -247,8 +345,8 @@ class AlienLMTrainer:
             if step % cfg.phase1_log_every == 0:
                 n = cfg.phase1_log_every
                 logger.info(
-                    "phase1 step=%d  ce=%.4f  mse=%.6f",
-                    step, running_ce / n, running_mse / n,
+                    "phase1 step=%d  ce=%.4f  mse=%.6f  cipher_lr=%.2e  body_lr=%.2e",
+                    step, running_ce / n, running_mse / n, cipher_lr, body_lr,
                 )
                 running_ce = running_mse = 0.0
 
