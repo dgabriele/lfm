@@ -54,27 +54,38 @@ mse_weight=0.01, 8K BPE vocab.
 - ce=3.48, lm_acc=0.412, entropy=4.66, rep_rate=0.040
 - body_cos=0.78, body_rel_rmse=0.60 (stable from ~step 10K onward)
 
-### v2 hyperparameter improvements (in flight, started 2026-04-29 04:58)
-Three changes, all empirically motivated by v1's training trajectory:
-1. **Frozen-body warmup (3K steps)**: alien_emb + alien_head settle on the
-   pretrained Qwen geometry while body stays at `requires_grad=False`. Saves
-   ~4GB VRAM during warmup (no body grads, no body Adam state). Prevents
-   the body from adapting to *random* alien_emb during the first epoch.
-2. **Cosine LR schedule**: cipher_lr decays 5e-4 → 3e-5 over 50K steps
-   (16× decay). Final convergence stage actually converges instead of
-   plateauing at constant peak LR.
-3. **max_len 64 → 80 + filter truncated**: bumped max_len so longer
-   sentences fit naturally; sentences whose tokenisation exceeds 80 are
-   dropped from training (kept 984284/1M = 98.4%). No more CE bias from
-   truncated samples.
+### v2 hyperparameter tweaks (killed at step 21K, retained as `*_v2_inflight.pt`)
+- Frozen-body warmup (3K steps): alien_emb settles on frozen Qwen before joint
+  optimisation; saves ~4GB VRAM during warmup; preserves body geometry.
+- Cosine LR schedule (5e-4 → 3e-5 over 50K) replaces constant LR plateau.
+- max_len 64→80, filter sentences whose tokenisation exceeds max_len (no
+  truncation artefacts).
+- OOM auto-recovery: halve batch + double grad_accum on OOM.
 
-Early v2 metrics (steps 3000→4000, the moment after warmup ends):
-- ce dropped 5.79 → 4.56 (sharp; body adapting fast on settled alien_emb)
-- body_cos = 0.9023 vs v1's ~0.85 at same step → less drift retained
-- body_rel_rmse = 0.453 vs v1's higher at same step
+At step 17K: ce equal to v1 (3.69) but body_cos 0.88 vs v1's 0.78 — same LM
+quality, body geometry meaningfully better preserved.
 
-OOM auto-recovery added: on `torch.cuda.OutOfMemoryError`, halve batch
-and double grad_accum to preserve effective batch.
+### v3 cipher + objectives (active, started 2026-04-29 09:37)
+**Semantic-similarity-aware cipher** (DECISION-5): word_clusters.json maps
+each English word to a k-means cluster (2048 clusters, min_count=1) over
+Qwen contextual embeddings of "The {word}". Words in the same cluster have
+their first alien syllable drawn from a shared 31-syllable subset, so
+semantically similar English words share leading characters in alien form
+(red→hób, blue→hód, green→hód, orange→hód, purple→hód). BPE captures these
+as shared subword merges.
+
+**RTD (replaced token detection) auxiliary head** (DECISION-6 / Item 2 first
+half): per-position binary "was this token corrupted?" head trained jointly
+via BCE alongside LM CE. ~10% of input tokens corrupted per step. Direct
+within-sentence coherence pressure on the body. Coh loss 0.31 (random) →
+0.26 by step 6K, descending.
+
+**Termination-awareness head** (added at step 10K via --resume, 2026-04-29
+~11:30): per-position "EOS within next 5 tokens?" BCE classifier. Addresses
+the cross-architecture failure mode (multilingual VAE → dep tree VAE →
+current LM all share it) of generations rambling past natural sentence
+ends. Body learns "where am I in the arc of this sentence" — direct
+supervision for sentence completion that next-token CE doesn't provide.
 
 ### What it is (architecturally)
 Phase 1: pure causal next-token prediction on cipher-encoded English text.

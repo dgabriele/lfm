@@ -123,11 +123,12 @@ class AlienLMTrainer:
         self.alien_tok = alien_tokenizer
         self.device = torch.device(config.device)
         model.backend.unfreeze_body()
-        # cipher_params group includes the coherence head (small head trained
+        # cipher_params group includes the auxiliary heads (small heads trained
         # alongside alien_emb / alien_head at the same LR).
         cipher_group = (
             list(model.backend.cipher_params())
             + list(model.coherence_head.parameters())
+            + list(model.ending_head.parameters())
         )
         self.opt = AdamW([
             {"params": cipher_group,                  "lr": config.phase1_lr},
@@ -136,6 +137,8 @@ class AlienLMTrainer:
         self.mse_weight = config.phase1_hidden_mse_weight
         self.coh_weight = config.phase1_coherence_weight
         self.coh_frac = config.phase1_coherence_replace_frac
+        self.end_weight = config.phase1_ending_weight
+        self.end_window = max(1, config.phase1_ending_window)
         self.grad_accum = max(1, config.phase1_grad_accum)
         self.warmup_steps = max(0, config.phase1_body_warmup_steps)
         self._body_frozen = False  # mirrors the actual freeze state of the body
@@ -190,6 +193,22 @@ class AlienLMTrainer:
         self.opt.param_groups[0]["lr"] = cipher_lr
         self.opt.param_groups[1]["lr"] = body_lr
         return cipher_lr, body_lr
+
+    def _ending_mask(self, targets: torch.Tensor) -> torch.Tensor:
+        """For each target position i, label = 1.0 if EOS appears in
+        targets[i:i+window]. targets shape: (B, T'). Returns same-shape float mask.
+        Trains the body to know when termination is approaching, addressing the
+        cross-architecture failure mode of generations rambling past sentence end.
+        """
+        eos_id = self.alien_tok.eos_token_id
+        is_eos = (targets == eos_id).float()
+        B, T = is_eos.shape
+        pad = torch.zeros(B, self.end_window - 1, device=is_eos.device, dtype=is_eos.dtype)
+        extended = torch.cat([is_eos, pad], dim=1)         # (B, T + window - 1)
+        mask = is_eos.clone()
+        for w in range(1, self.end_window):
+            mask = torch.maximum(mask, extended[:, w : w + T])
+        return mask
 
     def _corrupt_for_rtd(
         self, alien_ids: torch.Tensor
@@ -340,33 +359,41 @@ class AlienLMTrainer:
         for _ in range(start_step * cfg.phase1_batch_size * self.grad_accum):
             next(data)
 
-        step, running_ce, running_mse, running_coh = start_step, 0.0, 0.0, 0.0
+        step, running_ce, running_mse, running_coh, running_end = start_step, 0.0, 0.0, 0.0, 0.0
 
         while step < cfg.phase1_steps:
             cipher_lr, body_lr = self._apply_schedule(step)
             try:
                 self.opt.zero_grad()
-                accum_ce = accum_mse = accum_coh = 0.0
+                accum_ce = accum_mse = accum_coh = accum_end = 0.0
                 for _ in range(self.grad_accum):
                     batch = self._make_batch([next(data) for _ in range(cfg.phase1_batch_size)])
+                    targets = batch["alien_labels"][:, 1:]
+                    end_mask = self._ending_mask(targets) if self.end_weight > 0 else None
                     if self.coh_weight > 0:
                         # Corrupt input for RTD; LM target stays clean (denoising-LM flavour).
                         corrupted, replace_mask = self._corrupt_for_rtd(batch["alien_ids"])
-                        ce, mse, coh = self.model.forward_phase1(
+                        ce, mse, coh, end = self.model.forward_phase1(
                             alien_ids=corrupted,
                             alien_labels=batch["alien_labels"],
                             replace_mask=replace_mask[:, :-1],
+                            ending_mask=end_mask,
                         )
                     else:
-                        ce, mse, coh = self.model.forward_phase1(**batch)
-                    total = (ce + self.mse_weight * mse + self.coh_weight * coh) / self.grad_accum
+                        ce, mse, coh, end = self.model.forward_phase1(
+                            **batch, ending_mask=end_mask,
+                        )
+                    total = (ce + self.mse_weight * mse + self.coh_weight * coh
+                             + self.end_weight * end) / self.grad_accum
                     total.backward()
                     accum_ce += ce.item() / self.grad_accum
                     accum_mse += mse.item() / self.grad_accum
                     accum_coh += coh.item() / self.grad_accum
+                    accum_end += end.item() / self.grad_accum
                 torch.nn.utils.clip_grad_norm_(
                     list(self.model.backend.cipher_params())
                     + list(self.model.coherence_head.parameters())
+                    + list(self.model.ending_head.parameters())
                     + list(self.model.backend.body_params()),
                     1.0,
                 )
@@ -389,15 +416,17 @@ class AlienLMTrainer:
             running_ce += accum_ce
             running_mse += accum_mse
             running_coh += accum_coh
+            running_end += accum_end
             step += 1
 
             if step % cfg.phase1_log_every == 0:
                 n = cfg.phase1_log_every
                 logger.info(
-                    "phase1 step=%d  ce=%.4f  mse=%.6f  coh=%.4f  cipher_lr=%.2e  body_lr=%.2e",
-                    step, running_ce / n, running_mse / n, running_coh / n, cipher_lr, body_lr,
+                    "phase1 step=%d  ce=%.4f  mse=%.6f  coh=%.4f  end=%.4f  cipher_lr=%.2e  body_lr=%.2e",
+                    step, running_ce / n, running_mse / n, running_coh / n, running_end / n,
+                    cipher_lr, body_lr,
                 )
-                running_ce = running_mse = running_coh = 0.0
+                running_ce = running_mse = running_coh = running_end = 0.0
 
             if cfg.phase1_diag_every > 0 and step % cfg.phase1_diag_every == 0:
                 self._run_diagnostics(step)
@@ -419,11 +448,25 @@ class AlienLMTrainer:
     def load_checkpoint(self, path: str) -> int:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
         self.model.load_phase1_state(ckpt["model"])
-        self.opt.load_state_dict(ckpt["optimizer"])
-        for state in self.opt.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.to(self.device)
+        # Optimizer state may not match if auxiliary heads have been added since
+        # this checkpoint was saved (e.g. resuming a v3 checkpoint into a v3.1
+        # model with a new ending_head). Skip optimizer state in that case —
+        # the body / alien_emb weights are preserved; Adam moment estimates
+        # will re-accumulate within a few hundred steps.
+        saved_n = sum(len(g["params"]) for g in ckpt["optimizer"]["param_groups"])
+        current_n = sum(len(g["params"]) for g in self.opt.param_groups)
+        if saved_n == current_n:
+            self.opt.load_state_dict(ckpt["optimizer"])
+            for state in self.opt.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(self.device)
+        else:
+            logger.warning(
+                "Optimizer param count mismatch (%d → %d); starting Adam state fresh "
+                "(model weights preserved; auxiliary heads will train from random init).",
+                saved_n, current_n,
+            )
         return ckpt["step"]
 
 

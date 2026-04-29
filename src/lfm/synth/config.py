@@ -27,6 +27,8 @@ class SynthConfig(BaseModel):
     phase1_hidden_mse_weight: float = 0.0
     phase1_coherence_weight: float = 0.0     # weight for RTD coherence loss (0 = off)
     phase1_coherence_replace_frac: float = 0.10  # fraction of input tokens to corrupt
+    phase1_ending_weight: float = 0.0        # weight for ending-soon termination loss (0 = off)
+    phase1_ending_window: int = 5            # lookahead window for "EOS within next K tokens"
     phase1_steps: int = 100_000
     phase1_max_len: int = 128
     phase1_filter_truncated: bool = False  # if True, drop sentences whose tokenisation > max_len

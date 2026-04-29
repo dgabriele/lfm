@@ -95,6 +95,13 @@ class SynthLM(nn.Module):
         # corruption?" binary classifier. Trained jointly with LM CE so the body
         # learns within-sentence coherence features alongside next-token statistics.
         self.coherence_head = nn.Linear(d, 1).to(backend.dtype)
+        # Phase 1 termination-awareness head: per-position "is EOS within the next
+        # `phase1_ending_window` tokens?" binary classifier. Trains the body to
+        # encode "where am I in the arc of this sentence" — directly addresses the
+        # rambling-generation failure mode where models drift past natural
+        # termination because next-token CE doesn't differentiate missing EOS from
+        # missing any other token.
+        self.ending_head = nn.Linear(d, 1).to(backend.dtype)
 
     # ── Phase 1 ───────────────────────────────────────────────────────────────
 
@@ -103,31 +110,20 @@ class SynthLM(nn.Module):
         alien_ids: Tensor,
         alien_labels: Tensor,
         replace_mask: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        """Causal LM on alien token sequence with optional coherence (RTD) loss.
+        ending_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Causal LM on alien token sequence with optional auxiliary losses.
 
-        Args:
-            alien_ids: (B, T) input ids — may contain corruption (random tokens
-                substituted at some positions). Length T includes the trailing
-                target position.
-            alien_labels: (B, T) clean labels with -100 at pad positions. Used as
-                the LM target for predict-next-token.
-            replace_mask: optional (B, T-1) {0,1} float mask matching alien_ids[:, :-1];
-                1.0 at positions where the input token was replaced. When provided,
-                the coherence head is trained to detect corruption.
-
-        Returns:
-            ce_loss:  cross-entropy over non-pad positions.
-            mse_loss: MSE between current and frozen reference body hidden states
-                      (zero tensor if no reference body was initialised).
-            coh_loss: BCE on per-position corruption detection (zero tensor if no
-                      replace_mask provided).
+        Returns (ce_loss, mse_loss, coh_loss, end_loss). Auxiliary losses are
+        zero tensors when their corresponding mask is None.
         """
         inputs_embeds = self.backend.embed_alien(alien_ids[:, :-1])
         hidden = self.backend.forward_hidden(inputs_embeds)
         logits = self.backend.alien_logits(hidden)  # (B, T-1, V)
+        targets = alien_labels[:, 1:]
+        valid = (targets != -100).float()
         ce_loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)), alien_labels[:, 1:].reshape(-1), ignore_index=-100
+            logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100
         )
         if self.backend.has_reference:
             ref_hidden = self.backend.reference_hidden(inputs_embeds)
@@ -135,15 +131,22 @@ class SynthLM(nn.Module):
         else:
             mse_loss = ce_loss.new_zeros(())
         if replace_mask is not None:
-            coh_logits = self.coherence_head(hidden).squeeze(-1)  # (B, T-1)
-            valid = (alien_labels[:, 1:] != -100).float()
+            coh_logits = self.coherence_head(hidden).squeeze(-1)
             coh_loss = F.binary_cross_entropy_with_logits(
                 coh_logits.float(), replace_mask.float(),
                 weight=valid, reduction="sum",
             ) / valid.sum().clamp(min=1)
         else:
             coh_loss = ce_loss.new_zeros(())
-        return ce_loss, mse_loss, coh_loss
+        if ending_mask is not None:
+            end_logits = self.ending_head(hidden).squeeze(-1)
+            end_loss = F.binary_cross_entropy_with_logits(
+                end_logits.float(), ending_mask.float(),
+                weight=valid, reduction="sum",
+            ) / valid.sum().clamp(min=1)
+        else:
+            end_loss = ce_loss.new_zeros(())
+        return ce_loss, mse_loss, coh_loss, end_loss
 
     def phase1_logits(self, alien_ids: Tensor) -> Tensor:
         """Teacher-forced alien logits for diagnostics. (B, T-1, V)"""
