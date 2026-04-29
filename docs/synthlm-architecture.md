@@ -73,7 +73,7 @@ SynthLM exploits this. We keep the transformer body and replace the vocabulary w
 **Example:**
 ```
 EN: The economy is growing rapidly this year
-AL: Hám zog sâz nã rùz fê lï bâj je wàr zéd pól sà kâ té vuk [EOS]
+AL: Hámzog sâznãrùz fê lïbâjje wàrzédpól sàkâ tévuk [EOS]
 ```
 
 The alien surface is fully opaque. A downstream LLM has no way to recognize it as English in disguise, which is the point.
@@ -139,9 +139,9 @@ scripts/
 Each line of the generated corpus is one alien sentence conditioned on one source embedding:
 
 ```
-Hám zog sâz nã rùz fê lï bâj je wàr zéd pól sà kâ té vuk
-Gôt sòj gà pam wãr húf píg hód sof hám zog hèr vàj hë
-Dò vèh fü mí nüv tìj gôt der gì wi mäb lá tá kãh kä lòs pev hí míz
+Hámzog sâznãrùz fê lïbâjje wàrzédpól sàkâ tévuk
+Gôt sòjgà pamwãr húfpíghód sof hámzog hèrvàjhë
+Dòvèhfü mínüvtìj gôt dergì wimäblá tá kãhkä lòspev hímíz
 ```
 
 Variable length. Function-word-like short tokens. Content-word-like 3-syllable clusters. Full sentence structure. The LLM pretraining target is next-token prediction on this corpus, exactly like any language model pretraining — the alien surface is the language being learned.

@@ -12,9 +12,10 @@ import random
 from pathlib import Path
 
 from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import WhitespaceSplit
+from tokenizers.models import BPE
+from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
+from tokenizers.trainers import BpeTrainer
 from transformers import PreTrainedTokenizerFast
 
 _CONSONANTS = list("bdfghjklmnprstvwz")
@@ -68,24 +69,32 @@ class AlienVocab:
     def syllables(self) -> list[str]:
         return list(self._syllables)
 
-    def build_tokenizer(self, words: list[str]) -> PreTrainedTokenizerFast:
-        """Build a HuggingFace WordLevel tokenizer over corpus-derived alien words.
+    def build_tokenizer(
+        self,
+        encoded_sentences: list[str],
+        vocab_size: int = 32_000,
+    ) -> PreTrainedTokenizerFast:
+        """Train a BPE tokenizer on cipher-encoded sentences.
 
         Args:
-            words: Sorted list of unique alien word types from the training corpus.
-                   Each word is a concatenation of 1-3 syllables as produced by
-                   WordCipher (e.g. 'sâznãrùz'). Must not include special tokens.
+            encoded_sentences: Cipher-encoded alien text (one sentence per entry),
+                               with words already concatenated (e.g. 'hámzog sâznãrùz').
+            vocab_size: BPE vocabulary size (controls alien_emb / alien_head dimensions).
         """
-        all_tokens = SPECIAL_TOKENS + PUNCT_TOKENS + words
-        vocab_dict = {tok: i for i, tok in enumerate(all_tokens)}
+        tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
+        tokenizer.pre_tokenizer = Whitespace()
+        trainer = BpeTrainer(
+            vocab_size=vocab_size,
+            special_tokens=SPECIAL_TOKENS,
+            show_progress=True,
+        )
+        tokenizer.train_from_iterator(encoded_sentences, trainer=trainer)
 
-        tok_model = WordLevel(vocab=vocab_dict, unk_token="[UNK]")
-        tokenizer = Tokenizer(tok_model)
-        tokenizer.pre_tokenizer = WhitespaceSplit()
-        # Append EOS to every sequence so the decoder learns the stop signal.
+        # Remap special token IDs to match our fixed constants.
+        # BpeTrainer assigns them in order of the special_tokens list → matches PAD=0..EOS=3.
         tokenizer.post_processor = TemplateProcessing(
             single="$A [EOS]",
-            special_tokens=[("[EOS]", EOS_ID)],
+            special_tokens=[("[EOS]", tokenizer.token_to_id("[EOS]"))],
         )
 
         return PreTrainedTokenizerFast(

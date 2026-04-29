@@ -95,6 +95,90 @@ PAIR_SETS: dict[str, list[tuple[str, str]]] = {
         ("Mary read the book carefully.",
          "Mary had read the book carefully."),
     ],
+    "negation": [
+        ("Daniel went to the store yesterday.",
+         "Daniel did not go to the store yesterday."),
+        ("The cat sleeps on the couch.",
+         "The cat does not sleep on the couch."),
+        ("Mary saw Tom at the meeting.",
+         "Mary did not see Tom at the meeting."),
+        ("Bob ate the entire cake by himself.",
+         "Bob did not eat the entire cake by himself."),
+    ],
+    "quantification": [
+        ("All the cats slept on the couch.",
+         "Some of the cats slept on the couch."),
+        ("Everyone in the room knew Daniel.",
+         "Nobody in the room knew Daniel."),
+        ("Every student finished the exam.",
+         "Few students finished the exam."),
+    ],
+    "modal_epistemic": [
+        ("Daniel went to the store yesterday.",
+         "Daniel might have gone to the store yesterday."),
+        ("Mary will arrive at the meeting tomorrow.",
+         "Mary may arrive at the meeting tomorrow."),
+        ("Bob fixed the broken window.",
+         "Bob could have fixed the broken window."),
+    ],
+    "voice_active_vs_passive": [
+        ("Daniel hit Bob during the meeting.",
+         "Bob was hit by Daniel during the meeting."),
+        ("The cat chased the dog through the yard.",
+         "The dog was chased by the cat through the yard."),
+        ("The chef cooked a magnificent dinner.",
+         "A magnificent dinner was cooked by the chef."),
+    ],
+    "number_plurality": [
+        ("The cat sleeps on the couch peacefully.",
+         "The cats sleep on the couch peacefully."),
+        ("A child entered the room quietly.",
+         "Children entered the room quietly."),
+        ("The student answered the question correctly.",
+         "The students answered the question correctly."),
+    ],
+    "comparative_degree": [
+        ("Daniel is tall and well respected.",
+         "Daniel is taller than Bob and well respected."),
+        ("The cake was good at the party.",
+         "The cake was the best at the party."),
+        ("Mary runs fast in the morning.",
+         "Mary runs faster than Tom in the morning."),
+    ],
+    "temporal_direction": [
+        ("Daniel arrived at the office before lunch.",
+         "Daniel arrived at the office after lunch."),
+        ("Before the meeting started, Bob spoke briefly.",
+         "After the meeting ended, Bob spoke briefly."),
+        ("The package was delivered before the deadline.",
+         "The package was delivered after the deadline."),
+    ],
+    "spatial_direction": [
+        ("Daniel walked to the store this morning.",
+         "Daniel walked from the store this morning."),
+        ("She ran into the room when she heard the noise.",
+         "She ran out of the room when she heard the noise."),
+        ("The bird flew toward the window.",
+         "The bird flew away from the window."),
+    ],
+    "causal_vs_temporal": [
+        ("Bob fell because Daniel pushed him.",
+         "Bob fell after Daniel pushed him."),
+        ("The lights went out because the storm hit.",
+         "The lights went out when the storm hit."),
+    ],
+    "conditional_vs_temporal": [
+        ("If Daniel goes to the meeting, Bob will follow.",
+         "When Daniel goes to the meeting, Bob will follow."),
+        ("If the rain stops, we can leave the house.",
+         "When the rain stops, we can leave the house."),
+    ],
+    "definiteness": [
+        ("The dog was barking at the neighbor.",
+         "A dog was barking at the neighbor."),
+        ("The book on the table is hers.",
+         "A book on the table is hers."),
+    ],
     "synonymy": [
         ("Bob hit Daniel after the meeting.",
          "Bob struck Daniel after the meeting."),
@@ -258,26 +342,46 @@ def layer1_probe(model_name: str, device: torch.device) -> None:
         row = f"  {label:<34s}" + "".join(f"{table[s][label]:>14.4f}" for s in strategies)
         print(row)
 
-    print("\n=== DERIVED METRICS (per pooling strategy) ===")
-    print("  spread          = unrelated_baseline distance from 1.0 (how far apart unrelated sentences are)")
-    print("  syn_recall      = synonymy similarity  (higher = recognises semantic equivalence)")
-    print("  role_split      = 1 - argument_role_swap (higher = distinguishes 'A hit B' from 'B hit A')")
-    print("  ref_split       = 1 - anaphora_vs_different_referent (higher = distinguishes 'he=Daniel' from 'he=Bob')")
-    print("  rel_score       = (role_split + ref_split) / 2 (composite relational sensitivity)")
-    print("  signal_to_noise = rel_score / (1 - syn_recall)  (relational signal scaled by semantic noise)")
+    print("\n=== PER-MECHANISM SENSITIVITY (1 - cosine_similarity, higher = more distinguishing) ===")
+    print("  Each row is a linguistic mechanism we want preserved in the source signal.")
+    print("  Compare against 'synonymy' (should be LOW — semantic invariance kept) and")
+    print("  'unrelated_baseline' (should be HIGH — unrelated sentences truly far apart).")
     print()
-    print(f"  {'strategy':<18s} {'spread':>9s} {'syn_recall':>11s} "
-          f"{'role_split':>11s} {'ref_split':>11s} {'rel_score':>11s} {'snr':>9s}")
-    print("  " + "-" * 86)
+    relational_cats = [
+        "anaphora_vs_repeated_name", "anaphora_vs_different_referent",
+        "argument_role_swap", "tense_change", "negation", "quantification",
+        "modal_epistemic", "voice_active_vs_passive", "number_plurality",
+        "comparative_degree", "temporal_direction", "spatial_direction",
+        "causal_vs_temporal", "conditional_vs_temporal", "definiteness",
+    ]
+    invariance_cats = ["synonymy"]
+    floor_cats = ["unrelated_baseline"]
+    header = f"  {'mechanism':<32s}" + "".join(f"{s:>14s}" for s in strategies)
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for cat in relational_cats:
+        row = f"  {cat:<32s}" + "".join(f"{1.0 - table[s][cat]:>14.4f}" for s in strategies)
+        print(row)
+    print()
+    print(f"  {'(invariance — should be LOW)':<32s}")
+    for cat in invariance_cats:
+        row = f"  {cat:<32s}" + "".join(f"{1.0 - table[s][cat]:>14.4f}" for s in strategies)
+        print(row)
+    print(f"  {'(unrelated floor — should be HIGH)':<32s}")
+    for cat in floor_cats:
+        row = f"  {cat:<32s}" + "".join(f"{1.0 - table[s][cat]:>14.4f}" for s in strategies)
+        print(row)
+
+    print("\n=== AGGREGATE SCORES (per pooling strategy) ===")
+    print(f"  {'strategy':<18s} {'mean_rel_split':>15s} {'syn_kept':>10s} {'unrel_floor':>12s} {'snr':>8s}")
+    print("  " + "-" * 70)
     for s in strategies:
-        spread = 1.0 - table[s]["unrelated_baseline"]
-        syn_recall = table[s]["synonymy"]
-        role_split = 1.0 - table[s]["argument_role_swap"]
-        ref_split = 1.0 - table[s]["anaphora_vs_different_referent"]
-        rel = (role_split + ref_split) / 2
-        snr = rel / max(1.0 - syn_recall, 1e-6)
-        print(f"  {s:<18s} {spread:>9.4f} {syn_recall:>11.4f} "
-              f"{role_split:>11.4f} {ref_split:>11.4f} {rel:>11.4f} {snr:>9.3f}")
+        rel_splits = [1.0 - table[s][c] for c in relational_cats]
+        mean_rel = float(np.mean(rel_splits))
+        syn_kept = table[s]["synonymy"]
+        unrel = 1.0 - table[s]["unrelated_baseline"]
+        snr = mean_rel / max(1.0 - syn_kept, 1e-6)
+        print(f"  {s:<18s} {mean_rel:>15.4f} {syn_kept:>10.4f} {unrel:>12.4f} {snr:>8.3f}")
 
 
 # ── Layer 2: anaphoric scaffolding probe ─────────────────────────────────────
