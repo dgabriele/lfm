@@ -47,9 +47,36 @@ SS could not fix a task that has no learnable structure beyond memorization.
 ## ARCH-2: Alien LM Phase 1 (current)
 
 **Status: ACTIVE**
-**Phase 1 result: loss 6.4→4.1 in 1800 steps; lm_acc=0.362 at step 2000**
 
-### What it is
+### v1 final (2026-04-28→29, baseline retained as `phase1_*_v1_baseline.pt`)
+50K steps, batch=16×4, max_len=64, constant LR (cipher 3e-4, body 3e-5),
+mse_weight=0.01, 8K BPE vocab.
+- ce=3.48, lm_acc=0.412, entropy=4.66, rep_rate=0.040
+- body_cos=0.78, body_rel_rmse=0.60 (stable from ~step 10K onward)
+
+### v2 hyperparameter improvements (in flight, started 2026-04-29 04:58)
+Three changes, all empirically motivated by v1's training trajectory:
+1. **Frozen-body warmup (3K steps)**: alien_emb + alien_head settle on the
+   pretrained Qwen geometry while body stays at `requires_grad=False`. Saves
+   ~4GB VRAM during warmup (no body grads, no body Adam state). Prevents
+   the body from adapting to *random* alien_emb during the first epoch.
+2. **Cosine LR schedule**: cipher_lr decays 5e-4 → 3e-5 over 50K steps
+   (16× decay). Final convergence stage actually converges instead of
+   plateauing at constant peak LR.
+3. **max_len 64 → 80 + filter truncated**: bumped max_len so longer
+   sentences fit naturally; sentences whose tokenisation exceeds 80 are
+   dropped from training (kept 984284/1M = 98.4%). No more CE bias from
+   truncated samples.
+
+Early v2 metrics (steps 3000→4000, the moment after warmup ends):
+- ce dropped 5.79 → 4.56 (sharp; body adapting fast on settled alien_emb)
+- body_cos = 0.9023 vs v1's ~0.85 at same step → less drift retained
+- body_rel_rmse = 0.453 vs v1's higher at same step
+
+OOM auto-recovery added: on `torch.cuda.OutOfMemoryError`, halve batch
+and double grad_accum to preserve effective batch.
+
+### What it is (architecturally)
 Phase 1: pure causal next-token prediction on cipher-encoded English text.
 Input: alien syllable tokens only — no English tokens anywhere.
 Body learns: "given alien token context, predict the next alien token."
