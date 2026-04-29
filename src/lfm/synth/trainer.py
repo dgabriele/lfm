@@ -151,6 +151,18 @@ class AlienLMTrainer:
                 alien_tokenizer.unk_token_id, alien_tokenizer.mask_token_id,
             ) if i is not None
         ], dtype=torch.long)
+        # Optional frequency-weighted replacement distribution for RTD: makes the
+        # corruption task harder by sampling plausible tokens (proportional to
+        # corpus frequency) rather than uniform random vocab. Built by
+        # scripts/build_token_frequency.py.
+        freq_path = Path(config.output_dir) / "token_frequencies.npy"
+        if freq_path.exists():
+            freqs = np.load(freq_path)
+            self._token_freqs: torch.Tensor | None = torch.from_numpy(freqs).float()
+            logger.info("RTD plausible-replacement enabled (token_frequencies.npy: %d nonzero / %d)",
+                        int((freqs > 0).sum()), len(freqs))
+        else:
+            self._token_freqs = None
         logger.info(
             "AlienLMTrainer  model=%s  batch=%d×%d  cipher_lr=%g  body_lr=%g  "
             "lr_min=%g  lr_schedule=%s  body_warmup=%d  mse_weight=%g  steps=%d  "
@@ -213,7 +225,12 @@ class AlienLMTrainer:
     def _corrupt_for_rtd(
         self, alien_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Replace a fraction of non-special tokens with random vocab tokens.
+        """Replace a fraction of non-special tokens with replacement tokens.
+
+        If ``token_frequencies.npy`` exists, replacement tokens are sampled from
+        the empirical corpus frequency distribution (plausible-replacement RTD —
+        harder discrimination task because replacements look statistically
+        normal). Otherwise replacements are uniform-random over the vocab.
 
         Returns:
             corrupted_ids: same shape as alien_ids, with some tokens replaced.
@@ -224,7 +241,12 @@ class AlienLMTrainer:
         is_special = (alien_ids.unsqueeze(-1) == special).any(dim=-1)
         rand = torch.rand_like(alien_ids, dtype=torch.float)
         replace = (rand < self.coh_frac) & ~is_special
-        rand_tokens = torch.randint(0, self._vocab_size, alien_ids.shape, device=device)
+        if self._token_freqs is not None:
+            freqs = self._token_freqs.to(device)
+            n = alien_ids.numel()
+            rand_tokens = torch.multinomial(freqs, num_samples=n, replacement=True).view_as(alien_ids)
+        else:
+            rand_tokens = torch.randint(0, self._vocab_size, alien_ids.shape, device=device)
         corrupted = torch.where(replace, rand_tokens, alien_ids)
         return corrupted, replace.float()
 
