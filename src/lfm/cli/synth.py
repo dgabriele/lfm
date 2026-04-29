@@ -62,7 +62,7 @@ class BuildVocabCommand(CLICommand):
 
         # Encode corpus with the cipher to produce BPE training data.
         print(f"Encoding {cfg.phase1_dataset_dir} for BPE training...")
-        cipher = WordCipher(vocab)
+        cipher = WordCipher.from_dirs(vocab, out_dir)
         dataset_path = Path(cfg.phase1_dataset_dir)
         if dataset_path.suffix == ".jsonl":
             texts = [json.loads(l)["text"] for l in dataset_path.read_text().splitlines() if l.strip()]
@@ -105,7 +105,7 @@ class TrainPhase1Command(CLICommand):
         vocab = AlienVocab.load(out_dir)
         alien_tok = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
         model = _build_model(cfg, alien_vocab_size=len(alien_tok))
-        trainer = AlienLMTrainer(model, cfg, WordCipher(vocab), alien_tok)
+        trainer = AlienLMTrainer(model, cfg, WordCipher.from_dirs(vocab, out_dir), alien_tok)
         start_step = 0
         if args.resume:
             start_step = trainer.load_checkpoint(args.resume)
@@ -145,7 +145,7 @@ class TrainPhase2Command(CLICommand):
         alien_tok = PreTrainedTokenizerFast.from_pretrained(str(out_dir / "alien_tokenizer"))
         model = _build_model(cfg, alien_vocab_size=len(alien_tok))
         model.load_phase1(args.phase1_checkpoint)
-        trainer = ConditioningTrainer(model, cfg, WordCipher(vocab), alien_tok)
+        trainer = ConditioningTrainer(model, cfg, WordCipher.from_dirs(vocab, out_dir), alien_tok)
         start_step = 0
         if args.resume:
             start_step = trainer.load_checkpoint(args.resume)

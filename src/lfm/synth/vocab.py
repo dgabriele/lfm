@@ -56,11 +56,15 @@ class AlienVocab:
         self._build()
 
     def _build(self) -> None:
-        rng = random.Random(self.seed)
+        # Generate syllables in (consonant, vowel) order — leading characters are
+        # contiguous in the syllable list. Combined with the cluster-pool cipher,
+        # this gives same-cluster English words visually similar alien-word first
+        # syllables (sharing leading consonant and vowel), which BPE then captures
+        # as shared subword tokens.
         cv  = [c + v for c in _CONSONANTS for v in _VOWELS]
         cvc = [c + v + c2 for c in _CONSONANTS for v in _VOWELS for c2 in _CONSONANTS]
-        rng.shuffle(cv)
-        rng.shuffle(cvc)
+        # Stable order: CV then CVC, both sorted by leading consonant, then vowel,
+        # then ending consonant for CVC.
         pool = list(dict.fromkeys(cv + cvc))
         n = self.vocab_size - len(SPECIAL_TOKENS) - len(PUNCT_TOKENS)
         self._syllables = pool[:n]
