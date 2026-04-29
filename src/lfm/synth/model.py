@@ -215,15 +215,22 @@ class SynthLM(nn.Module):
 
     def phase1_state(self) -> dict:
         return {
-            "alien_emb": self.backend._alien_emb.state_dict(),
-            "alien_head": self.backend._alien_head.state_dict(),
-            "body":       self.backend._body.state_dict(),
+            "alien_emb":       self.backend._alien_emb.state_dict(),
+            "alien_head":      self.backend._alien_head.state_dict(),
+            "body":            self.backend._body.state_dict(),
+            "coherence_head":  self.coherence_head.state_dict(),
+            "ending_head":     self.ending_head.state_dict(),
         }
 
     def load_phase1_state(self, state: dict) -> None:
         self.backend._alien_emb.load_state_dict(state["alien_emb"])
         self.backend._alien_head.load_state_dict(state["alien_head"])
         self.backend._body.load_state_dict(state["body"])
+        # Auxiliary heads added later — tolerate older checkpoints that lack them.
+        if "coherence_head" in state:
+            self.coherence_head.load_state_dict(state["coherence_head"])
+        if "ending_head" in state:
+            self.ending_head.load_state_dict(state["ending_head"])
 
     def phase2_state(self) -> dict:
         return {"projector": self.projector.state_dict(), "length_head": self.length_head.state_dict()}
