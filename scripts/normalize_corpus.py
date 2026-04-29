@@ -41,14 +41,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger(__name__)
 
 NER_TO_PLACEHOLDER = {
-    "MONEY":    "[MONEY]",
-    "PERCENT":  "[PERCENT]",
-    "DATE":     "[DATE]",
-    "TIME":     "[TIME]",
-    "CARDINAL": "[NUMBER]",
-    "ORDINAL":  "[ORDINAL]",
-    "QUANTITY": "[QUANTITY]",
+    "MONEY":    "moneyamount",
+    "PERCENT":  "percentvalue",
+    "DATE":     "dateexpression",
+    "TIME":     "timeexpression",
+    "CARDINAL": "numbervalue",
+    "ORDINAL":  "ordinalvalue",
+    "QUANTITY": "quantityvalue",
 }
+URL_PLACEHOLDER   = "weburl"
+EMAIL_PLACEHOLDER = "emailaddress"
 
 # spaCy doesn't reliably tag URLs/emails as entities; catch them with regex.
 URL_RE   = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
@@ -74,8 +76,8 @@ def normalize_text(text: str, doc) -> str:
     out.append(text[cursor:])
     text = "".join(out)
     # Order matters: emails contain @; URLs contain // — substitute both safely
-    text = URL_RE.sub("[URL]", text)
-    text = EMAIL_RE.sub("[EMAIL]", text)
+    text = URL_RE.sub(URL_PLACEHOLDER, text)
+    text = EMAIL_RE.sub(EMAIL_PLACEHOLDER, text)
     return text
 
 
@@ -106,7 +108,7 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     written = 0
-    counts = {ph: 0 for ph in set(NER_TO_PLACEHOLDER.values()) | {"[URL]", "[EMAIL]"}}
+    counts = {ph: 0 for ph in set(NER_TO_PLACEHOLDER.values()) | {URL_PLACEHOLDER, EMAIL_PLACEHOLDER}}
     with args.output.open("w") as out:
         for i, doc in enumerate(nlp.pipe(
             texts, batch_size=args.batch_size, n_process=args.n_process,

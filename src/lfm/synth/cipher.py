@@ -24,14 +24,7 @@ from pathlib import Path
 from lfm.synth.vocab import AlienVocab
 
 
-_PLACEHOLDER_NAMES = (
-    "MONEY", "PERCENT", "DATE", "TIME", "NUMBER",
-    "ORDINAL", "QUANTITY", "URL", "EMAIL",
-)
-_PLACEHOLDER_RE_FRAG = r"\[(?:" + "|".join(_PLACEHOLDER_NAMES) + r")\]"
-_WORD_RE = re.compile(
-    rf"{_PLACEHOLDER_RE_FRAG}|[A-Za-zÀ-ɏ]+|[^\w\s]|\s+", re.UNICODE,
-)
+_WORD_RE = re.compile(r"[A-Za-zÀ-ɏ]+|[^\w\s]|\s+", re.UNICODE)
 
 
 class WordCipher:
@@ -105,11 +98,6 @@ class WordCipher:
         parts: list[str] = []
         for tok in _WORD_RE.findall(sentence):
             if tok.isspace():
-                continue
-            # Pass NER placeholders through unchanged — tokenizer treats them
-            # as special tokens.
-            if tok.startswith("[") and tok.endswith("]") and len(tok) > 2:
-                parts.append(tok)
                 continue
             if not re.match(r"[A-Za-zÀ-ɏ]", tok):
                 parts.append(tok.strip())
