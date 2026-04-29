@@ -183,7 +183,9 @@ class AlienLMTrainer:
             generated = [seed_ids[0, 0].item()]
             for _ in range(self.config.phase1_max_len):
                 hidden  = self.model.backend.forward_hidden(context)
-                next_id = self.model.backend.alien_logits(hidden[:, -1:]).squeeze(1).argmax(-1)
+                logits  = self.model.backend.alien_logits(hidden[:, -1:]).squeeze(1)
+                probs   = torch.softmax(logits.float(), dim=-1)
+                next_id = torch.multinomial(probs, num_samples=1).squeeze(-1)
                 generated.append(next_id.item())
                 if next_id.item() == eos_id:
                     break
