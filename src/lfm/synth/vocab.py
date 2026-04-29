@@ -30,7 +30,13 @@ _VOWEL_VARIANTS: dict[str, list[str]] = {
 }
 _VOWELS = [v for variants in _VOWEL_VARIANTS.values() for v in variants]
 
-SPECIAL_TOKENS = ["[PAD]", "[UNK]", "[BOS]", "[EOS]", "[SEP]", "[MASK]"]
+SPECIAL_TOKENS = [
+    "[PAD]", "[UNK]", "[BOS]", "[EOS]", "[SEP]", "[MASK]",
+    # NER placeholders — corpus is normalised before cipher encoding so these
+    # appear as literal strings; tokenizer keeps them as single units.
+    "[MONEY]", "[PERCENT]", "[DATE]", "[TIME]",
+    "[NUMBER]", "[ORDINAL]", "[QUANTITY]", "[URL]", "[EMAIL]",
+]
 PUNCT_TOKENS = list('.,!?;:"-()[]{}')
 
 PAD_ID  = 0
