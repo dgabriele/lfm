@@ -129,9 +129,16 @@ class CausalDecoderBackend(DecoderBackend):
         return self._alien_emb(alien_ids)
 
     def forward_hidden(
-        self, inputs_embeds: Tensor, attention_mask: Tensor | None = None
-    ) -> Tensor:
-        return self._body(inputs_embeds=inputs_embeds, attention_mask=attention_mask).last_hidden_state
+        self, inputs_embeds: Tensor, attention_mask: Tensor | None = None,
+        past_key_values=None, use_cache: bool = False,
+    ):
+        out = self._body(
+            inputs_embeds=inputs_embeds, attention_mask=attention_mask,
+            past_key_values=past_key_values, use_cache=use_cache,
+        )
+        if use_cache:
+            return out.last_hidden_state, out.past_key_values
+        return out.last_hidden_state
 
     def alien_logits(self, hidden: Tensor) -> Tensor:
         return self._alien_head(hidden)

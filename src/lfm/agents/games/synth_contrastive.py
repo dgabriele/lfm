@@ -350,6 +350,45 @@ class SynthContrastiveGame(nn.Module):
             probs=probs_seq,
         )
 
+    @torch.no_grad()
+    def generate(self, anchor: Tensor) -> tuple[Tensor, Tensor]:
+        """Inference-only AR generation with KV caching.
+
+        Same sampling/blocking as ``_generate_round_trip``'s AR loop but uses
+        ``past_key_values`` so each step is O(1) in sequence length, and
+        skips the grad-flowing re-encode + probs computation entirely.
+
+        Returns ``(token_ids, valid_mask)`` shaped ``(B, S)``.
+        """
+        B = anchor.size(0)
+        device = anchor.device
+        backend = self.synth_lm.backend
+
+        prefix = self.synth_lm.projector(anchor).to(backend.dtype)
+        hidden, past = backend.forward_hidden(prefix, use_cache=True)
+
+        gen_ids: list[Tensor] = []
+        done = torch.zeros(B, dtype=torch.bool, device=device)
+        temp = max(self.config.generation_temperature, 1e-6)
+        for t in range(self.config.max_gen_len):
+            logits = backend.alien_logits(hidden[:, -1:]).squeeze(1)
+            logits = self._apply_blockers(logits.unsqueeze(1), gen_ids, t).squeeze(1)
+            if self.config.generation_temperature == 0:
+                next_id = logits.argmax(dim=-1)
+            else:
+                next_id = torch.multinomial(F.softmax(logits / temp, dim=-1), 1).squeeze(-1)
+            gen_ids.append(next_id)
+            done = done | (next_id == self._eos_id)
+            if done.all():
+                break
+            next_emb = backend.embed_alien(next_id.unsqueeze(1))
+            hidden, past = backend.forward_hidden(
+                next_emb, past_key_values=past, use_cache=True,
+            )
+
+        token_ids = torch.stack(gen_ids, dim=1)
+        return token_ids, self._build_valid_mask(token_ids)
+
     def _build_valid_mask(self, token_ids: Tensor) -> Tensor:
         """Mark positions up to and including the first EOS; 0 after."""
         is_eos = token_ids == self._eos_id
