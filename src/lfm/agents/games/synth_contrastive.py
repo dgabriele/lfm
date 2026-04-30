@@ -194,24 +194,50 @@ class SynthContrastiveGame(nn.Module):
 
     def forward(
         self,
-        anchor: Tensor,           # (B, n_source, source_dim) — last_k_concat source emb
-        distractors: Tensor,      # (B, K, n_source, source_dim) — K distractor sources
+        anchor: Tensor,                              # (B, [n_source,] source_dim) — flat or multi-position
+        distractors: Tensor,                         # (B, K, [n_source,] source_dim)
         *,
         step: int = 0,
+        candidate_indices: Tensor | None = None,    # accepted for AgentTrainer compatibility; unused here
     ) -> dict[str, Tensor]:
+        del candidate_indices
         ratio = self._distractor_curriculum_ratio(step)
         n_dist = int(round(ratio * distractors.size(1)))
         active_distractors = distractors[:, :n_dist] if n_dist > 0 else None
 
         expr = self._generate_round_trip(anchor)
-        terms = self._compute_loss_terms(expr, anchor, active_distractors)
+        terms, contrastive_logits = self._compute_loss_terms(expr, anchor, active_distractors)
         total = self._aggregate(terms)
 
-        out = {"loss": total, **terms,
-               "n_distractors": torch.tensor(float(n_dist), device=total.device)}
-        out["token_ids"] = expr.token_ids
-        out["valid_mask"] = expr.valid_mask
+        # Accuracy: argmax over (B + n_dist) candidates matches the diagonal
+        target_idx = torch.arange(contrastive_logits.size(0), device=contrastive_logits.device)
+        accuracy = (contrastive_logits.argmax(dim=1) == target_idx).float().mean()
+
+        # Generation diversity diagnostic — anti-collapse signal
+        ttr = self._batch_ttr(expr.token_ids, expr.valid_mask)
+
+        out = {
+            "loss":            total,
+            "accuracy":        accuracy,
+            "ttr":             ttr,
+            **terms,
+            "n_distractors":   torch.tensor(float(n_dist), device=total.device),
+        }
+        # Internal (prefixed _) tensors aren't logged by AgentTrainer
+        out["_token_ids"] = expr.token_ids
+        out["_valid_mask"] = expr.valid_mask
         return out
+
+    @staticmethod
+    def _batch_ttr(token_ids: Tensor, valid_mask: Tensor) -> Tensor:
+        """Type-token ratio across the batch's valid generated tokens.
+        Anti-collapse diagnostic: low TTR means generations are repetitive
+        across the batch (the DepTreeVAE failure mode)."""
+        flat = token_ids[valid_mask]
+        if flat.numel() == 0:
+            return torch.zeros((), device=token_ids.device)
+        n_unique = torch.unique(flat).numel()
+        return torch.tensor(n_unique / flat.numel(), device=token_ids.device)
 
     # ─── round-trip generation ─────────────────────────────────────────────
 
@@ -248,7 +274,8 @@ class SynthContrastiveGame(nn.Module):
             hard_id = probs.argmax(dim=-1)                                # (B, 1)
             hard_onehot = F.one_hot(hard_id, self._vocab_size).float()
             st = (hard_onehot - probs).detach() + probs                   # (B, 1, V)
-            next_emb = (st @ self.synth_lm.backend._alien_emb.weight).to(context.dtype)
+            next_emb = (st.to(self.synth_lm.backend._alien_emb.weight.dtype)
+                        @ self.synth_lm.backend._alien_emb.weight).to(context.dtype)
             gen_embs.append(next_emb.squeeze(1))
             gen_ids.append(hard_id.squeeze(1))
             gen_probs.append(probs.squeeze(1))
@@ -309,12 +336,12 @@ class SynthContrastiveGame(nn.Module):
         expr: SynthExpressionOutput,
         anchor: Tensor,
         distractors: Tensor | None,
-    ) -> dict[str, Tensor]:
+    ) -> tuple[dict[str, Tensor], Tensor]:
         # Project alien_emb and source through trainable heads into message space
         msg_alien = self.message_head(expr.alien_emb)
         msg_source = self.target_proj(self._pool_source(anchor))
 
-        info_nce = self._info_nce(msg_alien, msg_source, distractors)
+        info_nce, logits = self._info_nce(msg_alien, msg_source, distractors)
         topology = 1.0 - F.cosine_similarity(msg_alien, msg_source, dim=-1).mean()
 
         # Bigram KL & adjacency diversity computed on probs over generated positions
@@ -338,7 +365,7 @@ class SynthContrastiveGame(nn.Module):
             "bigram_kl":       bigram_kl,
             "adj_diversity":   adj_diversity,
             "cross_diversity": cross_diversity,
-        }
+        }, logits
 
     def _pool_source(self, anchor: Tensor) -> Tensor:
         """Reduce (B, n_source, source_dim) → (B, source_dim) via mean over positions."""
@@ -351,8 +378,10 @@ class SynthContrastiveGame(nn.Module):
         msg_alien: Tensor,                  # (B, D)
         msg_source: Tensor,                 # (B, D)
         distractors: Tensor | None,         # (B, K, n_source, source_dim) or None
-    ) -> Tensor:
-        """Symmetric in-batch InfoNCE plus optional explicit distractors."""
+    ) -> tuple[Tensor, Tensor]:
+        """Symmetric in-batch InfoNCE plus optional explicit distractors.
+        Returns (loss, logits) where logits is the (B, B+K) score matrix
+        used for accuracy reporting (diagonal = correct match)."""
         msg_alien = F.normalize(msg_alien, dim=-1)
         msg_source = F.normalize(msg_source, dim=-1)
         temp = self.log_temperature.exp()
@@ -363,6 +392,7 @@ class SynthContrastiveGame(nn.Module):
         loss_a2s = F.cross_entropy(logits, labels)
         loss_s2a = F.cross_entropy(logits.t(), labels)
         loss = 0.5 * (loss_a2s + loss_s2a)
+        full_logits = logits
 
         if distractors is not None:
             # Add explicit distractors: each anchor i scores against its B-1
@@ -374,7 +404,7 @@ class SynthContrastiveGame(nn.Module):
             loss = loss + F.cross_entropy(full_logits, labels)
             loss = loss / 2.0
 
-        return loss
+        return loss, full_logits
 
     def _cross_batch_diversity_loss(self, expr: SynthExpressionOutput) -> Tensor:
         """Penalise low type-token ratio across batch's valid generated tokens.
