@@ -59,7 +59,7 @@ log_temperature_lr: 0.001
 
 log_every: 25
 checkpoint_every: 100
-output_dir: data/synth_contrastive_v2_local   # v2 = positional pool + multi-order n-gram KL
+output_dir: data/synth_contrastive_v3_local   # v3 = v2 + cluster-aware hard-negative ramp
 device: cuda
 seed: 42
 

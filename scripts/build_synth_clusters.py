@@ -102,8 +102,11 @@ def main() -> None:
         log.info("converting embeddings.npy to standard .npy format ...")
         # Materialize full array (716 MB at our scale) then save with header.
         full = np.array(embeddings, dtype=embeddings.dtype, copy=True)
-        tmp = emb_path.with_suffix(".npy.tmp")
-        np.save(str(tmp), full)
+        # NB: write via open file handle so np.save doesn't auto-append ".npy"
+        # to a non-".npy" path (it does for path strings).
+        tmp = emb_path.with_name(emb_path.name + ".tmp")
+        with tmp.open("wb") as fh:
+            np.save(fh, full)
         tmp.replace(emb_path)
         log.info("rewrote %s as standard .npy (%d bytes)",
                  emb_path, emb_path.stat().st_size)
