@@ -256,10 +256,18 @@ class BigramKLLoss(nn.Module):
         a, b = self.pairs[:, 0], self.pairs[:, 1]
         p_t = probs[:, :-1, :]
         p_t1 = probs[:, 1:, :]
-        pair_mask = (mask[:, :-1] & mask[:, 1:]).float()
-        joint = p_t[..., a] * p_t1[..., b]
-        topk_sum = (joint * pair_mask.unsqueeze(-1)).sum(dim=(0, 1))
-        return _BigramPartial(topk_sum=topk_sum, n_pairs=pair_mask.sum())
+        pair_mask = (mask[:, :-1] & mask[:, 1:]).float().unsqueeze(-1)
+        # Chunk along K — gathered (B, T-1, K) tensors blow VRAM at large K.
+        # Peak intermediate is now O(B*T*chunk) regardless of reference size.
+        K = a.shape[0]
+        chunk = 16384
+        sums = []
+        for i in range(0, K, chunk):
+            a_c, b_c = a[i : i + chunk], b[i : i + chunk]
+            joint_c = p_t[..., a_c] * p_t1[..., b_c] * pair_mask
+            sums.append(joint_c.sum(dim=(0, 1)))
+        topk_sum = torch.cat(sums)
+        return _BigramPartial(topk_sum=topk_sum, n_pairs=pair_mask.squeeze(-1).sum())
 
     def finalize(self, agg: _BigramPartial) -> Tensor:
         if not self.is_loaded or agg.n_pairs.item() == 0:
