@@ -308,36 +308,62 @@ class AlienLMTrainer:
 
     @torch.no_grad()
     def _log_samples(self, step: int) -> None:
-        """Log 5 English/alien pairs: ground-truth cipher vs model's autoregressive output."""
+        """Log 5 English/alien pairs: ground-truth cipher vs model's autoregressive output.
+
+        Generation uses argmax + 3-gram and 4-gram repeat blocking + per-sample
+        length cap derived from the GT cipher length. This isolates the LM's
+        underlying distribution from sampling drift / fragment cascades that
+        muddy temperature-sampled diagnostics.
+        """
         self.model.eval()
         sentences = self._diag_sentences[:self._SAMPLE_N]
         eos_id = self.alien_tok.eos_token_id
-        pad_id = self.alien_tok.pad_token_id
 
         for sent in sentences:
             ground_truth = self.cipher.encode_sentence(sent)
+            gt_lower = self.cipher.encode_for_tokenizer(sent)
+            gt_ids = self.alien_tok(gt_lower, return_tensors="pt")["input_ids"][0]
+            gt_len = int(gt_ids.numel())
+            # Length cap: GT length × 1.3 + 5 slack, but bounded by phase1_max_len.
+            length_cap = min(int(gt_len * 1.3) + 5, self.config.phase1_max_len)
+
             # Seed with first cipher token, generate the rest autoregressively.
-            seed_ids = self.alien_tok(
-                self.cipher.encode_for_tokenizer(sent),
-                return_tensors="pt",
-            )["input_ids"][:, :1].to(self.device)
+            seed_ids = gt_ids[:1].unsqueeze(0).to(self.device)
             context = self.model.backend.embed_alien(seed_ids)
-            generated = [seed_ids[0, 0].item()]
-            for _ in range(self.config.phase1_max_len):
-                hidden  = self.model.backend.forward_hidden(context)
-                logits  = self.model.backend.alien_logits(hidden[:, -1:]).squeeze(1)
-                probs   = torch.softmax(logits.float(), dim=-1)
-                next_id = torch.multinomial(probs, num_samples=1).squeeze(-1)
-                generated.append(next_id.item())
-                if next_id.item() == eos_id:
+            generated: list[int] = [int(seed_ids[0, 0])]
+
+            for _ in range(length_cap):
+                hidden = self.model.backend.forward_hidden(context)
+                logits = self.model.backend.alien_logits(hidden[:, -1:]).squeeze(1).squeeze(0)
+                # Block 3-gram and 4-gram repeats: any token that would complete an
+                # n-gram already seen in the generation history gets logits=-inf.
+                self._block_ngram_repeats(logits, generated, n=3)
+                self._block_ngram_repeats(logits, generated, n=4)
+                next_id = int(logits.argmax().item())
+                generated.append(next_id)
+                if next_id == eos_id:
                     break
-                context = torch.cat([context, self.model.backend.embed_alien(next_id.unsqueeze(1))], dim=1)
+                next_t = torch.tensor([[next_id]], device=self.device)
+                context = torch.cat([context, self.model.backend.embed_alien(next_t)], dim=1)
+
             gen_text = self.alien_tok.decode(generated, skip_special_tokens=True)
             logger.info("sample  EN: %s", sent)
             logger.info("        GT: %s", ground_truth)
             logger.info("       GEN: %s", gen_text)
 
         self.model.train()
+
+    @staticmethod
+    def _block_ngram_repeats(logits: torch.Tensor, history: list[int], n: int) -> None:
+        """Set logits[t]=-inf for any token t whose appearance would create
+        an n-gram already present in history. In-place mutation of logits."""
+        if len(history) < n:
+            return
+        prefix = tuple(history[-(n - 1):])
+        for i in range(len(history) - (n - 1)):
+            if tuple(history[i : i + n - 1]) == prefix:
+                banned = history[i + n - 1]
+                logits[banned] = float("-inf")
 
     @staticmethod
     def _entropy(ids: torch.Tensor) -> float:
