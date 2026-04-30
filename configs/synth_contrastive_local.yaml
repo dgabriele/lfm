@@ -4,7 +4,7 @@
 
 # ── SynthLM source ──────────────────────────────────────────────────────
 synth_config: configs/synth_local_qwen.yaml
-phase1_checkpoint: data/synth_qwen_local/phase1_final.pt
+phase1_checkpoint: data/synth_qwen_local/phase1_final_v4.1_vast.pt
 
 # ── Source / generation ─────────────────────────────────────────────────
 source_dim: 896
@@ -26,6 +26,7 @@ cross_batch_diversity_weight: 0.10
 # ── Diversity / anti-degenerate ─────────────────────────────────────────
 adj_diversity_target: 0.30
 ngram_block: [3, 4]      # block 3,4-gram repeats during AR generation
+bigram_kl_path: data/synth_qwen_local/bigram_topk.npz   # corpus bigram reference
 
 # ── Generation control ──────────────────────────────────────────────────
 generation_temperature: 1.0
@@ -37,7 +38,7 @@ distractor_curriculum_start: 0
 distractor_curriculum_end: 2000
 
 # ── Trainer config ──────────────────────────────────────────────────────
-embedding_store_dir: data/embeddings_qwen
+embedding_store_dir: data/embeddings_qwen_subset   # 50K passage subset for fast iteration on 8GB
 batch_size: 8                    # small for the dual-body-forward memory cost on 8GB
 gradient_accumulation_steps: 4   # effective batch 32
 steps: 5000

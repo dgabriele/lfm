@@ -78,12 +78,23 @@ def main() -> None:
     synth_lm.to(device)
     game = SynthContrastiveGame(game_cfg, synth_lm, synth_cfg).to(device)
 
-    # Load embedding store
+    # Load embedding store. embeddings.npy is a raw memmap (no header) of
+    # shape (N, n_source_positions, source_dim) float16. Compute N from file
+    # size given known per-sample shape.
     emb_path = Path(game_cfg.embedding_store_dir) / "embeddings.npy"
     log.info("loading embedding store: %s", emb_path)
-    embeddings = np.load(emb_path, mmap_mode="r")
+    bytes_per_sample = game_cfg.n_source_positions * game_cfg.source_dim * 2  # float16
+    file_size = emb_path.stat().st_size
+    if file_size % bytes_per_sample:
+        raise ValueError(
+            f"embeddings.npy size {file_size} not divisible by per-sample bytes {bytes_per_sample}"
+        )
+    n_passages = file_size // bytes_per_sample
+    embeddings = np.memmap(
+        emb_path, dtype=np.float16, mode="r",
+        shape=(n_passages, game_cfg.n_source_positions, game_cfg.source_dim),
+    )
     log.info("  shape=%s  dtype=%s", embeddings.shape, embeddings.dtype)
-    n_passages = embeddings.shape[0]
     rng = np.random.default_rng(game_cfg.seed)
 
     # Optimizer
