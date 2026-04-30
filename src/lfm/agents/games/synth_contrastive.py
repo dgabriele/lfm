@@ -332,13 +332,15 @@ class SynthContrastiveGame(nn.Module):
         m = valid_mask.float().unsqueeze(-1)
         alien_emb = (alien_hidden * m).sum(dim=1) / m.sum(dim=1).clamp(min=1.0)
 
-        # 5) For the diversity / corruption loss terms, we need probs over the
-        #    generated positions. Compute these from the re-encode hidden
-        #    states' alien_logits (cheap, single forward already done).
-        with torch.no_grad():
-            probs_seq = F.softmax(
-                self.synth_lm.backend.alien_logits(alien_hidden).float(), dim=-1,
-            )
+        # 5) Probs over generated positions — used by bigram_kl and adj_diversity.
+        #    We keep these IN the autograd graph (no no_grad wrap) so the diversity
+        #    losses provide real gradient signal back through alien_logits → body →
+        #    prefix → projector. Without grad flow these are merely diagnostic
+        #    measurements, leaving the only real anti-collapse pressure to come
+        #    indirectly from info_nce — which was the DepTreeVAE failure pattern.
+        probs_seq = F.softmax(
+            self.synth_lm.backend.alien_logits(alien_hidden).float(), dim=-1,
+        )
 
         return SynthExpressionOutput(
             alien_emb=alien_emb,
@@ -466,13 +468,26 @@ class SynthContrastiveGame(nn.Module):
     # ─── aggregation ──────────────────────────────────────────────────────
 
     def _aggregate(self, terms: dict[str, Tensor]) -> Tensor:
+        """Sum of differentiable loss terms.
+
+        bigram_kl + adj_diversity carry real gradient now that probs are
+        in the autograd graph; bigram_kl penalises divergence from corpus
+        natural bigram distribution (catches BOTH cycling collapse AND
+        excessive uniform diversity). adj_diversity penalises adjacent-position
+        similarity (anti-repetition).
+
+        cross_diversity (TTR-based) is computed from discrete argmax token
+        IDs and is non-differentiable — kept only as a diagnostic in the
+        output dict (not in the loss). Its `1 - TTR` formulation would also
+        push toward TTR=1.0 which is anti-natural (natural English TTR for
+        our batch sizes is ~0.4-0.5).
+        """
         cfg = self.config
         return (
-            cfg.info_nce_weight              * terms["info_nce"]
-            + cfg.topology_weight            * terms["topology"]
-            + cfg.bigram_kl_weight           * terms["bigram_kl"]
-            + cfg.adj_diversity_weight       * terms["adj_diversity"]
-            + cfg.cross_batch_diversity_weight * terms["cross_diversity"]
+            cfg.info_nce_weight        * terms["info_nce"]
+            + cfg.topology_weight      * terms["topology"]
+            + cfg.bigram_kl_weight     * terms["bigram_kl"]
+            + cfg.adj_diversity_weight * terms["adj_diversity"]
         )
 
     # ─── curriculum ───────────────────────────────────────────────────────
