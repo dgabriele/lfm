@@ -84,17 +84,27 @@ def main() -> None:
              game_cfg.ngram_block)
 
     emb_path = Path(args.embeddings)
-    n_pos, dim = game_cfg.n_source_positions, game_cfg.source_dim
-    bytes_per = n_pos * dim * 2  # float16
-    if emb_path.stat().st_size % bytes_per:
-        raise ValueError(
-            f"{emb_path} size {emb_path.stat().st_size} not divisible by "
-            f"per-sample bytes {bytes_per}"
-        )
-    n_total = emb_path.stat().st_size // bytes_per
-    embeddings = np.memmap(emb_path, dtype=np.float16, mode="r",
-                           shape=(n_total, n_pos, dim))
-    log.info("embeddings: shape=%s n_total=%d", embeddings.shape, n_total)
+    # Detect format: standard .npy or raw memmap. Both are supported so this
+    # script keeps working pre- and post-build_synth_clusters.py conversion.
+    with emb_path.open("rb") as fh:
+        is_standard = fh.read(6).startswith(b"\x93NUMPY")
+    if is_standard:
+        embeddings = np.load(str(emb_path), mmap_mode="r")
+    else:
+        n_pos, dim = game_cfg.n_source_positions, game_cfg.source_dim
+        bytes_per = n_pos * dim * 2  # float16
+        if emb_path.stat().st_size % bytes_per:
+            raise ValueError(
+                f"{emb_path} size {emb_path.stat().st_size} not divisible by "
+                f"per-sample bytes {bytes_per}"
+            )
+        n_total = emb_path.stat().st_size // bytes_per
+        embeddings = np.memmap(emb_path, dtype=np.float16, mode="r",
+                               shape=(n_total, n_pos, dim))
+    n_total = int(embeddings.shape[0])
+    log.info("embeddings: shape=%s n_total=%d  format=%s",
+             embeddings.shape, n_total,
+             "npy" if is_standard else "raw_memmap")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

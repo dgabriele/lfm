@@ -428,6 +428,99 @@ class ReconstructionCommand(CLICommand):
         return 0
 
 
+class SynthContrastiveCommand(CLICommand):
+    """Train the SynthLM-based contrastive game (Qwen-body alien LM)."""
+
+    @property
+    def name(self) -> str:
+        return "synth"
+
+    @property
+    def help(self) -> str:
+        return ("Train SynthContrastiveGame: PrefixProjector + frozen SynthLM "
+                "round-trip with cluster-aware hard-negative curriculum")
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "config", nargs="?", default=None, help="YAML config file",
+        )
+        parser.add_argument("--resume", default=None)
+        parser.add_argument("--steps", type=int, default=None)
+        parser.add_argument("--batch-size", type=int, default=None)
+        parser.add_argument("--device", default=None)
+
+    def execute(self, args: argparse.Namespace) -> int:
+        import yaml
+
+        from lfm.agents.config import CurriculumConfig
+        from lfm.agents.games.synth_contrastive import (
+            SynthContrastiveGame, SynthContrastiveGameConfig,
+        )
+        from lfm.agents.trainer import AgentTrainer
+        from lfm.synth.backend import CausalDecoderBackend
+        from lfm.synth.config import SynthConfig
+        from lfm.synth.model import SynthLM
+
+        cfg_dict: dict = {}
+        if args.config is not None:
+            with open(args.config) as f:
+                cfg_dict = yaml.safe_load(f) or {}
+
+        # Curriculum block: lift top-level fields into nested CurriculumConfig.
+        curriculum_kwargs = {}
+        for ck in (
+            "enabled", "warmup_steps",
+            "start_hard_ratio", "end_hard_ratio", "medium_ratio",
+        ):
+            if ck in cfg_dict:
+                curriculum_kwargs[ck] = cfg_dict.pop(ck)
+        if curriculum_kwargs:
+            existing = cfg_dict.get("curriculum")
+            if existing is not None:
+                # YAML already had a `curriculum:` block — merge top-level overrides
+                merged = {**(existing if isinstance(existing, dict) else existing.dict()),
+                          **curriculum_kwargs}
+                cfg_dict["curriculum"] = CurriculumConfig(**merged)
+            else:
+                cfg_dict["curriculum"] = CurriculumConfig(**curriculum_kwargs)
+        elif isinstance(cfg_dict.get("curriculum"), dict):
+            cfg_dict["curriculum"] = CurriculumConfig(**cfg_dict["curriculum"])
+
+        for key in ("steps", "batch_size", "device"):
+            val = getattr(args, key, None)
+            if val is not None:
+                cfg_dict[key] = val
+
+        config = SynthContrastiveGameConfig(**cfg_dict)
+
+        import torch
+        from pathlib import Path
+        from transformers import PreTrainedTokenizerFast
+
+        device = torch.device(config.device)
+        synth_cfg = SynthConfig(**yaml.safe_load(open(config.synth_config)))
+        alien_tok = PreTrainedTokenizerFast.from_pretrained(
+            str(Path(synth_cfg.output_dir) / "alien_tokenizer")
+        )
+        backend = CausalDecoderBackend(
+            synth_cfg.base_model_name,
+            alien_vocab_size=len(alien_tok),
+            with_reference_body=False,
+        )
+        synth_lm = SynthLM(backend, synth_cfg)
+        raw = torch.load(config.phase1_checkpoint, map_location="cpu", weights_only=True)
+        state = raw["model"] if isinstance(raw, dict) and "model" in raw else raw
+        synth_lm.load_phase1_state(state)
+        logger.info("Loaded Phase 1 from %s", config.phase1_checkpoint)
+
+        synth_lm.to(device)
+        game = SynthContrastiveGame(config, synth_lm, synth_cfg).to(device)
+
+        trainer = AgentTrainer(game, config)
+        trainer.train(resume=args.resume)
+        return 0
+
+
 def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
     """Register the ``lfm agent`` subcommand group."""
     agent_parser = parent_subparsers.add_parser(
@@ -447,6 +540,7 @@ def register_agent_group(parent_subparsers: argparse._SubParsersAction) -> None:
         MultiViewCommand(),
         DocumentCommand(),
         ReconstructionCommand(),
+        SynthContrastiveCommand(),
     ]
 
     for cmd in commands:

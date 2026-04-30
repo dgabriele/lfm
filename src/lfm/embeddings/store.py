@@ -4,10 +4,16 @@ Persists precomputed embeddings, cluster assignments, and metadata to disk
 in a layout optimized for fast random access during training.  Embeddings
 are memory-mapped so that only the accessed pages are loaded into RAM.
 
+Per-passage shape may be 1-D ``(dim,)`` (the original case) or higher-rank
+``(n_pos, dim)`` for multi-position embeddings (e.g. last-k_concat from a
+causal LM). The store handles both transparently — ``embedding_dim`` is
+always the trailing dim and ``embedding_shape`` returns the full
+per-passage tuple.
+
 On-disk layout::
 
     store_dir/
-        embeddings.npy       (N, dim) float16/32 -- memory-mappable
+        embeddings.npy       (N, [n_pos,] dim) float16/32 -- memory-mappable
         cluster_labels.npy   (N,) int32
         cluster_index.json   {cluster_id_str: [int indices]}
         metadata.json        {N, dim, dtype, num_clusters, ...}
@@ -106,7 +112,8 @@ class EmbeddingStore:
         # -- metadata --------------------------------------------------
         full_metadata: dict[str, Any] = {
             "num_passages": int(embeddings.shape[0]),
-            "embedding_dim": int(embeddings.shape[1]),
+            "embedding_dim": int(embeddings.shape[-1]),
+            "embedding_shape": [int(d) for d in embeddings.shape[1:]],
             "embedding_dtype": str(embeddings.dtype),
             "num_clusters": len(cluster_index),
         }
@@ -211,10 +218,22 @@ class EmbeddingStore:
 
     @property
     def embedding_dim(self) -> int:
-        """Dimensionality of the embedding vectors."""
+        """Trailing dimensionality of each embedding vector.
+
+        For 2-D stores ``(N, dim)`` this is the per-passage size.
+        For multi-position stores ``(N, n_pos, dim)`` this is the per-position
+        size — the model-side hidden dim, not the per-passage element count.
+        """
         self._require_loaded()
         assert self._embeddings is not None
-        return int(self._embeddings.shape[1])
+        return int(self._embeddings.shape[-1])
+
+    @property
+    def embedding_shape(self) -> tuple[int, ...]:
+        """Full per-passage shape: ``(dim,)`` or ``(n_pos, dim)``."""
+        self._require_loaded()
+        assert self._embeddings is not None
+        return tuple(int(d) for d in self._embeddings.shape[1:])
 
     @property
     def num_clusters(self) -> int:
