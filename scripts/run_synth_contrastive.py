@@ -128,24 +128,19 @@ def main() -> None:
         anchor = torch.tensor(embeddings[idx].astype(np.float32)).to(device)
         distractors = torch.tensor(embeddings[dist_idx].astype(np.float32)).to(device)
 
-        try:
-            opt.zero_grad()
-            out = game(anchor, distractors, step=step)
-            loss = out["loss"]
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                [p for g in param_groups for p in g["params"]], game_cfg.max_grad_norm,
-            )
-            opt.step()
-        except torch.cuda.OutOfMemoryError as e:
-            log.warning("OOM at step %d: %s", step, e)
-            torch.cuda.empty_cache()
-            if game_cfg.batch_size <= 4:
-                raise
-            new_bs = max(4, game_cfg.batch_size // 2)
-            log.warning("OOM recovery: batch %d → %d", game_cfg.batch_size, new_bs)
-            object.__setattr__(game_cfg, "batch_size", new_bs)
-            continue
+        # NB: OOM is fatal. Auto-shrinking batch_size silently changed the
+        # contrastive pool size (B * (1 + num_distractors)), invalidating
+        # InfoNCE comparisons across runs. If you OOM, adjust the config
+        # (smaller num_distractors, smaller max_gen_len, smaller bigram ref)
+        # and restart — but keep the *contrastive pool* constant per run.
+        opt.zero_grad()
+        out = game(anchor, distractors, step=step)
+        loss = out["loss"]
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            [p for g in param_groups for p in g["params"]], game_cfg.max_grad_norm,
+        )
+        opt.step()
 
         if (step + 1) % game_cfg.log_every == 0:
             log.info(
