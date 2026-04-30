@@ -150,11 +150,10 @@ def main() -> None:
         if (step + 1) % game_cfg.log_every == 0:
             log.info(
                 "step=%d  loss=%.4f  acc=%.3f  ttr=%.3f  info_nce=%.3f  topology=%.3f  "
-                "bigram_kl=%.3f  adj_div=%.3f  cross_div=%.3f",
+                "bigram_kl=%.3f  adj_div=%.3f",
                 step + 1, loss.item(), out["accuracy"].item(), out["ttr"].item(),
                 out["info_nce"].item(), out["topology"].item(),
                 out["bigram_kl"].item(), out["adj_diversity"].item(),
-                out["cross_diversity"].item(),
             )
 
         if (step + 1) % game_cfg.checkpoint_every == 0:
