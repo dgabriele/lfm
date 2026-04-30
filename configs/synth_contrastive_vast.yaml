@@ -1,0 +1,54 @@
+# SynthContrastiveGame — vast.ai RTX 3090 (24GB) config.
+# Trains the PrefixProjector against the Phase 1 v4.1 SynthLM checkpoint
+# via round-trip contrastive discrimination.
+
+synth_config: configs/synth_vast_qwen.yaml
+phase1_checkpoint: data/synth_qwen_local/phase1_final.pt
+
+source_dim: 896
+n_source_positions: 8
+n_prefix_tokens: 8
+max_gen_len: 48
+
+contrastive_temperature: 0.07
+embedding_dim: 896
+
+info_nce_weight: 1.0
+topology_weight: 0.1
+bigram_kl_weight: 0.05
+adj_diversity_weight: 0.05
+cross_batch_diversity_weight: 0.10
+
+adj_diversity_target: 0.30
+ngram_block: [3, 4]
+
+generation_temperature: 1.0
+eos_token_id: 3
+pad_token_id: 0
+
+distractor_curriculum_start: 0
+distractor_curriculum_end: 2000
+
+embedding_store_dir: data/embeddings_qwen
+batch_size: 32                   # 24GB allows bigger batches; AR is no_grad now
+gradient_accumulation_steps: 1
+steps: 5000
+num_distractors: 7               # in-batch InfoNCE adds another B-1 negatives
+max_grad_norm: 1.0
+contrastive_scoring: true
+
+projector_lr: 0.0001
+head_lr: 0.0001
+log_temperature_lr: 0.001
+
+log_every: 25
+checkpoint_every: 250
+output_dir: data/synth_contrastive_vast
+device: cuda
+seed: 42
+
+curriculum:
+  enabled: true
+  warmup_steps: 1000
+  start_hard_ratio: 0.0
+  end_hard_ratio: 1.0

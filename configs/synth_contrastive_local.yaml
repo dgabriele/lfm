@@ -1,0 +1,62 @@
+# SynthContrastiveGame — local (RTX 3060 Ti, 8GB VRAM) PoC config.
+# Trains the PrefixProjector against a frozen Phase 1 SynthLM checkpoint
+# via round-trip contrastive discrimination + anti-collapse regularisers.
+
+# ── SynthLM source ──────────────────────────────────────────────────────
+synth_config: configs/synth_local_qwen.yaml
+phase1_checkpoint: data/synth_qwen_local/phase1_final.pt
+
+# ── Source / generation ─────────────────────────────────────────────────
+source_dim: 896
+n_source_positions: 8
+n_prefix_tokens: 8
+max_gen_len: 48
+
+# ── Contrastive loss ────────────────────────────────────────────────────
+contrastive_temperature: 0.07
+embedding_dim: 896
+
+# ── Loss weights ────────────────────────────────────────────────────────
+info_nce_weight: 1.0
+topology_weight: 0.1
+bigram_kl_weight: 0.05
+adj_diversity_weight: 0.05
+cross_batch_diversity_weight: 0.10
+
+# ── Diversity / anti-degenerate ─────────────────────────────────────────
+adj_diversity_target: 0.30
+ngram_block: [3, 4]      # block 3,4-gram repeats during AR generation
+
+# ── Generation control ──────────────────────────────────────────────────
+generation_temperature: 1.0
+eos_token_id: 3
+pad_token_id: 0
+
+# ── Curriculum on explicit distractors ──────────────────────────────────
+distractor_curriculum_start: 0
+distractor_curriculum_end: 2000
+
+# ── Trainer config ──────────────────────────────────────────────────────
+embedding_store_dir: data/embeddings_qwen
+batch_size: 8                    # small for the dual-body-forward memory cost on 8GB
+gradient_accumulation_steps: 4   # effective batch 32
+steps: 5000
+num_distractors: 7               # in-batch InfoNCE provides another B-1 negatives
+max_grad_norm: 1.0
+contrastive_scoring: true
+
+projector_lr: 0.0001
+head_lr: 0.0001
+log_temperature_lr: 0.001
+
+log_every: 25
+checkpoint_every: 100
+output_dir: data/synth_contrastive_local
+device: cuda
+seed: 42
+
+curriculum:
+  enabled: true
+  warmup_steps: 1000
+  start_hard_ratio: 0.0
+  end_hard_ratio: 1.0

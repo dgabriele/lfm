@@ -38,6 +38,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from lfm.agents.components import embed_tokens_straight_through
+from lfm.agents.config import CurriculumConfig
 from lfm.agents.games.base import (
     AdjDiversityLoss,
     BigramKLLoss,
@@ -45,6 +46,7 @@ from lfm.agents.games.base import (
     _BigramPartial,
     _NgramBlocker,
 )
+from lfm.config.base import LFMBaseConfig
 from lfm.synth.config import SynthConfig
 from lfm.synth.model import SynthLM
 
@@ -52,40 +54,69 @@ from lfm.synth.model import SynthLM
 # ─── config ────────────────────────────────────────────────────────────────
 
 
-@dataclass
-class SynthContrastiveGameConfig:
-    """Game-specific knobs. SynthConfig drives the underlying voice box."""
+class SynthContrastiveGameConfig(LFMBaseConfig):
+    """Full game + training config. AgentTrainer reads training fields directly
+    from this object (batch_size, num_distractors, curriculum, output_dir, etc.).
+    """
 
-    # Source / generation
+    # ── SynthLM source paths ─────────────────────────────────────────────
+    synth_config: str = "configs/synth_local_qwen.yaml"  # SynthConfig YAML
+    phase1_checkpoint: str = ""                           # frozen Phase 1 checkpoint
+
+    # ── Source / generation ─────────────────────────────────────────────
     source_dim: int = 896                # per-position dim of last_k_concat
     n_source_positions: int = 8          # K of last_k_concat
     n_prefix_tokens: int = 8             # PrefixProjector output positions
     max_gen_len: int = 64                # AR generation cap (in alien tokens)
 
-    # Contrastive loss
+    # ── Contrastive loss ─────────────────────────────────────────────────
     contrastive_temperature: float = 0.07
     embedding_dim: int = 896             # message space dim (== Qwen hidden)
 
-    # Loss weights
+    # ── Loss weights ─────────────────────────────────────────────────────
     info_nce_weight: float = 1.0
     topology_weight: float = 0.1
     bigram_kl_weight: float = 0.05
     adj_diversity_weight: float = 0.05
-    cross_batch_diversity_weight: float = 0.10  # anti-collapse — see DepTreeVAE lesson
+    cross_batch_diversity_weight: float = 0.10  # anti-collapse — DepTreeVAE lesson
 
-    # Diversity / anti-degenerate
-    bigram_kl_path: str | None = None    # corpus reference; None disables
+    # ── Diversity / anti-degenerate ──────────────────────────────────────
+    bigram_kl_path: str | None = None    # corpus reference .npz; None disables
     adj_diversity_target: float = 0.3
-    ngram_block: list[int] | None = None  # e.g. [3, 4] blocks 3- and 4-gram repeats during AR
+    ngram_block: list[int] = []          # e.g. [3, 4] blocks during AR generation
 
-    # Generation control
-    generation_temperature: float = 1.0  # 0 = argmax; >0 enables sampling
+    # ── Generation control ───────────────────────────────────────────────
+    generation_temperature: float = 1.0  # >0 enables sampling
     eos_token_id: int = 3
     pad_token_id: int = 0
 
-    # Curriculum
+    # ── Anchor curriculum (for the round-trip's contrastive ramp) ────────
     distractor_curriculum_start: int = 0
-    distractor_curriculum_end: int = 5000   # ramp to full distractor count over these steps
+    distractor_curriculum_end: int = 5000   # ramp distractors over these steps
+
+    # ── Trainer fields (read directly by AgentTrainer) ───────────────────
+    embedding_store_dir: str = "data/embeddings_qwen"
+    batch_size: int = 16
+    gradient_accumulation_steps: int = 1
+    steps: int = 5000
+    num_distractors: int = 7
+    max_grad_norm: float = 1.0
+    contrastive_scoring: bool = True     # batch-wide InfoNCE for accuracy reporting
+
+    # Per-component LRs (the AgentTrainer reads trainable_param_groups() to
+    # build the optimizer, so these are referenced inside the game class)
+    projector_lr: float = 1e-4
+    head_lr: float = 1e-4
+    log_temperature_lr: float = 1e-3
+
+    # Trainer logging / checkpointing
+    log_every: int = 25
+    checkpoint_every: int = 100
+    output_dir: str = "data/synth_contrastive_game"
+    device: str = "cuda"
+    seed: int = 42
+
+    curriculum: CurriculumConfig = CurriculumConfig()
 
 
 # ─── output dataclass ──────────────────────────────────────────────────────
@@ -168,11 +199,12 @@ class SynthContrastiveGame(nn.Module):
     # ─── AgentTrainer interface ────────────────────────────────────────────
 
     def trainable_param_groups(self) -> list[dict]:
+        cfg = self.config
         return [
-            {"params": list(self.synth_lm.projector.parameters()), "lr": 1e-4},
-            {"params": list(self.message_head.parameters()),       "lr": 1e-4},
-            {"params": list(self.target_proj.parameters()),        "lr": 1e-4},
-            {"params": [self.log_temperature],                     "lr": 1e-3},
+            {"params": list(self.synth_lm.projector.parameters()), "lr": cfg.projector_lr},
+            {"params": list(self.message_head.parameters()),       "lr": cfg.head_lr},
+            {"params": list(self.target_proj.parameters()),        "lr": cfg.head_lr},
+            {"params": [self.log_temperature],                     "lr": cfg.log_temperature_lr},
         ]
 
     def checkpoint_state(self) -> dict:
@@ -242,70 +274,77 @@ class SynthContrastiveGame(nn.Module):
     # ─── round-trip generation ─────────────────────────────────────────────
 
     def _generate_round_trip(self, anchor: Tensor) -> SynthExpressionOutput:
-        """Project source → AR-generate alien tokens with straight-through grads
-        → re-encode via the same frozen body → mean-pool the alien-token portion.
+        """Project source → AR-generate alien tokens (no_grad, for memory) →
+        re-encode [prefix | tokens] through body in a single forward pass with
+        gradient flow → mean-pool the alien-token portion.
 
-        The single body forward at re-encoding closes the round-trip in one pass
-        rather than re-running through a separate encoder. Straight-through
-        embeddings during AR keep gradient flow from the round-trip cosine all
-        the way back to the projector.
+        Memory rationale: full-grad AR over T steps accumulates O(B·T²·D·L)
+        activations (each step's autograd graph extends back through all prior
+        steps' body forwards). For T=64 / B=16 on 0.5B / L=24, that's ~100GB+.
+        Detaching AR keeps memory at one-forward cost. Gradient still flows
+        from the cosine loss → mean-pooled re-encode → body → prefix → projector.
+        The projector learns "make prefix tokens such that the body's encoding
+        of the resulting generation matches source." This is the right learning
+        signal — what we ultimately optimise is the round-trip alignment.
         """
         B = anchor.size(0)
         device = anchor.device
 
-        # 1) Project to prefix tokens. PrefixProjector accepts (B, n_source, source_dim)
-        #    and returns (B, n_prefix, d_model).
+        # 1) Project to prefix tokens. (Trainable; gradient flows.)
         prefix = self.synth_lm.projector(anchor).to(self.synth_lm.backend.dtype)
 
-        # 2) Autoregressive generation with straight-through embedding.
-        context = prefix.clone()
-        gen_embs: list[Tensor] = []
-        gen_ids: list[Tensor] = []
-        gen_probs: list[Tensor] = []
-        done = torch.zeros(B, dtype=torch.bool, device=device)
-
-        for t in range(self.config.max_gen_len):
-            hidden = self.synth_lm.backend.forward_hidden(context)
-            last_hidden = hidden[:, -1:]                                  # (B, 1, D)
-            logits = self.synth_lm.backend.alien_logits(last_hidden)      # (B, 1, V)
-            logits = self._apply_blockers(logits, gen_ids, t)
-            probs = F.softmax(logits.float() / max(self.config.generation_temperature, 1e-6), dim=-1)
-            # Straight-through embed
-            hard_id = probs.argmax(dim=-1)                                # (B, 1)
-            hard_onehot = F.one_hot(hard_id, self._vocab_size).float()
-            st = (hard_onehot - probs).detach() + probs                   # (B, 1, V)
-            next_emb = (st.to(self.synth_lm.backend._alien_emb.weight.dtype)
-                        @ self.synth_lm.backend._alien_emb.weight).to(context.dtype)
-            gen_embs.append(next_emb.squeeze(1))
-            gen_ids.append(hard_id.squeeze(1))
-            gen_probs.append(probs.squeeze(1))
-
-            done = done | (hard_id.squeeze(1) == self._eos_id)
-            if done.all():
-                break
-            context = torch.cat([context, next_emb], dim=1)
+        # 2) Detached autoregressive generation. Only emits token IDs.
+        with torch.no_grad():
+            prefix_d = prefix.detach()
+            context = prefix_d.clone()
+            gen_ids: list[Tensor] = []
+            done = torch.zeros(B, dtype=torch.bool, device=device)
+            temp = max(self.config.generation_temperature, 1e-6)
+            for t in range(self.config.max_gen_len):
+                hidden = self.synth_lm.backend.forward_hidden(context)
+                logits = self.synth_lm.backend.alien_logits(hidden[:, -1:]).squeeze(1)
+                logits = self._apply_blockers(logits.unsqueeze(1), gen_ids, t).squeeze(1)
+                if temp == 1.0 or self.config.generation_temperature == 0:
+                    next_id = logits.argmax(dim=-1) if self.config.generation_temperature == 0 \
+                              else torch.multinomial(F.softmax(logits, dim=-1), 1).squeeze(-1)
+                else:
+                    next_id = torch.multinomial(F.softmax(logits / temp, dim=-1), 1).squeeze(-1)
+                gen_ids.append(next_id)
+                done = done | (next_id == self._eos_id)
+                if done.all():
+                    break
+                next_emb = self.synth_lm.backend.embed_alien(next_id.unsqueeze(1))
+                context = torch.cat([context, next_emb], dim=1)
 
         token_ids = torch.stack(gen_ids, dim=1)                           # (B, S)
-        surface_emb = torch.stack(gen_embs, dim=1)                        # (B, S, D)
-        probs_seq = torch.stack(gen_probs, dim=1)                         # (B, S, V)
         valid_mask = self._build_valid_mask(token_ids)                    # (B, S) bool
 
-        # 3) Re-encode: feed [prefix | surface_emb] through the body once more
-        #    so the alien-token positions get hidden states that reflect their
-        #    final context (not their generation-time context).
-        full = torch.cat([prefix, surface_emb], dim=1)
+        # 3) Re-encode pass WITH gradient: feed [prefix | embed(tokens)] through
+        #    the body once. Tokens are detached IDs; their embeddings come from
+        #    the frozen alien_emb table, so gradient flow is:
+        #        loss → alien_emb_pool → body → prefix → projector
+        token_embs = self.synth_lm.backend.embed_alien(token_ids).to(prefix.dtype)
+        full = torch.cat([prefix, token_embs], dim=1)
         full_hidden = self.synth_lm.backend.forward_hidden(full)
         alien_hidden = full_hidden[:, prefix.size(1):]                    # (B, S, D)
 
-        # 4) Mean-pool the alien portion under the valid mask → alien_emb
+        # 4) Mean-pool the alien portion under the valid mask → alien_emb.
         m = valid_mask.float().unsqueeze(-1)
         alien_emb = (alien_hidden * m).sum(dim=1) / m.sum(dim=1).clamp(min=1.0)
+
+        # 5) For the diversity / corruption loss terms, we need probs over the
+        #    generated positions. Compute these from the re-encode hidden
+        #    states' alien_logits (cheap, single forward already done).
+        with torch.no_grad():
+            probs_seq = F.softmax(
+                self.synth_lm.backend.alien_logits(alien_hidden).float(), dim=-1,
+            )
 
         return SynthExpressionOutput(
             alien_emb=alien_emb,
             token_ids=token_ids,
             valid_mask=valid_mask,
-            surface_emb=surface_emb,
+            surface_emb=token_embs,
             hidden=alien_hidden,
             probs=probs_seq,
         )
