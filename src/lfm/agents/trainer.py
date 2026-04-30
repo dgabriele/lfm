@@ -68,7 +68,6 @@ class AgentTrainer:
         # Output directory
         self._output_dir = Path(config.output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
-        self._best_acc = 0.0
 
         from lfm.agents.training_history import TrainingHistory
         self._history = TrainingHistory()
@@ -157,11 +156,10 @@ class AgentTrainer:
     def _save_checkpoint(
         self, step: int, accuracy: float, hard_ratio: float = 1.0,
     ) -> None:
-        """Save latest checkpoint, and best if peak accuracy improved.
-
-        Tracks peak accuracy across ALL steps (not just checkpoint steps)
-        via ``_peak_acc``.  Best checkpoint is only updated once the
-        curriculum has reached full difficulty (hard_ratio >= 1.0).
+        """Overwrite latest.pt with current state. No "best" tracking — at
+        B=32 per-batch acc has stddev ~5-8%, so the max single-batch accuracy
+        is just the luckiest batch, not a meaningful global best. If you want
+        a snapshot of a particular run state, ``cp latest.pt my_label.pt``.
         """
         ckpt = self.game.checkpoint_state()
         ckpt["step"] = step
@@ -172,8 +170,8 @@ class AgentTrainer:
         torch.save(ckpt, str(self._output_dir / "latest.pt"))
         self._history.save(str(self._output_dir / "history.parquet"))
         logger.info(
-            "Checkpoint step %d — acc=%.1f%% (best=%.1f%%)",
-            step, accuracy * 100, self._best_acc * 100,
+            "Checkpoint step %d — acc=%.1f%%",
+            step, accuracy * 100,
         )
 
     def train(self, resume: str | None = None) -> dict[str, float]:
@@ -294,24 +292,6 @@ class AgentTrainer:
             if torch.cuda.is_available():
                 record["vram_mb"] = torch.cuda.max_memory_allocated() // (1024 * 1024)
             self._history.record(**record)
-            target_hard = cfg.curriculum.end_hard_ratio if cfg.curriculum.enabled else 1.0
-            if hard_ratio >= target_hard and step_acc > self._best_acc:
-                self._best_acc = step_acc
-                # Save best checkpoint immediately at the peak
-                ckpt = game.checkpoint_state()
-                ckpt["step"] = step
-                ckpt["accuracy"] = step_acc
-                ckpt["hard_ratio"] = hard_ratio
-                torch.save(ckpt, str(self._output_dir / "best.pt"))
-                # Timestamped backup so OOM cascades can't destroy the best
-                # weights by resuming from a degenerate checkpoint.
-                backup_dir = self._output_dir / "backups"
-                backup_dir.mkdir(exist_ok=True)
-                torch.save(ckpt, str(backup_dir / f"best_step{step}.pt"))
-                logger.info(
-                    "  New best acc=%.1f%% at step %d — saved best.pt + backup",
-                    step_acc * 100, step,
-                )
 
             # Logging
             if step % cfg.log_every == 0:
