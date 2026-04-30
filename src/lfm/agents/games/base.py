@@ -211,24 +211,41 @@ class ZPriorLoss(nn.Module):
 
 
 @dataclass
-class _BigramPartial:
-    topk_sum: Tensor
-    n_pairs: Tensor
+class _NgramPartial:
+    topk_sum: Tensor   # (K,) summed joint probs for the K reference n-grams
+    n_pairs: Tensor    # () number of valid n-gram positions (denominator)
 
 
-class BigramKLLoss(nn.Module):
-    """KL(model batch-marginal bigram || corpus top-K bigram) with OOV bucket."""
+class NgramKLLoss(nn.Module):
+    """KL(model marginal n-gram || corpus top-K n-gram) with OOV bucket.
 
-    def __init__(self, npz_path: Optional[Path], vocab_size: int) -> None:
+    n=2 reproduces the original BigramKLLoss exactly. Higher n constrains
+    deeper sequential structure. The npz layout is:
+        ngrams:    (K, n) int32  — top-K reference n-tuples
+        probs:     (K,)   float32 — normalized probability mass
+        oov_prob:  scalar float32 — residual mass not in top-K
+    For backwards compatibility, "pairs" is also accepted as the array name
+    when n == 2.
+    """
+
+    def __init__(
+        self, npz_path: Optional[Path], vocab_size: int, n: int = 2,
+    ) -> None:
         super().__init__()
+        self.n = n
         self.is_loaded = False
         if npz_path is None or not npz_path.exists():
             return
         with np.load(npz_path) as f:
-            pairs = f["pairs"].astype(np.int64)
+            key = "ngrams" if "ngrams" in f.files else "pairs"
+            grams = f[key].astype(np.int64)
             probs = f["probs"].astype(np.float32)
             oov = float(f["oov_prob"])
-        self.register_buffer("pairs", torch.tensor(pairs, dtype=torch.long))
+        if grams.ndim != 2 or grams.shape[1] != n:
+            raise ValueError(
+                f"NgramKLLoss(n={n}) loaded ref of shape {grams.shape}; expected (K, {n})"
+            )
+        self.register_buffer("grams", torch.tensor(grams, dtype=torch.long))
         self.register_buffer(
             "target_probs",
             torch.tensor(probs, dtype=torch.float32).clamp(min=1e-8),
@@ -238,38 +255,59 @@ class BigramKLLoss(nn.Module):
         )
         self.is_loaded = True
         logger.info(
-            "BigramKLLoss loaded top-%d (covers %.1f%% of mass)",
-            pairs.shape[0], (1.0 - oov) * 100,
+            "NgramKLLoss(n=%d) loaded top-%d (covers %.1f%% of mass)",
+            n, grams.shape[0], (1.0 - oov) * 100,
         )
 
     @property
-    def num_pairs(self) -> int:
-        return int(self.pairs.shape[0]) if self.is_loaded else 0
+    def num_grams(self) -> int:
+        return int(self.grams.shape[0]) if self.is_loaded else 0
 
-    def zero_partial(self, device: torch.device) -> _BigramPartial:
-        return _BigramPartial(
-            topk_sum=torch.zeros(self.num_pairs, device=device),
+    def zero_partial(self, device: torch.device) -> _NgramPartial:
+        return _NgramPartial(
+            topk_sum=torch.zeros(self.num_grams, device=device),
             n_pairs=torch.zeros((), device=device),
         )
 
-    def partial(self, probs: Tensor, mask: Tensor) -> _BigramPartial:
-        a, b = self.pairs[:, 0], self.pairs[:, 1]
-        p_t = probs[:, :-1, :]
-        p_t1 = probs[:, 1:, :]
-        pair_mask = (mask[:, :-1] & mask[:, 1:]).float().unsqueeze(-1)
-        # Chunk along K — gathered (B, T-1, K) tensors blow VRAM at large K.
-        # Peak intermediate is now O(B*T*chunk) regardless of reference size.
-        K = a.shape[0]
+    def partial(self, probs: Tensor, mask: Tensor) -> _NgramPartial:
+        """Compute model's marginal probability mass on each reference n-gram.
+
+        For each generated position t, the model assigns probability
+            p(t, t+1, ..., t+n-1) = ∏_{j=0..n-1} probs[:, t+j, gram[j]]
+        We sum this joint over all valid windows and the batch.
+        Memory is bounded by chunking along the K (reference) dimension.
+        """
+        n = self.n
+        T = probs.size(1)
+        if T < n:
+            return _NgramPartial(
+                topk_sum=torch.zeros(self.num_grams, device=probs.device),
+                n_pairs=torch.zeros((), device=probs.device),
+            )
+        # (B, T-n+1) mask: all n consecutive positions valid
+        win_mask = mask[:, : T - n + 1]
+        for j in range(1, n):
+            win_mask = win_mask & mask[:, j : T - n + 1 + j]
+        win_mask_f = win_mask.float().unsqueeze(-1)
+
+        # n probability slices, each (B, T-n+1, V), aligned to window position
+        p_slices = [probs[:, j : T - n + 1 + j, :] for j in range(n)]
+
+        K = self.grams.shape[0]
         chunk = 16384
         sums = []
         for i in range(0, K, chunk):
-            a_c, b_c = a[i : i + chunk], b[i : i + chunk]
-            joint_c = p_t[..., a_c] * p_t1[..., b_c] * pair_mask
+            gram_c = self.grams[i : i + chunk]    # (chunk, n)
+            # Start with the j=0 component
+            joint_c = p_slices[0][..., gram_c[:, 0]]
+            for j in range(1, n):
+                joint_c = joint_c * p_slices[j][..., gram_c[:, j]]
+            joint_c = joint_c * win_mask_f
             sums.append(joint_c.sum(dim=(0, 1)))
         topk_sum = torch.cat(sums)
-        return _BigramPartial(topk_sum=topk_sum, n_pairs=pair_mask.squeeze(-1).sum())
+        return _NgramPartial(topk_sum=topk_sum, n_pairs=win_mask.float().sum())
 
-    def finalize(self, agg: _BigramPartial) -> Tensor:
+    def finalize(self, agg: _NgramPartial) -> Tensor:
         if not self.is_loaded or agg.n_pairs.item() == 0:
             return agg.n_pairs.new_zeros(())
         n = agg.n_pairs.clamp(min=1)
@@ -278,6 +316,11 @@ class BigramKLLoss(nn.Module):
         kl_top = (model_top * (model_top.log() - self.target_probs.log())).sum()
         kl_oov = model_oov * (model_oov.log() - self.target_oov.log())
         return kl_top + kl_oov
+
+
+# Backwards-compatible alias — n=2 case
+BigramKLLoss = NgramKLLoss
+_BigramPartial = _NgramPartial
 
 
 @dataclass

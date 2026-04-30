@@ -41,10 +41,10 @@ from lfm.agents.components import embed_tokens_straight_through
 from lfm.agents.config import CurriculumConfig
 from lfm.agents.games.base import (
     AdjDiversityLoss,
-    BigramKLLoss,
+    NgramKLLoss,
     _AdjPartial,
-    _BigramPartial,
     _NgramBlocker,
+    _NgramPartial,
 )
 from lfm.config.base import LFMBaseConfig
 from lfm.synth.config import SynthConfig
@@ -76,11 +76,19 @@ class SynthContrastiveGameConfig(LFMBaseConfig):
     # ── Loss weights ─────────────────────────────────────────────────────
     info_nce_weight: float = 1.0
     topology_weight: float = 0.1
-    bigram_kl_weight: float = 0.05
     adj_diversity_weight: float = 0.05
 
+    # ── n-gram KL anti-collapse: each entry is (n, weight, npz_path) ─────
+    # e.g. [{"n": 2, "weight": 0.05, "path": ".../bigram_topk.npz"},
+    #       {"n": 3, "weight": 0.05, "path": ".../trigram_topk.npz"}]
+    # Higher orders constrain deeper sequential structure.
+    # Backwards-compat: if `bigram_kl_path` is set and `ngram_kl` is empty,
+    # a single n=2 entry is auto-constructed at weight `bigram_kl_weight`.
+    ngram_kl: list[dict] = []
+    bigram_kl_weight: float = 0.05       # back-compat; used iff ngram_kl empty
+    bigram_kl_path: str | None = None    # back-compat; used iff ngram_kl empty
+
     # ── Diversity / anti-degenerate ──────────────────────────────────────
-    bigram_kl_path: str | None = None    # corpus reference .npz; None disables
     adj_diversity_target: float = 0.3
     ngram_block: list[int] = []          # e.g. [3, 4] blocks during AR generation
 
@@ -125,12 +133,12 @@ class SynthContrastiveGameConfig(LFMBaseConfig):
 class SynthExpressionOutput:
     """What flows from generation to loss computation."""
 
-    alien_emb: Tensor      # (B, D)        re-encoded alien text in Qwen space (with grad)
+    alien_emb: Tensor      # (B, P, D)     positionally-binned re-encoded alien (with grad)
     token_ids: Tensor      # (B, S)        generated alien token IDs (no grad)
     valid_mask: Tensor     # (B, S)        positions before/at first EOS
     surface_emb: Tensor    # (B, S, D)     straight-through embeddings of generated tokens
     hidden: Tensor         # (B, S, D)     body hidden states from re-encoding pass
-    probs: Tensor          # (B, S, V)     output probabilities (for bigram_kl / adj_div)
+    probs: Tensor          # (B, S, V)     output probabilities (for ngram_kl / adj_div)
 
 
 # ─── game class ────────────────────────────────────────────────────────────
@@ -176,10 +184,26 @@ class SynthContrastiveGame(nn.Module):
         )
 
         # Diversity / anti-collapse
-        self.bigram_kl = BigramKLLoss(
-            Path(config.bigram_kl_path) if config.bigram_kl_path else None,
-            self._vocab_size,
-        )
+        # Build the list of n-gram KL losses from config. Back-compat: if the
+        # old single-bigram_kl_path/weight is set and ngram_kl is empty,
+        # construct one n=2 entry from the legacy fields.
+        ngram_specs = list(config.ngram_kl)
+        if not ngram_specs and config.bigram_kl_path:
+            ngram_specs = [{
+                "n": 2,
+                "weight": config.bigram_kl_weight,
+                "path": config.bigram_kl_path,
+            }]
+        self._ngram_weights: list[float] = [float(s["weight"]) for s in ngram_specs]
+        self._ngram_orders: list[int] = [int(s["n"]) for s in ngram_specs]
+        self.ngram_kls = nn.ModuleList([
+            NgramKLLoss(
+                Path(s["path"]) if s.get("path") else None,
+                self._vocab_size,
+                n=int(s["n"]),
+            )
+            for s in ngram_specs
+        ])
         self.adj_diversity = AdjDiversityLoss(config.adj_diversity_target)
         self._ngram_blocker = _NgramBlocker(config.ngram_block or [])
 
@@ -275,16 +299,20 @@ class SynthContrastiveGame(nn.Module):
     def _generate_round_trip(self, anchor: Tensor) -> SynthExpressionOutput:
         """Project source → AR-generate alien tokens (no_grad, for memory) →
         re-encode [prefix | tokens] through body in a single forward pass with
-        gradient flow → mean-pool the alien-token portion.
+        gradient flow → positionally bin the alien-token hidden states into
+        ``n_source_positions`` buckets matching the source embedding shape.
 
         Memory rationale: full-grad AR over T steps accumulates O(B·T²·D·L)
-        activations (each step's autograd graph extends back through all prior
-        steps' body forwards). For T=64 / B=16 on 0.5B / L=24, that's ~100GB+.
-        Detaching AR keeps memory at one-forward cost. Gradient still flows
-        from the cosine loss → mean-pooled re-encode → body → prefix → projector.
-        The projector learns "make prefix tokens such that the body's encoding
-        of the resulting generation matches source." This is the right learning
-        signal — what we ultimately optimise is the round-trip alignment.
+        activations. Detaching AR keeps memory at one-forward cost. Gradient
+        flows: loss → positional alien_emb → body → prefix → projector.
+
+        Why positional (not mean) pool: mean-pooling collapses sequence
+        position into a bag-of-tokens, so the contrastive loss is invariant
+        to permutation — the model has zero gradient for grammatical word
+        order, long-range dependencies, or sequence-level structure. Binning
+        into P=n_source_positions buckets matches the source's last-k_concat
+        shape and forces the alien's first 1/P of tokens to encode the
+        source's first position, etc. — restoring positional gradient.
         """
         B = anchor.size(0)
         device = anchor.device
@@ -327,9 +355,12 @@ class SynthContrastiveGame(nn.Module):
         full_hidden = self.synth_lm.backend.forward_hidden(full)
         alien_hidden = full_hidden[:, prefix.size(1):]                    # (B, S, D)
 
-        # 4) Mean-pool the alien portion under the valid mask → alien_emb.
-        m = valid_mask.float().unsqueeze(-1)
-        alien_emb = (alien_hidden * m).sum(dim=1) / m.sum(dim=1).clamp(min=1.0)
+        # 4) Positional binning: (B, S, D) + (B, S) → (B, P, D) where P =
+        #    n_source_positions. Restores positional gradient that mean-pool
+        #    destroyed.
+        alien_emb = self._positional_pool(
+            alien_hidden, valid_mask, n_pos=self.config.n_source_positions,
+        )
 
         # 5) Probs over generated positions — used by bigram_kl and adj_diversity.
         #    We keep these IN the autograd graph (no no_grad wrap) so the diversity
@@ -408,76 +439,145 @@ class SynthContrastiveGame(nn.Module):
             return logits
         return self._ngram_blocker(logits.squeeze(1), history, t).unsqueeze(1)
 
+    # ─── positional pooling ───────────────────────────────────────────────
+
+    def _positional_pool(
+        self, hidden: Tensor, mask: Tensor, n_pos: int,
+    ) -> Tensor:
+        """Aggregate (B, S, D) into (B, n_pos, D) by uniformly binning the
+        valid-position prefix into ``n_pos`` buckets and mean-pooling within
+        each bucket. Empty buckets fall back to the doc's overall mean.
+
+        Concretely: for batch element b with V[b] valid tokens, position s
+        goes to bucket floor(s * n_pos / V[b]) when s < V[b], else discarded.
+        """
+        B, S, D = hidden.shape
+        device = hidden.device
+        dtype = hidden.dtype
+
+        valid_count = mask.sum(dim=1).clamp(min=1).long()                 # (B,)
+        positions = torch.arange(S, device=device).unsqueeze(0).expand(B, -1)  # (B, S)
+        # bucket index: floor(s * n_pos / V[b]) clamped to [0, n_pos-1]
+        bin_idx = (positions * n_pos // valid_count.unsqueeze(-1)).clamp(max=n_pos - 1)
+        # invalid positions go to a "trash" bin n_pos which we discard
+        bin_idx = bin_idx.masked_fill(~mask, n_pos)                       # (B, S)
+
+        # scatter-add into (B, n_pos+1, D); last index is the trash bin
+        ext_sum = torch.zeros(B, n_pos + 1, D, device=device, dtype=dtype)
+        ext_sum.scatter_add_(
+            1, bin_idx.unsqueeze(-1).expand(-1, -1, D), hidden,
+        )
+        ext_count = torch.zeros(B, n_pos + 1, device=device, dtype=dtype)
+        ones = torch.ones_like(bin_idx, dtype=dtype)
+        ext_count.scatter_add_(1, bin_idx, ones)
+
+        binned = ext_sum[:, :n_pos]                                       # (B, n_pos, D)
+        cnt = ext_count[:, :n_pos]                                        # (B, n_pos)
+        pooled = binned / cnt.clamp(min=1).unsqueeze(-1)
+
+        # Empty-bin fallback: doc-level mean of valid positions
+        m = mask.unsqueeze(-1).to(dtype)
+        doc_mean = (hidden * m).sum(dim=1) / m.sum(dim=1).clamp(min=1)    # (B, D)
+        empty = (cnt == 0).unsqueeze(-1)                                  # (B, n_pos, 1)
+        pooled = torch.where(empty, doc_mean.unsqueeze(1).expand_as(pooled), pooled)
+        # Cast to float32 for downstream Linear heads (which are float32).
+        return pooled.to(torch.float32)
+
     # ─── loss terms ───────────────────────────────────────────────────────
 
     def _compute_loss_terms(
         self,
         expr: SynthExpressionOutput,
-        anchor: Tensor,
-        distractors: Tensor | None,
+        anchor: Tensor,                       # (B, P, source_dim) — never mean-pooled now
+        distractors: Tensor | None,           # (B, K, P, source_dim) or None
     ) -> tuple[dict[str, Tensor], Tensor]:
-        # Project alien_emb and source through trainable heads into message space
-        msg_alien = self.message_head(expr.alien_emb)
-        msg_source = self.target_proj(self._pool_source(anchor))
+        # Project alien_emb (B, P, D) and source (B, P, source_dim) through
+        # trainable heads into message space. Linear broadcasts over leading dims.
+        msg_alien = self.message_head(expr.alien_emb)                     # (B, P, E)
+        msg_source = self.target_proj(anchor)                             # (B, P, E)
 
         info_nce, logits = self._info_nce(msg_alien, msg_source, distractors)
-        topology = 1.0 - F.cosine_similarity(msg_alien, msg_source, dim=-1).mean()
+        # Topology — cosine averaged across positions and batch
+        topology = 1.0 - F.cosine_similarity(
+            msg_alien, msg_source, dim=-1,
+        ).mean()
 
-        # Bigram KL & adjacency diversity computed on probs over generated positions
-        bp = self.bigram_kl.zero_partial(msg_alien.device)
-        ap = self.adj_diversity.zero_partial(msg_alien.device)
-        if self.bigram_kl.is_loaded:
-            bp = self.bigram_kl.partial(expr.probs, expr.valid_mask)
+        terms: dict[str, Tensor] = {
+            "info_nce": info_nce,
+            "topology": topology,
+        }
+        # n-gram KL losses (each registered NgramKLLoss)
+        ngram_kl_total = msg_alien.new_zeros(())
+        for i, (kl_mod, w, n) in enumerate(zip(
+            self.ngram_kls, self._ngram_weights, self._ngram_orders,
+        )):
+            if not kl_mod.is_loaded or w <= 0:
+                continue
+            part = kl_mod.partial(expr.probs, expr.valid_mask)
+            kl = kl_mod.finalize(part)
+            terms[f"ngram_kl_n{n}"] = kl
+            ngram_kl_total = ngram_kl_total + w * kl
+        terms["ngram_kl"] = ngram_kl_total
+
+        # Adjacency diversity (operates on probs sequence)
         if self.config.adj_diversity_weight > 0:
             ap = self.adj_diversity.partial(expr.probs, expr.valid_mask)
-        bigram_kl = self.bigram_kl.finalize(bp)
-        adj_diversity = self.adj_diversity.finalize(ap)
+        else:
+            ap = self.adj_diversity.zero_partial(msg_alien.device)
+        terms["adj_diversity"] = self.adj_diversity.finalize(ap)
 
-        return {
-            "info_nce":      info_nce,
-            "topology":      topology,
-            "bigram_kl":     bigram_kl,
-            "adj_diversity": adj_diversity,
-        }, logits
-
-    def _pool_source(self, anchor: Tensor) -> Tensor:
-        """Reduce (B, n_source, source_dim) → (B, source_dim) via mean over positions."""
-        if anchor.dim() == 2:
-            return anchor
-        return anchor.mean(dim=1)
+        return terms, logits
 
     def _info_nce(
         self,
-        msg_alien: Tensor,                  # (B, D)
-        msg_source: Tensor,                 # (B, D)
-        distractors: Tensor | None,         # (B, K, n_source, source_dim) or None
+        msg_alien: Tensor,                  # (B, P, D)
+        msg_source: Tensor,                 # (B, P, D)
+        distractors: Tensor | None,         # (B, K, P, source_dim) or None
     ) -> tuple[Tensor, Tensor]:
-        """Symmetric in-batch InfoNCE plus optional explicit distractors.
-        Returns (loss, logits) where logits is the (B, B+K) score matrix
-        used for accuracy reporting (diagonal = correct match)."""
-        msg_alien = F.normalize(msg_alien, dim=-1)
-        msg_source = F.normalize(msg_source, dim=-1)
-        temp = self.log_temperature.exp()
+        """Per-position symmetric InfoNCE, summed over P positions.
 
-        # In-batch contrastive: B alien embeddings vs B source embeddings
-        logits = msg_alien @ msg_source.t() / temp                         # (B, B)
-        labels = torch.arange(msg_alien.size(0), device=msg_alien.device)
-        loss_a2s = F.cross_entropy(logits, labels)
-        loss_s2a = F.cross_entropy(logits.t(), labels)
-        loss = 0.5 * (loss_a2s + loss_s2a)
-        full_logits = logits
+        For each position p ∈ [0, P), we run an independent in-batch
+        InfoNCE between alien_p and source_p, with optional explicit
+        distractor negatives. The per-position losses are averaged.
+
+        Returns (loss, logits) where `logits` is the position-summed
+        (B, B+K) score matrix used for accuracy reporting (diagonal =
+        correct match across all positions jointly).
+        """
+        msg_alien = F.normalize(msg_alien, dim=-1)                        # (B, P, D)
+        msg_source = F.normalize(msg_source, dim=-1)                      # (B, P, D)
+        temp = self.log_temperature.exp()
+        B, P, _ = msg_alien.shape
+        labels = torch.arange(B, device=msg_alien.device)
 
         if distractors is not None:
-            # Add explicit distractors: each anchor i scores against its B-1
-            # in-batch negatives PLUS K curriculum distractors
-            d_proj = self.target_proj(self._pool_source(distractors))      # (B, K, D)
+            d_proj = self.target_proj(distractors)                        # (B, K, P, E)
             d_proj = F.normalize(d_proj, dim=-1)
-            d_logits = (msg_alien.unsqueeze(1) * d_proj).sum(-1) / temp    # (B, K)
-            full_logits = torch.cat([logits, d_logits], dim=1)             # (B, B+K)
-            loss = loss + F.cross_entropy(full_logits, labels)
-            loss = loss / 2.0
+        else:
+            d_proj = None
 
-        return loss, full_logits
+        loss_total = msg_alien.new_zeros(())
+        logits_sum: Tensor | None = None
+        for p in range(P):
+            a = msg_alien[:, p]                                           # (B, D)
+            s = msg_source[:, p]                                          # (B, D)
+            logits_p = a @ s.t() / temp                                   # (B, B)
+            loss_a2s = F.cross_entropy(logits_p, labels)
+            loss_s2a = F.cross_entropy(logits_p.t(), labels)
+            loss_p = 0.5 * (loss_a2s + loss_s2a)
+            full_p = logits_p
+
+            if d_proj is not None:
+                d_p = d_proj[:, :, p, :]                                  # (B, K, D)
+                d_logits_p = (a.unsqueeze(1) * d_p).sum(-1) / temp        # (B, K)
+                full_p = torch.cat([logits_p, d_logits_p], dim=1)         # (B, B+K)
+                loss_p = loss_p + F.cross_entropy(full_p, labels)
+                loss_p = loss_p / 2.0
+
+            loss_total = loss_total + loss_p
+            logits_sum = full_p if logits_sum is None else logits_sum + full_p
+
+        return loss_total / P, logits_sum
 
     # ─── aggregation ──────────────────────────────────────────────────────
 
@@ -497,10 +597,12 @@ class SynthContrastiveGame(nn.Module):
         our batch sizes is ~0.4-0.5).
         """
         cfg = self.config
+        # ngram_kl is already weighted internally (sum of w_i * KL_i for each
+        # registered n-gram order); just add it directly.
         return (
             cfg.info_nce_weight        * terms["info_nce"]
             + cfg.topology_weight      * terms["topology"]
-            + cfg.bigram_kl_weight     * terms["bigram_kl"]
+            + terms["ngram_kl"]
             + cfg.adj_diversity_weight * terms["adj_diversity"]
         )
 

@@ -19,13 +19,21 @@ embedding_dim: 896
 # ── Loss weights ────────────────────────────────────────────────────────
 info_nce_weight: 1.0
 topology_weight: 0.1
-bigram_kl_weight: 0.05
 adj_diversity_weight: 0.05
+
+# Multi-order n-gram KL — Surgery B targets weak structure beyond unigram.
+# Each entry: {n, weight, path}. Reference .npz built via build_synth_ngram.py.
+# Higher orders constrain deeper sequential structure (analysis showed
+# gzip ratio ≈ 0.96 with bigram-only — corpus had little structure beyond
+# unigram). Adding n=3 + n=4 directly pressures higher-order match.
+ngram_kl:
+  - {n: 2, weight: 0.05, path: data/synth_qwen_local/bigram_topk.npz}
+  - {n: 3, weight: 0.05, path: data/synth_qwen_local/3gram_topk.npz}
+  - {n: 4, weight: 0.03, path: data/synth_qwen_local/4gram_topk.npz}
 
 # ── Diversity / anti-degenerate ─────────────────────────────────────────
 adj_diversity_target: 0.30
 ngram_block: [3, 4]      # block 3,4-gram repeats during AR generation
-bigram_kl_path: data/synth_qwen_local/bigram_topk.npz   # corpus bigram reference
 
 # ── Generation control ──────────────────────────────────────────────────
 generation_temperature: 1.0
