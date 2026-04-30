@@ -163,12 +163,12 @@ def main() -> None:
             torch.save(ckpt_state, out_dir / "latest.pt")
             log.info("checkpoint -> %s (step %d)", out_dir / "latest.pt", step + 1)
 
-    # Final save
+    # Final save — overwrite latest.pt; copy manually if you want a snapshot
     ckpt_state = game.checkpoint_state()
     ckpt_state["step"] = game_cfg.steps
     ckpt_state["optimizer"] = opt.state_dict()
-    torch.save(ckpt_state, out_dir / "final.pt")
-    log.info("training complete -> %s", out_dir / "final.pt")
+    torch.save(ckpt_state, out_dir / "latest.pt")
+    log.info("training complete -> %s (step %d)", out_dir / "latest.pt", game_cfg.steps)
 
 
 if __name__ == "__main__":
