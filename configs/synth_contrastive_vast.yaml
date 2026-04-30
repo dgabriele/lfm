@@ -17,7 +17,6 @@ info_nce_weight: 1.0
 topology_weight: 0.1
 bigram_kl_weight: 0.05
 adj_diversity_weight: 0.05
-cross_batch_diversity_weight: 0.10
 
 adj_diversity_target: 0.30
 ngram_block: [3, 4]

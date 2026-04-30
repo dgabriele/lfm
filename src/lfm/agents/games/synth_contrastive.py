@@ -78,7 +78,6 @@ class SynthContrastiveGameConfig(LFMBaseConfig):
     topology_weight: float = 0.1
     bigram_kl_weight: float = 0.05
     adj_diversity_weight: float = 0.05
-    cross_batch_diversity_weight: float = 0.10  # anti-collapse — DepTreeVAE lesson
 
     # ── Diversity / anti-degenerate ──────────────────────────────────────
     bigram_kl_path: str | None = None    # corpus reference .npz; None disables
@@ -395,17 +394,11 @@ class SynthContrastiveGame(nn.Module):
         bigram_kl = self.bigram_kl.finalize(bp)
         adj_diversity = self.adj_diversity.finalize(ap)
 
-        # Cross-batch token diversity — anti-collapse safeguard inspired by
-        # DepTreeVAE's degenerate-repeating-code failure mode. Penalises low
-        # type-token ratio across the batch's generated tokens.
-        cross_diversity = self._cross_batch_diversity_loss(expr)
-
         return {
-            "info_nce":        info_nce,
-            "topology":        topology,
-            "bigram_kl":       bigram_kl,
-            "adj_diversity":   adj_diversity,
-            "cross_diversity": cross_diversity,
+            "info_nce":      info_nce,
+            "topology":      topology,
+            "bigram_kl":     bigram_kl,
+            "adj_diversity": adj_diversity,
         }, logits
 
     def _pool_source(self, anchor: Tensor) -> Tensor:
@@ -446,24 +439,6 @@ class SynthContrastiveGame(nn.Module):
             loss = loss / 2.0
 
         return loss, full_logits
-
-    def _cross_batch_diversity_loss(self, expr: SynthExpressionOutput) -> Tensor:
-        """Penalise low type-token ratio across batch's valid generated tokens.
-
-        Direct counter to the DepTreeVAE failure: if all batch members produce
-        the same tokens, this loss is high. If each produces distinct tokens,
-        it's near zero.
-        """
-        ids = expr.token_ids
-        mask = expr.valid_mask
-        flat = ids[mask]
-        if flat.numel() == 0:
-            return torch.zeros((), device=ids.device)
-        n_unique = torch.unique(flat).numel()
-        n_total = flat.numel()
-        ttr = n_unique / max(n_total, 1)
-        # Penalise low TTR; loss = (1 - ttr)
-        return torch.tensor(1.0 - ttr, device=ids.device)
 
     # ─── aggregation ──────────────────────────────────────────────────────
 

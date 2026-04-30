@@ -21,7 +21,6 @@ info_nce_weight: 1.0
 topology_weight: 0.1
 bigram_kl_weight: 0.05
 adj_diversity_weight: 0.05
-cross_batch_diversity_weight: 0.10
 
 # ── Diversity / anti-degenerate ─────────────────────────────────────────
 adj_diversity_target: 0.30
@@ -39,10 +38,10 @@ distractor_curriculum_end: 2000
 
 # ── Trainer config ──────────────────────────────────────────────────────
 embedding_store_dir: data/embeddings_qwen_subset   # 50K passage subset for fast iteration on 8GB
-batch_size: 8                    # small for the dual-body-forward memory cost on 8GB
-gradient_accumulation_steps: 4   # effective batch 32
+batch_size: 32                   # body is frozen in the game (no body grads/Adam state) so memory budget is much lower than Phase 1 — single-pass batch 32 fits comfortably
+gradient_accumulation_steps: 1
 steps: 5000
-num_distractors: 7               # in-batch InfoNCE provides another B-1 negatives
+num_distractors: 31              # batch+distractors = 32 + 32*31 = 1024-way (DepTreeVAE benchmark)
 max_grad_norm: 1.0
 contrastive_scoring: true
 
@@ -58,6 +57,6 @@ seed: 42
 
 curriculum:
   enabled: true
-  warmup_steps: 1000
+  warmup_steps: 2000     # longer ramp for the harder 1024-way discrimination
   start_hard_ratio: 0.0
   end_hard_ratio: 1.0
