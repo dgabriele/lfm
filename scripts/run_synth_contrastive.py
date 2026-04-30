@@ -148,12 +148,17 @@ def main() -> None:
             continue
 
         if (step + 1) % game_cfg.log_every == 0:
+            # Gather per-order n-gram KL terms (ngram_kl_n2, ngram_kl_n3, ...)
+            ngram_parts = " ".join(
+                f"{k}={out[k].item():.3f}" for k in sorted(out)
+                if k.startswith("ngram_kl_n")
+            )
             log.info(
                 "step=%d  loss=%.4f  acc=%.3f  ttr=%.3f  info_nce=%.3f  topology=%.3f  "
-                "bigram_kl=%.3f  adj_div=%.3f",
+                "ngram_kl=%.3f  %s  adj_div=%.3f",
                 step + 1, loss.item(), out["accuracy"].item(), out["ttr"].item(),
                 out["info_nce"].item(), out["topology"].item(),
-                out["bigram_kl"].item(), out["adj_diversity"].item(),
+                out["ngram_kl"].item(), ngram_parts, out["adj_diversity"].item(),
             )
 
         if (step + 1) % game_cfg.checkpoint_every == 0:

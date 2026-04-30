@@ -350,10 +350,20 @@ class SynthContrastiveGame(nn.Module):
         #    the body once. Tokens are detached IDs; their embeddings come from
         #    the frozen alien_emb table, so gradient flow is:
         #        loss → alien_emb_pool → body → prefix → projector
+        #    Gradient-checkpointed so only inputs are saved during forward;
+        #    the body forward is recomputed during backward. Bounds peak
+        #    activation memory regardless of B*T size.
         token_embs = self.synth_lm.backend.embed_alien(token_ids).to(prefix.dtype)
-        full = torch.cat([prefix, token_embs], dim=1)
-        full_hidden = self.synth_lm.backend.forward_hidden(full)
-        alien_hidden = full_hidden[:, prefix.size(1):]                    # (B, S, D)
+        prefix_len = prefix.size(1)
+
+        def _re_encode(prefix_, token_embs_):
+            full = torch.cat([prefix_, token_embs_], dim=1)
+            return self.synth_lm.backend.forward_hidden(full)
+
+        full_hidden = torch.utils.checkpoint.checkpoint(
+            _re_encode, prefix, token_embs, use_reentrant=False,
+        )
+        alien_hidden = full_hidden[:, prefix_len:]                        # (B, S, D)
 
         # 4) Positional binning: (B, S, D) + (B, S) → (B, P, D) where P =
         #    n_source_positions. Restores positional gradient that mean-pool
