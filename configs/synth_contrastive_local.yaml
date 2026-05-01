@@ -73,7 +73,7 @@ hard_neg_warmup: 2000
 # K=1 disables, behaves identically to the v3 single-paragraph game.
 n_paragraphs: 2
 coherence_weight: 0.1
-coherence_target_cos: 0.5
+coherence_target_cos: 0.5     # max allowed pairwise paragraph similarity; penalty fires when cos > target (forces diversity)
 num_distractors: 31              # batch+distractors = 32 + 32*31 = 1024-way (DepTreeVAE benchmark)
 max_grad_norm: 1.0
 contrastive_scoring: true

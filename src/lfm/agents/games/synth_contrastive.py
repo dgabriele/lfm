@@ -385,13 +385,21 @@ class SynthContrastiveGame(nn.Module):
     def _coherence_loss(
         self, exprs: list[SynthExpressionOutput],
     ) -> Tensor:
-        """Hinge-penalty on pairwise cosine similarity between paragraph
-        signatures (mean-pooled alien_emb per paragraph) for the same
-        anchor. Penalty fires when cos < ``coherence_target_cos``.
+        """Cross-paragraph DIVERSITY loss: hinge-penalty on pairwise
+        cosine similarity between paragraph signatures being too HIGH.
+
+        Per-paragraph InfoNCE already pulls every paragraph toward its
+        anchor's source; without an opposing force, paragraphs collapse
+        to near-identical text and Surgery C delivers nothing. This loss
+        pushes paragraph signatures *apart* so the K paragraphs encode
+        the same anchor via *different* surface forms — yielding the
+        within-document topical recurrence + lexical variety needed for
+        natural-corpus burstiness.
+
+        Penalty fires when cos > ``coherence_target_cos`` (the maximum
+        allowed similarity).
         """
         target = float(self.config.coherence_target_cos)
-        # Per-paragraph signature: mean-pool the per-position alien_emb
-        # (B, P, D) → (B, D), then L2-normalize.
         sigs = [F.normalize(e.alien_emb.mean(dim=1), dim=-1) for e in exprs]
         K = len(sigs)
         loss = sigs[0].new_zeros(())
@@ -399,7 +407,7 @@ class SynthContrastiveGame(nn.Module):
         for i in range(K):
             for j in range(i + 1, K):
                 cos = (sigs[i] * sigs[j]).sum(dim=-1)              # (B,)
-                loss = loss + F.relu(target - cos).mean()
+                loss = loss + F.relu(cos - target).mean()
                 n_pairs += 1
         return loss / max(n_pairs, 1)
 
