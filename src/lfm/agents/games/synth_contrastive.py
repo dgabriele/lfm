@@ -112,6 +112,16 @@ class SynthContrastiveGameConfig(LFMBaseConfig):
     hard_neg_topk: int = 100
     hard_neg_warmup: int = 2000     # don't start mining until this step
 
+    # ── Surgery C: multi-paragraph generation per anchor + coherence ─────
+    # Each anchor yields ``n_paragraphs`` independent alien expressions
+    # via per-paragraph learnable prefix offsets. Coherence loss penalises
+    # low pairwise cosine similarity between paragraphs of the same anchor.
+    # Targets the discourse-level structure that contrastive-only
+    # objectives can't induce (low burstiness, flat class grammar).
+    n_paragraphs: int = 1                # 1 = legacy single-paragraph game
+    coherence_weight: float = 0.0
+    coherence_target_cos: float = 0.5
+
     # ── Trainer fields (read directly by AgentTrainer) ───────────────────
     embedding_store_dir: str = "data/embeddings_qwen"
     batch_size: int = 16
@@ -218,6 +228,19 @@ class SynthContrastiveGame(nn.Module):
         self.adj_diversity = AdjDiversityLoss(config.adj_diversity_target)
         self._ngram_blocker = _NgramBlocker(config.ngram_block or [])
 
+        # Per-paragraph prefix offsets (Surgery C). Small random noise so
+        # they diverge during training; with d_model ~896, randn vectors
+        # are nearly orthogonal so this gives K usefully-distinct biases
+        # to start from.
+        if config.n_paragraphs > 1:
+            self.paragraph_offsets = nn.Parameter(
+                0.02 * torch.randn(
+                    config.n_paragraphs, config.n_prefix_tokens, self._d_model,
+                ),
+            )
+        else:
+            self.register_parameter("paragraph_offsets", None)
+
     # ─── freeze ────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -234,20 +257,28 @@ class SynthContrastiveGame(nn.Module):
 
     def trainable_param_groups(self) -> list[dict]:
         cfg = self.config
-        return [
+        groups = [
             {"params": list(self.synth_lm.projector.parameters()), "lr": cfg.projector_lr},
             {"params": list(self.message_head.parameters()),       "lr": cfg.head_lr},
             {"params": list(self.target_proj.parameters()),        "lr": cfg.head_lr},
             {"params": [self.log_temperature],                     "lr": cfg.log_temperature_lr},
         ]
+        if self.paragraph_offsets is not None:
+            groups.append(
+                {"params": [self.paragraph_offsets], "lr": cfg.head_lr},
+            )
+        return groups
 
     def checkpoint_state(self) -> dict:
-        return {
+        state = {
             "projector":     self.synth_lm.projector.state_dict(),
             "message_head":  self.message_head.state_dict(),
             "target_proj":   self.target_proj.state_dict(),
             "log_temp":      self.log_temperature.detach().clone(),
         }
+        if self.paragraph_offsets is not None:
+            state["paragraph_offsets"] = self.paragraph_offsets.detach().clone()
+        return state
 
     def load_checkpoint_state(self, ckpt: dict) -> None:
         self.synth_lm.projector.load_state_dict(ckpt["projector"])
@@ -255,6 +286,11 @@ class SynthContrastiveGame(nn.Module):
         self.target_proj.load_state_dict(ckpt["target_proj"])
         with torch.no_grad():
             self.log_temperature.copy_(ckpt["log_temp"])
+            # Surgery C: paragraph offsets are new in v4 — silently skip
+            # if missing from older checkpoints (they'll keep their fresh
+            # random init).
+            if self.paragraph_offsets is not None and "paragraph_offsets" in ckpt:
+                self.paragraph_offsets.copy_(ckpt["paragraph_offsets"])
 
     # ─── main forward ─────────────────────────────────────────────────────
 
@@ -267,32 +303,105 @@ class SynthContrastiveGame(nn.Module):
         candidate_indices: Tensor | None = None,    # accepted for AgentTrainer compatibility; unused here
     ) -> dict[str, Tensor]:
         del candidate_indices
+        cfg = self.config
         ratio = self._distractor_curriculum_ratio(step)
         n_dist = int(round(ratio * distractors.size(1)))
         active_distractors = distractors[:, :n_dist] if n_dist > 0 else None
+        n_para = max(1, cfg.n_paragraphs)
 
-        expr = self._generate_round_trip(anchor)
-        terms, contrastive_logits = self._compute_loss_terms(expr, anchor, active_distractors)
-        total = self._aggregate(terms)
+        # Generate K paragraphs (K=1 = legacy single-paragraph behavior).
+        # Each paragraph is a full round-trip: project + per-paragraph
+        # offset → AR generate → re-encode → positional pool.
+        exprs = [
+            self._generate_round_trip(anchor, paragraph_idx=k)
+            for k in range(n_para)
+        ]
 
-        # Accuracy: argmax over (B + n_dist) candidates matches the diagonal
-        target_idx = torch.arange(contrastive_logits.size(0), device=contrastive_logits.device)
-        accuracy = (contrastive_logits.argmax(dim=1) == target_idx).float().mean()
+        # Per-paragraph loss terms (InfoNCE, topology, ngram_kl, adj_div).
+        # Sum the loss-term tensors across paragraphs; report averaged
+        # values for logging.
+        agg_terms: dict[str, Tensor] = {}
+        agg_logits: list[Tensor] = []
+        for expr in exprs:
+            terms_k, logits_k = self._compute_loss_terms(expr, anchor, active_distractors)
+            agg_logits.append(logits_k)
+            for name, val in terms_k.items():
+                agg_terms[name] = (
+                    agg_terms[name] + val if name in agg_terms else val.clone()
+                )
+        # Average over paragraphs so weights stay invariant to n_paragraphs.
+        for name in list(agg_terms):
+            agg_terms[name] = agg_terms[name] / n_para
 
-        # Generation diversity diagnostic — anti-collapse signal
-        ttr = self._batch_ttr(expr.token_ids, expr.valid_mask)
+        # Coherence loss (Surgery C): paragraphs of the same anchor should
+        # have similar alien_emb signatures. Mean-pool over positions for
+        # the per-paragraph signature, then hinge-penalise pairwise cosine
+        # below the target.
+        if n_para > 1 and cfg.coherence_weight > 0:
+            agg_terms["coherence"] = self._coherence_loss(exprs)
+        else:
+            agg_terms["coherence"] = exprs[0].alien_emb.new_zeros(())
+
+        total = self._aggregate(agg_terms)
+
+        # Accuracy: average across paragraphs of the diagonal-argmax rate.
+        target_idx = torch.arange(agg_logits[0].size(0), device=total.device)
+        accuracy = torch.stack([
+            (l.argmax(dim=1) == target_idx).float().mean() for l in agg_logits
+        ]).mean()
+
+        # Generation diversity diagnostic — across all paragraphs' tokens.
+        # Paragraphs may end at different AR lengths (each stops at its own
+        # done.all() boundary); right-pad to common max length before concat.
+        max_S = max(e.token_ids.size(1) for e in exprs)
+        pad_id = int(self.config.pad_token_id)
+        toks_padded = []
+        masks_padded = []
+        for e in exprs:
+            S = e.token_ids.size(1)
+            if S < max_S:
+                pad_len = max_S - S
+                toks_padded.append(F.pad(e.token_ids, (0, pad_len), value=pad_id))
+                masks_padded.append(F.pad(e.valid_mask, (0, pad_len), value=False))
+            else:
+                toks_padded.append(e.token_ids)
+                masks_padded.append(e.valid_mask)
+        all_tok = torch.cat(toks_padded, dim=0)
+        all_mask = torch.cat(masks_padded, dim=0)
+        ttr = self._batch_ttr(all_tok, all_mask)
 
         out = {
             "loss":            total,
             "accuracy":        accuracy,
             "ttr":             ttr,
-            **terms,
+            **agg_terms,
             "n_distractors":   torch.tensor(float(n_dist), device=total.device),
+            "n_paragraphs":    torch.tensor(float(n_para), device=total.device),
         }
-        # Internal (prefixed _) tensors aren't logged by AgentTrainer
-        out["_token_ids"] = expr.token_ids
-        out["_valid_mask"] = expr.valid_mask
+        out["_token_ids"] = all_tok
+        out["_valid_mask"] = all_mask
         return out
+
+    def _coherence_loss(
+        self, exprs: list[SynthExpressionOutput],
+    ) -> Tensor:
+        """Hinge-penalty on pairwise cosine similarity between paragraph
+        signatures (mean-pooled alien_emb per paragraph) for the same
+        anchor. Penalty fires when cos < ``coherence_target_cos``.
+        """
+        target = float(self.config.coherence_target_cos)
+        # Per-paragraph signature: mean-pool the per-position alien_emb
+        # (B, P, D) → (B, D), then L2-normalize.
+        sigs = [F.normalize(e.alien_emb.mean(dim=1), dim=-1) for e in exprs]
+        K = len(sigs)
+        loss = sigs[0].new_zeros(())
+        n_pairs = 0
+        for i in range(K):
+            for j in range(i + 1, K):
+                cos = (sigs[i] * sigs[j]).sum(dim=-1)              # (B,)
+                loss = loss + F.relu(target - cos).mean()
+                n_pairs += 1
+        return loss / max(n_pairs, 1)
 
     @staticmethod
     def _batch_ttr(token_ids: Tensor, valid_mask: Tensor) -> Tensor:
@@ -307,7 +416,9 @@ class SynthContrastiveGame(nn.Module):
 
     # ─── round-trip generation ─────────────────────────────────────────────
 
-    def _generate_round_trip(self, anchor: Tensor) -> SynthExpressionOutput:
+    def _generate_round_trip(
+        self, anchor: Tensor, paragraph_idx: int = 0,
+    ) -> SynthExpressionOutput:
         """Project source → AR-generate alien tokens (no_grad, for memory) →
         re-encode [prefix | tokens] through body in a single forward pass with
         gradient flow → positionally bin the alien-token hidden states into
@@ -328,8 +439,12 @@ class SynthContrastiveGame(nn.Module):
         B = anchor.size(0)
         device = anchor.device
 
-        # 1) Project to prefix tokens. (Trainable; gradient flows.)
+        # 1) Project to prefix tokens. (Trainable; gradient flows.) For
+        #    Surgery C multi-paragraph, add the per-paragraph offset so
+        #    each paragraph generates from a distinct conditioning prefix.
         prefix = self.synth_lm.projector(anchor).to(self.synth_lm.backend.dtype)
+        if self.paragraph_offsets is not None:
+            prefix = prefix + self.paragraph_offsets[paragraph_idx].to(prefix.dtype)
 
         # 2) Detached autoregressive generation. Only emits token IDs.
         with torch.no_grad():
@@ -670,12 +785,15 @@ class SynthContrastiveGame(nn.Module):
         cfg = self.config
         # ngram_kl is already weighted internally (sum of w_i * KL_i for each
         # registered n-gram order); just add it directly.
-        return (
+        total = (
             cfg.info_nce_weight        * terms["info_nce"]
             + cfg.topology_weight      * terms["topology"]
             + terms["ngram_kl"]
             + cfg.adj_diversity_weight * terms["adj_diversity"]
         )
+        if "coherence" in terms and cfg.coherence_weight > 0:
+            total = total + cfg.coherence_weight * terms["coherence"]
+        return total
 
     # ─── curriculum ───────────────────────────────────────────────────────
 

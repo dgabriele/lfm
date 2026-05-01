@@ -57,9 +57,23 @@ steps: 10000   # extended: more anchor coverage + post-warmup online hard-neg mi
 # from each anchor's top-K hardest non-self neighbors instead of from
 # the static KMeans clusters. The model trains against its own current
 # confusion — self-pacing difficulty as it improves.
-hard_neg_refresh_every: 500
+# Online hard-negative mining is disabled until we move to the full 1M
+# store — empirically, the projector saturates information-theoretically
+# on the 50K subset (mining cannot find genuinely-confusing pairs there).
+hard_neg_refresh_every: 0
 hard_neg_topk: 100
 hard_neg_warmup: 2000
+
+# ── Surgery C: multi-paragraph generation per anchor + coherence ────────
+# Each anchor yields K paragraphs, each conditioned on a distinct
+# learnable per-paragraph prefix offset. Coherence loss penalises low
+# pairwise cosine similarity between paragraphs of the same anchor —
+# forces topical coherence (same anchor → similar paragraph signatures)
+# while leaving InfoNCE free to encode the anchor's identity.
+# K=1 disables, behaves identically to the v3 single-paragraph game.
+n_paragraphs: 2
+coherence_weight: 0.1
+coherence_target_cos: 0.5
 num_distractors: 31              # batch+distractors = 32 + 32*31 = 1024-way (DepTreeVAE benchmark)
 max_grad_norm: 1.0
 contrastive_scoring: true
