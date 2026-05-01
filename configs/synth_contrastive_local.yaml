@@ -17,8 +17,10 @@ contrastive_temperature: 0.07
 embedding_dim: 896
 
 # ── Loss weights ────────────────────────────────────────────────────────
-info_nce_weight: 0.3                # per-sentence anchor stability (downweighted in v5)
-info_nce_aggregate_weight: 0.7     # primary v5 signal: the K-sentence mean must match the source — rewards composition
+info_nce_weight: 0.3                # per-sentence anchor stability
+info_nce_aggregate_weight: 0.5     # absolute K-aggregate quality
+residual_weight: 0.3                # Surgery E: monotonic improvement — each new sentence must reduce sub-aggregate InfoNCE by ≥ residual_margin
+residual_margin: 0.05
 topology_weight: 0.1
 adj_diversity_weight: 0.05
 
@@ -73,8 +75,8 @@ hard_neg_warmup: 2000
 # while leaving InfoNCE free to encode the anchor's identity.
 # K=1 disables, behaves identically to the v3 single-paragraph game.
 n_paragraphs: 4
-coherence_weight: 0.3                # bumped from 0.1 — push paragraphs toward near-orthogonal so √K noise reduction approaches theoretical
-coherence_target_cos: 0.1            # bumped from 0.5 — paragraphs must be near-orthogonal in alien-emb space
+coherence_weight: 0.1                # back to baseline — D experiment showed forced orthogonality didn't drive composition (model satisfied via non-anchor noise)
+coherence_target_cos: 0.5            # back to baseline
 num_distractors: 31              # batch+distractors = 32 + 32*31 = 1024-way (DepTreeVAE benchmark)
 max_grad_norm: 1.0
 contrastive_scoring: true

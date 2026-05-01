@@ -440,6 +440,7 @@ class AgentTrainer:
                     ("adj_diversity", "adj"),
                     ("ttr", "ttr"),
                     ("coherence", "coh"),
+                    ("residual", "res"),
                     ("n_paragraphs", "K"),
                     ("tok_conc", "tconc"),
                     ("uniq_tok", "uniq"),

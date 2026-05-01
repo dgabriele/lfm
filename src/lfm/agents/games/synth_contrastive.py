@@ -79,6 +79,14 @@ class SynthContrastiveGameConfig(LFMBaseConfig):
     # ── Loss weights ─────────────────────────────────────────────────────
     info_nce_weight: float = 1.0           # per-sentence InfoNCE (stability)
     info_nce_aggregate_weight: float = 0.0  # aggregate-of-K InfoNCE (composition).
+    residual_weight: float = 0.0           # boosting-style monotonic-improvement loss.
+                                           # For each sub-aggregate of the first k
+                                           # sentences (k=1..K), compute InfoNCE.
+                                           # Penalise non-improvement: each new
+                                           # sentence's contribution must reduce
+                                           # aggregate InfoNCE by at least
+                                           # ``residual_margin``.
+    residual_margin: float = 0.05
                                            # Set > 0 with n_paragraphs > 1 to enable
                                            # compositional training: each sentence is
                                            # conditioned on a learned encoding of
@@ -402,24 +410,61 @@ class SynthContrastiveGame(nn.Module):
         # redundancy. K identical sentences satisfy per-sentence InfoNCE
         # equally well; only complementary-content sentences also win at
         # aggregate.
-        if K > 1 and cfg.info_nce_aggregate_weight > 0:
-            agg_alien = torch.stack(
-                [e.alien_emb for e in exprs], dim=0,
-            ).mean(dim=0)                                          # (B, P, D)
-            msg_alien_agg = self.message_head(agg_alien)
+        #
+        # Surgery E (residual): if residual_weight > 0, also compute the
+        # InfoNCE of every sub-aggregate (mean of first k sentences for
+        # k=1..K) and penalise non-monotonic-improvement: each new
+        # sentence must reduce sub-aggregate InfoNCE by at least
+        # residual_margin. This is the "boosting" view of composition —
+        # every member of the ensemble must reduce ensemble error.
+        compute_aggregate = K > 1 and (
+            cfg.info_nce_aggregate_weight > 0 or cfg.residual_weight > 0
+        )
+        if compute_aggregate:
             msg_source = self.target_proj(anchor)
-            agg_info_nce, agg_logits = self._info_nce(
-                msg_alien_agg, msg_source, active_distractors,
-            )
+            stacked_aliens = torch.stack(
+                [e.alien_emb for e in exprs], dim=0,
+            )                                                       # (K, B, P, D)
+            sub_nces: list[Tensor] = []
+            agg_logits_list: list[Tensor] = []
+            for k in range(1, K + 1):
+                # mean of first k sentences' alien_embs
+                sub_agg = stacked_aliens[:k].mean(dim=0)            # (B, P, D)
+                msg_alien_sub = self.message_head(sub_agg)
+                sub_nce_k, sub_logits_k = self._info_nce(
+                    msg_alien_sub, msg_source, active_distractors,
+                )
+                sub_nces.append(sub_nce_k)
+                agg_logits_list.append(sub_logits_k)
+            # Final-aggregate metrics (k=K)
+            agg_alien = stacked_aliens.mean(dim=0)                  # (B, P, D)
+            msg_alien_agg = self.message_head(agg_alien)
             agg_topology = 1.0 - F.cosine_similarity(
                 msg_alien_agg, msg_source, dim=-1,
             ).mean()
-            per_sent_terms["info_nce_agg"] = agg_info_nce
+            per_sent_terms["info_nce_agg"] = sub_nces[-1]
             per_sent_terms["topology_agg"] = agg_topology
+            agg_logits = agg_logits_list[-1]
+
+            # Residual / monotonic-improvement penalty.
+            if cfg.residual_weight > 0:
+                margin = float(cfg.residual_margin)
+                residual_terms = []
+                for k in range(1, K):
+                    # sub_nces[k-1] = nce(agg of first k)
+                    # sub_nces[k]   = nce(agg of first k+1)
+                    # Want sub_nces[k] <= sub_nces[k-1] - margin.
+                    # Penalise positive part of (sub_nces[k] - sub_nces[k-1] + margin).
+                    delta = sub_nces[k] - sub_nces[k - 1] + margin
+                    residual_terms.append(F.relu(delta))
+                per_sent_terms["residual"] = torch.stack(residual_terms).mean()
+            else:
+                per_sent_terms["residual"] = exprs[0].alien_emb.new_zeros(())
         else:
             agg_logits = per_sent_logits[0]
             per_sent_terms["info_nce_agg"] = exprs[0].alien_emb.new_zeros(())
             per_sent_terms["topology_agg"] = exprs[0].alien_emb.new_zeros(())
+            per_sent_terms["residual"] = exprs[0].alien_emb.new_zeros(())
 
         # Cross-sentence diversity (Surgery C): penalise paragraphs whose
         # signatures are too similar — keeps composition meaningful.
@@ -984,6 +1029,9 @@ class SynthContrastiveGame(nn.Module):
             total = total + cfg.info_nce_aggregate_weight * terms["info_nce_agg"]
             if "topology_agg" in terms:
                 total = total + cfg.topology_weight * terms["topology_agg"]
+        # Surgery E — residual / monotonic-improvement
+        if "residual" in terms and cfg.residual_weight > 0:
+            total = total + cfg.residual_weight * terms["residual"]
         # Surgery C — cross-sentence diversity
         if "coherence" in terms and cfg.coherence_weight > 0:
             total = total + cfg.coherence_weight * terms["coherence"]
