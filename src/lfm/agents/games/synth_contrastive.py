@@ -372,22 +372,27 @@ class SynthContrastiveGame(nn.Module):
         # prefix. K=1 collapses to legacy single-sentence behavior.
         # K>1 with ctx_proj at zero (uninitialised / fresh resume) is
         # equivalent to v4 independent multi-paragraph.
+        #
+        # Context pool is the *running mean* of previous sentences' hidden
+        # means (not running sum). The earlier sum-based version had
+        # magnitude growing linearly with k, which drove later sentences
+        # into a stereotyped narrow attractor (only 8% unique pos-3
+        # opening tokens at K=4 in the diagnostic). Mean keeps the input
+        # to ctx_proj at a stable scale regardless of K.
         exprs: list[SynthExpressionOutput] = []
-        context_pool: Tensor | None = None  # (B, D) running sum of sentence means, with grad
+        context_pool: Tensor | None = None  # (B, D) running mean of sent means, with grad
+        sent_mean_sum: Tensor | None = None
         for k in range(K):
             expr_k = self._generate_round_trip(
                 anchor, paragraph_idx=k, context_pool=context_pool,
             )
             exprs.append(expr_k)
-            # Update context for the next sentence: mean-pooled alien hidden
-            # over valid positions, accumulated into the running sum. The
-            # gradient flows back through this context into ctx_proj of the
-            # NEXT sentence's prefix, so backward path is:
-            #   loss → next sent re-encode → ctx_proj → this sent hidden → this sent re-encode
             m = expr_k.valid_mask.unsqueeze(-1).to(expr_k.hidden.dtype)
             sent_mean = (expr_k.hidden * m).sum(dim=1) / m.sum(dim=1).clamp(min=1)
             sent_mean = sent_mean.float()
-            context_pool = sent_mean if context_pool is None else context_pool + sent_mean
+            sent_mean_sum = sent_mean if sent_mean_sum is None else sent_mean_sum + sent_mean
+            # context for the *next* sentence is mean over all sentences seen so far
+            context_pool = sent_mean_sum / float(k + 1)
 
         # Per-sentence loss terms: each sentence still must individually
         # encode the anchor (stability term). Averaged across K so weights
