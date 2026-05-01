@@ -69,6 +69,16 @@ class AgentTrainer:
         self._output_dir = Path(config.output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
+        # Online hard-negative mining (ANCE-style). When enabled by the
+        # game config, periodically re-encode all passages and cache each
+        # passage's top-K nearest neighbors in the model's current alien
+        # space. Sampling falls back to KMeans-cluster hard negatives until
+        # the first refresh fires.
+        self._hard_neg_indices: np.ndarray | None = None
+        self._hard_neg_refresh_every = int(getattr(config, "hard_neg_refresh_every", 0))
+        self._hard_neg_topk = int(getattr(config, "hard_neg_topk", 100))
+        self._hard_neg_warmup = int(getattr(config, "hard_neg_warmup", 0))
+
         from lfm.agents.training_history import TrainingHistory
         self._history = TrainingHistory()
 
@@ -111,17 +121,33 @@ class AgentTrainer:
                 0, self._n, size=(self._batch_size, n_easy),
             )
 
-        # Hard distractors: same cluster — group by cluster, bulk sample per group
+        # Hard distractors: prefer online-mined index (model's current
+        # confusion neighbors) when available; fall back to KMeans cluster
+        # hard negatives otherwise.
         if n_hard > 0:
-            unique_clusters, inv_idx = np.unique(clusters, return_inverse=True)
-            cluster_arrays = self.store._cluster_arrays
-            for ci, cid in enumerate(unique_clusters):
-                mask = inv_idx == ci
-                count = int(mask.sum())
-                members = cluster_arrays[cid]
-                total = count * n_hard
-                drawn = self._rng.choice(members, size=total, replace=len(members) < total)
-                dist_indices[mask, :n_hard] = drawn.reshape(count, n_hard)
+            if self._hard_neg_indices is not None:
+                # Online-mined: each anchor's top-K nearest non-self in
+                # alien-emb space. Sample n_hard from each anchor's top-K.
+                hard_pool = self._hard_neg_indices[idx]   # (B, K)
+                K = hard_pool.shape[1]
+                rand_choice = self._rng.integers(
+                    0, K, size=(self._batch_size, n_hard),
+                )
+                dist_indices[:, :n_hard] = np.take_along_axis(
+                    hard_pool, rand_choice, axis=1,
+                )
+            else:
+                # Static KMeans-cluster: same cluster — group by cluster,
+                # bulk sample per group.
+                unique_clusters, inv_idx = np.unique(clusters, return_inverse=True)
+                cluster_arrays = self.store._cluster_arrays
+                for ci, cid in enumerate(unique_clusters):
+                    mask = inv_idx == ci
+                    count = int(mask.sum())
+                    members = cluster_arrays[cid]
+                    total = count * n_hard
+                    drawn = self._rng.choice(members, size=total, replace=len(members) < total)
+                    dist_indices[mask, :n_hard] = drawn.reshape(count, n_hard)
 
         # Medium distractors: different cluster — one Python loop, but n_medium is
         # typically 0; kept for completeness.
@@ -152,6 +178,61 @@ class AgentTrainer:
         candidate_indices = torch.tensor(all_indices, dtype=torch.long)
 
         return anchor, distractors, hard_ratio, candidate_indices
+
+    def _maybe_refresh_hard_negatives(self, step: int) -> None:
+        """Refresh the online hard-negative kNN index when due.
+
+        Skips silently if mining is disabled, the warmup hasn't passed, or
+        the game doesn't expose ``encode_for_hard_neg_mining``. Otherwise
+        runs the model over the full embedding store (no_grad), pools into
+        a per-passage signature, and rebuilds a top-K nearest-non-self
+        index in alien-emb space using cosine similarity.
+        """
+        if self._hard_neg_refresh_every <= 0:
+            return
+        if step < self._hard_neg_warmup:
+            return
+        if step % self._hard_neg_refresh_every != 0:
+            return
+        if not hasattr(self.game, "encode_for_hard_neg_mining"):
+            return
+
+        from sklearn.neighbors import NearestNeighbors
+        import time
+
+        n = self.store.num_passages
+        bs = max(8, self._batch_size * 4)   # bigger batches OK in pure inference
+        logger.info(
+            "Refreshing online hard-negative index at step %d (n=%d, batch=%d) ...",
+            step, n, bs,
+        )
+        t0 = time.time()
+        sigs = []
+        for i in range(0, n, bs):
+            idx = np.arange(i, min(i + bs, n))
+            anchor = torch.tensor(
+                self._embeddings[idx], dtype=torch.float32,
+            ).to(self.device)
+            sig = self.game.encode_for_hard_neg_mining(anchor).cpu().numpy()
+            sigs.append(sig)
+        all_sigs = np.concatenate(sigs, axis=0)        # (n, dim)
+        dt_enc = time.time() - t0
+
+        t0 = time.time()
+        nn = NearestNeighbors(
+            n_neighbors=self._hard_neg_topk + 1,
+            metric="cosine", algorithm="brute",
+        )
+        nn.fit(all_sigs)
+        _, indices = nn.kneighbors(all_sigs)
+        # Skip self at column 0
+        self._hard_neg_indices = indices[:, 1:].astype(np.intp)
+        dt_knn = time.time() - t0
+
+        logger.info(
+            "  encoded %d sigs in %.1fs; built kNN(top-%d) in %.1fs; index ready",
+            n, dt_enc, self._hard_neg_topk, dt_knn,
+        )
 
     def _save_checkpoint(
         self, step: int, accuracy: float, hard_ratio: float = 1.0,
@@ -240,11 +321,19 @@ class AgentTrainer:
                 _torch.cuda.empty_cache()
         ipa_refresh = getattr(cfg, "ipa_cache_refresh", 0)
 
+        # Build the initial hard-negative index if we're already past warmup
+        # (e.g. resuming from a saturated KMeans-cluster run).
+        self._maybe_refresh_hard_negatives(start_step)
+
         for step in range(start_step, cfg.steps):
             # Refresh IPA cache periodically
             if use_ipa and ipa_refresh > 0 and step > 0 and step % ipa_refresh == 0:
                 all_embs = torch.tensor(self._embeddings, dtype=torch.float32).to(self.device)
                 game.build_ipa_cache(all_embs, batch_size=256)
+
+            # Refresh the online hard-negative kNN index periodically
+            if step > start_step and self._hard_neg_refresh_every > 0:
+                self._maybe_refresh_hard_negatives(step)
 
             # Full step wrapped in OOM recovery.  On OOM, reduce batch
             # size by 10%, clear VRAM, and retry the step.

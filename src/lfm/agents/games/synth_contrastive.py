@@ -101,6 +101,17 @@ class SynthContrastiveGameConfig(LFMBaseConfig):
     distractor_curriculum_start: int = 0
     distractor_curriculum_end: int = 5000   # ramp distractors over these steps
 
+    # ── Online hard-negative mining (ANCE-style) ─────────────────────────
+    # Once the curriculum-warmup phase ends, periodically re-encode all
+    # passages and rebuild a per-passage top-K nearest-neighbor index in
+    # the *current* model's alien-emb space. Distractors are then sampled
+    # from this self-paced confusion set instead of the static KMeans
+    # clusters — the model always trains against its current weakness.
+    # Set ``hard_neg_refresh_every: 0`` to disable.
+    hard_neg_refresh_every: int = 0
+    hard_neg_topk: int = 100
+    hard_neg_warmup: int = 2000     # don't start mining until this step
+
     # ── Trainer fields (read directly by AgentTrainer) ───────────────────
     embedding_store_dir: str = "data/embeddings_qwen"
     batch_size: int = 16
@@ -390,6 +401,23 @@ class SynthContrastiveGame(nn.Module):
             hidden=alien_hidden,
             probs=probs_seq,
         )
+
+    @torch.no_grad()
+    def encode_for_hard_neg_mining(self, anchor: Tensor) -> Tensor:
+        """Per-anchor signature for online hard-negative mining.
+
+        Returns a ``(B, source_dim)`` tensor: mean-pooled-over-positions
+        of the round-trip alien_emb. This is the projection of each
+        passage in the current model's alien space — passages whose
+        signatures are nearest are the model's current confusion set.
+
+        Mean-pooled (rather than full flat (B, P, D)) for kNN speed; the
+        positional information matters during contrastive training but
+        for the *similarity-search* side the mean is a good proxy.
+        """
+        expr = self._generate_round_trip(anchor)
+        # alien_emb is (B, P, D); pool to (B, D)
+        return expr.alien_emb.mean(dim=1).float()
 
     @torch.no_grad()
     def generate(self, anchor: Tensor) -> tuple[Tensor, Tensor]:

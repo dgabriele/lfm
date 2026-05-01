@@ -48,7 +48,18 @@ distractor_curriculum_end: 2000
 embedding_store_dir: data/embeddings_qwen_subset   # 50K passage subset for fast iteration on 8GB
 batch_size: 32                   # body is frozen in the game (no body grads/Adam state) so memory budget is much lower than Phase 1 — single-pass batch 32 fits comfortably
 gradient_accumulation_steps: 1
-steps: 5000
+steps: 10000   # extended: more anchor coverage + post-warmup online hard-neg mining
+
+# ── Online hard-negative mining (ANCE-style) ────────────────────────────
+# After step `hard_neg_warmup`, every `hard_neg_refresh_every` steps:
+# re-encode all 50K passages with the current model, build a top-K
+# nearest-neighbor index in alien-emb space, then sample distractors
+# from each anchor's top-K hardest non-self neighbors instead of from
+# the static KMeans clusters. The model trains against its own current
+# confusion — self-pacing difficulty as it improves.
+hard_neg_refresh_every: 500
+hard_neg_topk: 100
+hard_neg_warmup: 2000
 num_distractors: 31              # batch+distractors = 32 + 32*31 = 1024-way (DepTreeVAE benchmark)
 max_grad_norm: 1.0
 contrastive_scoring: true
