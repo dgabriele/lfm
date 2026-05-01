@@ -179,7 +179,7 @@ class AgentTrainer:
 
         return anchor, distractors, hard_ratio, candidate_indices
 
-    def _maybe_refresh_hard_negatives(self, step: int) -> None:
+    def _maybe_refresh_hard_negatives(self, step: int, force: bool = False) -> None:
         """Refresh the online hard-negative kNN index when due.
 
         Skips silently if mining is disabled, the warmup hasn't passed, or
@@ -187,12 +187,17 @@ class AgentTrainer:
         runs the model over the full embedding store (no_grad), pools into
         a per-passage signature, and rebuilds a top-K nearest-non-self
         index in alien-emb space using cosine similarity.
+
+        ``force=True`` skips the step%refresh_every modulo check — used at
+        startup-on-resume so the index exists before the first training
+        step (otherwise resuming at e.g. step 5100 with refresh_every=500
+        would wait until step 5500 to first build the index).
         """
         if self._hard_neg_refresh_every <= 0:
             return
         if step < self._hard_neg_warmup:
             return
-        if step % self._hard_neg_refresh_every != 0:
+        if not force and step % self._hard_neg_refresh_every != 0:
             return
         if not hasattr(self.game, "encode_for_hard_neg_mining"):
             return
@@ -333,8 +338,10 @@ class AgentTrainer:
         ipa_refresh = getattr(cfg, "ipa_cache_refresh", 0)
 
         # Build the initial hard-negative index if we're already past warmup
-        # (e.g. resuming from a saturated KMeans-cluster run).
-        self._maybe_refresh_hard_negatives(start_step)
+        # (e.g. resuming from a saturated KMeans-cluster run). Force=True
+        # so it fires regardless of whether start_step is a refresh-modulo
+        # multiple — the index doesn't yet exist at startup.
+        self._maybe_refresh_hard_negatives(start_step, force=True)
 
         for step in range(start_step, cfg.steps):
             # Refresh IPA cache periodically
