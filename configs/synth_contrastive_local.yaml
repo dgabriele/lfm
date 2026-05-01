@@ -73,8 +73,8 @@ hard_neg_warmup: 2000
 # while leaving InfoNCE free to encode the anchor's identity.
 # K=1 disables, behaves identically to the v3 single-paragraph game.
 n_paragraphs: 4
-coherence_weight: 0.1
-coherence_target_cos: 0.5     # max allowed pairwise paragraph similarity; penalty fires when cos > target (forces diversity)
+coherence_weight: 0.3                # bumped from 0.1 — push paragraphs toward near-orthogonal so √K noise reduction approaches theoretical
+coherence_target_cos: 0.1            # bumped from 0.5 — paragraphs must be near-orthogonal in alien-emb space
 num_distractors: 31              # batch+distractors = 32 + 32*31 = 1024-way (DepTreeVAE benchmark)
 max_grad_norm: 1.0
 contrastive_scoring: true
