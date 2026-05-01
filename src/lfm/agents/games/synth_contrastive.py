@@ -74,7 +74,15 @@ class SynthContrastiveGameConfig(LFMBaseConfig):
     embedding_dim: int = 896             # message space dim (== Qwen hidden)
 
     # ── Loss weights ─────────────────────────────────────────────────────
-    info_nce_weight: float = 1.0
+    info_nce_weight: float = 1.0           # per-sentence InfoNCE (stability)
+    info_nce_aggregate_weight: float = 0.0  # aggregate-of-K InfoNCE (composition).
+                                           # Set > 0 with n_paragraphs > 1 to enable
+                                           # compositional training: each sentence is
+                                           # conditioned on a learned encoding of
+                                           # previous sentences via ctx_proj, and the
+                                           # K sentences' aggregate alien_emb must
+                                           # match the source — rewards K sentences
+                                           # for encoding *complementary* aspects.
     topology_weight: float = 0.1
     adj_diversity_weight: float = 0.05
 
@@ -238,8 +246,19 @@ class SynthContrastiveGame(nn.Module):
                     config.n_paragraphs, config.n_prefix_tokens, self._d_model,
                 ),
             )
+            # Compositional training context projector (Surgery D / v5).
+            # Maps the pooled alien-hidden mean of *previously-generated*
+            # sentences into a prefix-shaped additive term for the next
+            # sentence's prefix. Initialised to zero so a fresh-init game
+            # starts identical to v4 single-sentence behaviour, and a
+            # resumed v3/v4 checkpoint loads cleanly with this layer fresh
+            # at zero (no behaviour change until training pulls it off zero).
+            self.ctx_proj = nn.Linear(self._d_model, self._d_model)
+            nn.init.zeros_(self.ctx_proj.weight)
+            nn.init.zeros_(self.ctx_proj.bias)
         else:
             self.register_parameter("paragraph_offsets", None)
+            self.ctx_proj = None
 
     # ─── freeze ────────────────────────────────────────────────────────────
 
@@ -267,6 +286,10 @@ class SynthContrastiveGame(nn.Module):
             groups.append(
                 {"params": [self.paragraph_offsets], "lr": cfg.head_lr},
             )
+        if self.ctx_proj is not None:
+            groups.append(
+                {"params": list(self.ctx_proj.parameters()), "lr": cfg.head_lr},
+            )
         return groups
 
     def checkpoint_state(self) -> dict:
@@ -278,6 +301,8 @@ class SynthContrastiveGame(nn.Module):
         }
         if self.paragraph_offsets is not None:
             state["paragraph_offsets"] = self.paragraph_offsets.detach().clone()
+        if self.ctx_proj is not None:
+            state["ctx_proj"] = self.ctx_proj.state_dict()
         return state
 
     def load_checkpoint_state(self, ckpt: dict) -> None:
@@ -291,6 +316,11 @@ class SynthContrastiveGame(nn.Module):
             # random init).
             if self.paragraph_offsets is not None and "paragraph_offsets" in ckpt:
                 self.paragraph_offsets.copy_(ckpt["paragraph_offsets"])
+        # Surgery D: ctx_proj is new in v5 — silently skip from older
+        # checkpoints (it stays at its zero init, which makes v5 with
+        # untouched ctx_proj behaviourally identical to v4).
+        if self.ctx_proj is not None and "ctx_proj" in ckpt:
+            self.ctx_proj.load_state_dict(ckpt["ctx_proj"])
 
     # ─── main forward ─────────────────────────────────────────────────────
 
@@ -307,48 +337,83 @@ class SynthContrastiveGame(nn.Module):
         ratio = self._distractor_curriculum_ratio(step)
         n_dist = int(round(ratio * distractors.size(1)))
         active_distractors = distractors[:, :n_dist] if n_dist > 0 else None
-        n_para = max(1, cfg.n_paragraphs)
+        K = max(1, cfg.n_paragraphs)
 
-        # Generate K paragraphs (K=1 = legacy single-paragraph behavior).
-        # Each paragraph is a full round-trip: project + per-paragraph
-        # offset → AR generate → re-encode → positional pool.
-        exprs = [
-            self._generate_round_trip(anchor, paragraph_idx=k)
-            for k in range(n_para)
-        ]
+        # Compositional chain (Surgery D): sentence k is conditioned on a
+        # learned encoding of sentences <k via ctx_proj, summed into the
+        # prefix. K=1 collapses to legacy single-sentence behavior.
+        # K>1 with ctx_proj at zero (uninitialised / fresh resume) is
+        # equivalent to v4 independent multi-paragraph.
+        exprs: list[SynthExpressionOutput] = []
+        context_pool: Tensor | None = None  # (B, D) running sum of sentence means, with grad
+        for k in range(K):
+            expr_k = self._generate_round_trip(
+                anchor, paragraph_idx=k, context_pool=context_pool,
+            )
+            exprs.append(expr_k)
+            # Update context for the next sentence: mean-pooled alien hidden
+            # over valid positions, accumulated into the running sum. The
+            # gradient flows back through this context into ctx_proj of the
+            # NEXT sentence's prefix, so backward path is:
+            #   loss → next sent re-encode → ctx_proj → this sent hidden → this sent re-encode
+            m = expr_k.valid_mask.unsqueeze(-1).to(expr_k.hidden.dtype)
+            sent_mean = (expr_k.hidden * m).sum(dim=1) / m.sum(dim=1).clamp(min=1)
+            sent_mean = sent_mean.float()
+            context_pool = sent_mean if context_pool is None else context_pool + sent_mean
 
-        # Per-paragraph loss terms (InfoNCE, topology, ngram_kl, adj_div).
-        # Sum the loss-term tensors across paragraphs; report averaged
-        # values for logging.
-        agg_terms: dict[str, Tensor] = {}
-        agg_logits: list[Tensor] = []
+        # Per-sentence loss terms: each sentence still must individually
+        # encode the anchor (stability term). Averaged across K so weights
+        # stay invariant to K.
+        per_sent_terms: dict[str, Tensor] = {}
+        per_sent_logits: list[Tensor] = []
         for expr in exprs:
             terms_k, logits_k = self._compute_loss_terms(expr, anchor, active_distractors)
-            agg_logits.append(logits_k)
+            per_sent_logits.append(logits_k)
             for name, val in terms_k.items():
-                agg_terms[name] = (
-                    agg_terms[name] + val if name in agg_terms else val.clone()
+                per_sent_terms[name] = (
+                    per_sent_terms[name] + val if name in per_sent_terms else val.clone()
                 )
-        # Average over paragraphs so weights stay invariant to n_paragraphs.
-        for name in list(agg_terms):
-            agg_terms[name] = agg_terms[name] / n_para
+        for name in list(per_sent_terms):
+            per_sent_terms[name] = per_sent_terms[name] / K
 
-        # Coherence loss (Surgery C): paragraphs of the same anchor should
-        # have similar alien_emb signatures. Mean-pool over positions for
-        # the per-paragraph signature, then hinge-penalise pairwise cosine
-        # below the target.
-        if n_para > 1 and cfg.coherence_weight > 0:
-            agg_terms["coherence"] = self._coherence_loss(exprs)
+        # Aggregate-level InfoNCE (Surgery D): mean of K sentence alien_embs
+        # must match the source. Rewards the K sentences for encoding
+        # *complementary* aspects of the anchor — composition, not
+        # redundancy. K identical sentences satisfy per-sentence InfoNCE
+        # equally well; only complementary-content sentences also win at
+        # aggregate.
+        if K > 1 and cfg.info_nce_aggregate_weight > 0:
+            agg_alien = torch.stack(
+                [e.alien_emb for e in exprs], dim=0,
+            ).mean(dim=0)                                          # (B, P, D)
+            msg_alien_agg = self.message_head(agg_alien)
+            msg_source = self.target_proj(anchor)
+            agg_info_nce, agg_logits = self._info_nce(
+                msg_alien_agg, msg_source, active_distractors,
+            )
+            agg_topology = 1.0 - F.cosine_similarity(
+                msg_alien_agg, msg_source, dim=-1,
+            ).mean()
+            per_sent_terms["info_nce_agg"] = agg_info_nce
+            per_sent_terms["topology_agg"] = agg_topology
         else:
-            agg_terms["coherence"] = exprs[0].alien_emb.new_zeros(())
+            agg_logits = per_sent_logits[0]
+            per_sent_terms["info_nce_agg"] = exprs[0].alien_emb.new_zeros(())
+            per_sent_terms["topology_agg"] = exprs[0].alien_emb.new_zeros(())
 
-        total = self._aggregate(agg_terms)
+        # Cross-sentence diversity (Surgery C): penalise paragraphs whose
+        # signatures are too similar — keeps composition meaningful.
+        if K > 1 and cfg.coherence_weight > 0:
+            per_sent_terms["coherence"] = self._coherence_loss(exprs)
+        else:
+            per_sent_terms["coherence"] = exprs[0].alien_emb.new_zeros(())
 
-        # Accuracy: average across paragraphs of the diagonal-argmax rate.
-        target_idx = torch.arange(agg_logits[0].size(0), device=total.device)
-        accuracy = torch.stack([
-            (l.argmax(dim=1) == target_idx).float().mean() for l in agg_logits
-        ]).mean()
+        total = self._aggregate(per_sent_terms)
+
+        # Accuracy: prefer the aggregate logits when active (the real signal
+        # of compositional encoding); else use per-sentence-0's logits.
+        target_idx = torch.arange(agg_logits.size(0), device=agg_logits.device)
+        accuracy = (agg_logits.argmax(dim=1) == target_idx).float().mean()
 
         # Generation diversity diagnostic — across all paragraphs' tokens.
         # Paragraphs may end at different AR lengths (each stops at its own
@@ -374,9 +439,9 @@ class SynthContrastiveGame(nn.Module):
             "loss":            total,
             "accuracy":        accuracy,
             "ttr":             ttr,
-            **agg_terms,
+            **per_sent_terms,
             "n_distractors":   torch.tensor(float(n_dist), device=total.device),
-            "n_paragraphs":    torch.tensor(float(n_para), device=total.device),
+            "n_paragraphs":    torch.tensor(float(K), device=total.device),
         }
         out["_token_ids"] = all_tok
         out["_valid_mask"] = all_mask
@@ -424,46 +489,55 @@ class SynthContrastiveGame(nn.Module):
 
     # ─── round-trip generation ─────────────────────────────────────────────
 
-    def _generate_round_trip(
+    def _build_prefix(
         self, anchor: Tensor, paragraph_idx: int = 0,
-    ) -> SynthExpressionOutput:
-        """Project source → AR-generate alien tokens (no_grad, for memory) →
-        re-encode [prefix | tokens] through body in a single forward pass with
-        gradient flow → positionally bin the alien-token hidden states into
-        ``n_source_positions`` buckets matching the source embedding shape.
+        context_pool: Tensor | None = None,
+    ) -> Tensor:
+        """Construct the conditioning prefix for a single AR pass.
 
-        Memory rationale: full-grad AR over T steps accumulates O(B·T²·D·L)
-        activations. Detaching AR keeps memory at one-forward cost. Gradient
-        flows: loss → positional alien_emb → body → prefix → projector.
+        Composition:
+            prefix = projector(anchor)
+                   + paragraph_offsets[paragraph_idx]   (Surgery C)
+                   + ctx_proj(context_pool).unsqueeze(1)  (Surgery D)
 
-        Why positional (not mean) pool: mean-pooling collapses sequence
-        position into a bag-of-tokens, so the contrastive loss is invariant
-        to permutation — the model has zero gradient for grammatical word
-        order, long-range dependencies, or sequence-level structure. Binning
-        into P=n_source_positions buckets matches the source's last-k_concat
-        shape and forces the alien's first 1/P of tokens to encode the
-        source's first position, etc. — restoring positional gradient.
+        ``context_pool`` is the trained additive context term — typically
+        the running sum of mean-pooled alien hidden states from previously
+        generated sentences. ``ctx_proj`` is initialised to zero so the
+        first sentence (no prior context) and any sentence with
+        ``context_pool=None`` behaves exactly as v3/v4.
         """
-        B = anchor.size(0)
-        device = anchor.device
-
-        # 1) Project to prefix tokens. (Trainable; gradient flows.) For
-        #    Surgery C multi-paragraph, add the per-paragraph offset so
-        #    each paragraph generates from a distinct conditioning prefix.
         prefix = self.synth_lm.projector(anchor).to(self.synth_lm.backend.dtype)
         if self.paragraph_offsets is not None:
             prefix = prefix + self.paragraph_offsets[paragraph_idx].to(prefix.dtype)
+        if context_pool is not None and self.ctx_proj is not None:
+            ctx_term = self.ctx_proj(context_pool).to(prefix.dtype)
+            prefix = prefix + ctx_term.unsqueeze(1)
+        return prefix
 
-        # 2) Detached autoregressive generation. Only emits token IDs.
+    def _round_trip_from_prefix(self, prefix: Tensor) -> SynthExpressionOutput:
+        """Detached AR + grad-flowing re-encode + positional pool from a
+        pre-built prefix. Factored out so multi-sentence compositional
+        training (Surgery D) can build context-conditional prefixes per
+        sentence and reuse this function for the round-trip work.
+
+        Memory rationale: full-grad AR over T steps accumulates O(B·T²·D·L)
+        activations. Detaching AR keeps memory at one-forward cost. Gradient
+        flows: loss → positional alien_emb → body → prefix → (projector,
+        paragraph_offsets, ctx_proj).
+        """
+        backend = self.synth_lm.backend
+        B = prefix.size(0)
+        device = prefix.device
+
+        # 1) Detached autoregressive generation. Only emits token IDs.
         with torch.no_grad():
-            prefix_d = prefix.detach()
-            context = prefix_d.clone()
+            context = prefix.detach().clone()
             gen_ids: list[Tensor] = []
             done = torch.zeros(B, dtype=torch.bool, device=device)
             temp = max(self.config.generation_temperature, 1e-6)
             for t in range(self.config.max_gen_len):
-                hidden = self.synth_lm.backend.forward_hidden(context)
-                logits = self.synth_lm.backend.alien_logits(hidden[:, -1:]).squeeze(1)
+                hidden = backend.forward_hidden(context)
+                logits = backend.alien_logits(hidden[:, -1:]).squeeze(1)
                 logits = self._apply_blockers(logits.unsqueeze(1), gen_ids, t).squeeze(1)
                 if temp == 1.0 or self.config.generation_temperature == 0:
                     next_id = logits.argmax(dim=-1) if self.config.generation_temperature == 0 \
@@ -474,46 +548,33 @@ class SynthContrastiveGame(nn.Module):
                 done = done | (next_id == self._eos_id)
                 if done.all():
                     break
-                next_emb = self.synth_lm.backend.embed_alien(next_id.unsqueeze(1))
+                next_emb = backend.embed_alien(next_id.unsqueeze(1))
                 context = torch.cat([context, next_emb], dim=1)
 
-        token_ids = torch.stack(gen_ids, dim=1)                           # (B, S)
-        valid_mask = self._build_valid_mask(token_ids)                    # (B, S) bool
+        token_ids = torch.stack(gen_ids, dim=1)
+        valid_mask = self._build_valid_mask(token_ids)
 
-        # 3) Re-encode pass WITH gradient: feed [prefix | embed(tokens)] through
-        #    the body once. Tokens are detached IDs; their embeddings come from
-        #    the frozen alien_emb table, so gradient flow is:
-        #        loss → alien_emb_pool → body → prefix → projector
-        #    Gradient-checkpointed so only inputs are saved during forward;
-        #    the body forward is recomputed during backward. Bounds peak
-        #    activation memory regardless of B*T size.
-        token_embs = self.synth_lm.backend.embed_alien(token_ids).to(prefix.dtype)
+        # 2) Re-encode pass WITH gradient — gradient-checkpointed.
+        token_embs = backend.embed_alien(token_ids).to(prefix.dtype)
         prefix_len = prefix.size(1)
 
         def _re_encode(prefix_, token_embs_):
             full = torch.cat([prefix_, token_embs_], dim=1)
-            return self.synth_lm.backend.forward_hidden(full)
+            return backend.forward_hidden(full)
 
         full_hidden = torch.utils.checkpoint.checkpoint(
             _re_encode, prefix, token_embs, use_reentrant=False,
         )
-        alien_hidden = full_hidden[:, prefix_len:]                        # (B, S, D)
+        alien_hidden = full_hidden[:, prefix_len:]
 
-        # 4) Positional binning: (B, S, D) + (B, S) → (B, P, D) where P =
-        #    n_source_positions. Restores positional gradient that mean-pool
-        #    destroyed.
+        # 3) Positional binning: (B, S, D) + (B, S) → (B, P, D).
         alien_emb = self._positional_pool(
             alien_hidden, valid_mask, n_pos=self.config.n_source_positions,
         )
 
-        # 5) Probs over generated positions — used by bigram_kl and adj_diversity.
-        #    We keep these IN the autograd graph (no no_grad wrap) so the diversity
-        #    losses provide real gradient signal back through alien_logits → body →
-        #    prefix → projector. Without grad flow these are merely diagnostic
-        #    measurements, leaving the only real anti-collapse pressure to come
-        #    indirectly from info_nce — which was the DepTreeVAE failure pattern.
+        # 4) Probs in the autograd graph for ngram_kl + adj_diversity.
         probs_seq = F.softmax(
-            self.synth_lm.backend.alien_logits(alien_hidden).float(), dim=-1,
+            backend.alien_logits(alien_hidden).float(), dim=-1,
         )
 
         return SynthExpressionOutput(
@@ -524,6 +585,16 @@ class SynthContrastiveGame(nn.Module):
             hidden=alien_hidden,
             probs=probs_seq,
         )
+
+    def _generate_round_trip(
+        self, anchor: Tensor, paragraph_idx: int = 0,
+        context_pool: Tensor | None = None,
+    ) -> SynthExpressionOutput:
+        """Convenience: build prefix and run the round-trip. K=1 callers and
+        the K>1 chain in ``forward`` both go through here.
+        """
+        prefix = self._build_prefix(anchor, paragraph_idx, context_pool)
+        return self._round_trip_from_prefix(prefix)
 
     @torch.no_grad()
     def encode_for_hard_neg_mining(self, anchor: Tensor) -> Tensor:
@@ -888,6 +959,12 @@ class SynthContrastiveGame(nn.Module):
             + terms["ngram_kl"]
             + cfg.adj_diversity_weight * terms["adj_diversity"]
         )
+        # Surgery D — compositional aggregate terms
+        if "info_nce_agg" in terms and cfg.info_nce_aggregate_weight > 0:
+            total = total + cfg.info_nce_aggregate_weight * terms["info_nce_agg"]
+            if "topology_agg" in terms:
+                total = total + cfg.topology_weight * terms["topology_agg"]
+        # Surgery C — cross-sentence diversity
         if "coherence" in terms and cfg.coherence_weight > 0:
             total = total + cfg.coherence_weight * terms["coherence"]
         return total

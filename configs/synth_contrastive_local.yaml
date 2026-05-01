@@ -17,7 +17,8 @@ contrastive_temperature: 0.07
 embedding_dim: 896
 
 # ── Loss weights ────────────────────────────────────────────────────────
-info_nce_weight: 1.0
+info_nce_weight: 0.3                # per-sentence anchor stability (downweighted in v5)
+info_nce_aggregate_weight: 0.7     # primary v5 signal: the K-sentence mean must match the source — rewards composition
 topology_weight: 0.1
 adj_diversity_weight: 0.05
 
@@ -84,7 +85,7 @@ log_temperature_lr: 0.001
 
 log_every: 25
 checkpoint_every: 100
-output_dir: data/synth_contrastive_v4_local   # v4 = v3 + multi-paragraph + coherence loss
+output_dir: data/synth_contrastive_v5_local   # v5 = v4 + chain conditioning + aggregate-level InfoNCE (composition)
 device: cuda
 seed: 42
 
