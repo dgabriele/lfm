@@ -54,6 +54,11 @@ def main() -> None:
     p.add_argument("--no-chain", action="store_true",
                    help="disable chain conditioning even with n-sentences>1 "
                         "(use independent generation per sentence).")
+    p.add_argument("--out-format", choices=("plain", "jsonl"), default="plain",
+                   help="plain: one space-joined doc per line (default). "
+                        "jsonl: one JSON record per line with 'sents' list — "
+                        "preserves K-sentence boundaries for downstream "
+                        "structural diagnostics.")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -155,8 +160,12 @@ def main() -> None:
                         text = alien_tok.decode(ids.tolist(), skip_special_tokens=True)
                         sent_tok_lists[i].append(text.replace("\n", " ").strip())
             for i in range(bs):
-                doc = " ".join(s for s in sent_tok_lists[i] if s)
-                f.write(doc + "\n")
+                sents = [s for s in sent_tok_lists[i] if s]
+                if args.out_format == "jsonl":
+                    import json as _json
+                    f.write(_json.dumps({"sents": sents}, ensure_ascii=False) + "\n")
+                else:
+                    f.write(" ".join(sents) + "\n")
                 n_written += 1
             log.info("batch %d/%d  written %d / %d",
                      batch_i + 1, n_batches, n_written, args.n_docs)
