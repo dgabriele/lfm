@@ -1,0 +1,51 @@
+# Multi-sentence Phase 1 — retrain the SynthLM body on multi-sentence
+# cipher-encoded paragraphs (vs the prior single-sentence corpus).
+# Goal: install a discourse-level prior in the body so the contrastive
+# game's single AR generation natively produces multi-sentence
+# paragraphs with Zipf/burstiness/coherence emerging from the training
+# distribution rather than from band-aid losses.
+
+vocab_size: 8000
+vocab_seed: 42
+
+base_model_name: Qwen/Qwen2.5-0.5B
+
+source_embedding_dim: 896
+n_prefix_tokens: 8
+
+# Phase 1 — multi-sentence corpus, longer context
+phase1_dataset_dir: data/multisent_corpus/passages_normalized.jsonl
+phase1_batch_size: 8                # cut from 24 — paragraphs are 6-7x longer than sentences
+phase1_grad_accum: 3                # effective batch = 24 (matches v4.1 throughput)
+phase1_lr: 0.0005
+phase1_body_lr: 0.00003
+phase1_lr_min: 0.00003
+phase1_lr_schedule: cosine
+phase1_body_warmup_steps: 3000
+phase1_hidden_mse_weight: 0.01
+phase1_coherence_weight: 0.1
+phase1_coherence_replace_frac: 0.10
+phase1_ending_weight: 0.1
+phase1_ending_window: 5
+phase1_steps: 25000                  # cut from 50K — paragraphs are ~6x more tokens/step than the old single-sentence corpus, so equivalent token-coverage in fewer steps
+phase1_max_len: 512                  # 80 → 512: paragraph-scale context
+phase1_filter_truncated: true
+phase1_log_every: 200
+phase1_diag_every: 1000
+phase1_checkpoint_every: 1000
+
+# Phase 2 (unchanged — won't be used for the multisent contrastive game
+# rerun; here for config completeness only)
+phase2_store_dir: data/embeddings_qwen
+phase2_batch_size: 64
+phase2_lr: 0.001
+phase2_steps: 100000
+phase2_length_loss_weight: 0.1
+phase2_log_every: 200
+phase2_checkpoint_every: 2000
+
+length_slack: 10
+
+output_dir: data/synth_qwen_multisent
+device: cuda
+seed: 42
