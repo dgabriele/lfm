@@ -197,7 +197,6 @@ class AgentTrainer:
         if not hasattr(self.game, "encode_for_hard_neg_mining"):
             return
 
-        from sklearn.neighbors import NearestNeighbors
         import time
 
         n = self.store.num_passages
@@ -206,28 +205,40 @@ class AgentTrainer:
             "Refreshing online hard-negative index at step %d (n=%d, batch=%d) ...",
             step, n, bs,
         )
+
+        # 1) Encode all signatures. The game's signature is per-position
+        #    L2-normalised + flattened, so dot products between rows equal
+        #    the sum of per-position cosines = InfoNCE confusion score.
         t0 = time.time()
-        sigs = []
+        sigs_list = []
         for i in range(0, n, bs):
             idx = np.arange(i, min(i + bs, n))
             anchor = torch.tensor(
                 self._embeddings[idx], dtype=torch.float32,
             ).to(self.device)
-            sig = self.game.encode_for_hard_neg_mining(anchor).cpu().numpy()
-            sigs.append(sig)
-        all_sigs = np.concatenate(sigs, axis=0)        # (n, dim)
+            sig = self.game.encode_for_hard_neg_mining(anchor)   # (b, D_flat)
+            sigs_list.append(sig)
+        sigs = torch.cat(sigs_list, dim=0)                       # (n, D_flat)
         dt_enc = time.time() - t0
 
+        # 2) GPU chunked top-K kNN on InfoNCE-geometry similarity.
+        #    sim[i, j] = sigs[i] @ sigs[j].T (vectors are per-position
+        #    L2-normed; this is the exact InfoNCE-summed-over-positions score).
+        #    Self is masked with -inf so all top-K are non-self neighbors.
         t0 = time.time()
-        nn = NearestNeighbors(
-            n_neighbors=self._hard_neg_topk + 1,
-            metric="cosine", algorithm="brute",
-        )
-        nn.fit(all_sigs)
-        _, indices = nn.kneighbors(all_sigs)
-        # Skip self at column 0
-        self._hard_neg_indices = indices[:, 1:].astype(np.intp)
+        K = self._hard_neg_topk
+        topk_idx = torch.empty((n, K), dtype=torch.long, device=sigs.device)
+        chunk = 1024
+        for i in range(0, n, chunk):
+            end = min(i + chunk, n)
+            sim = sigs[i:end] @ sigs.t()                         # (chunk, n)
+            row_idx = torch.arange(i, end, device=sigs.device)
+            sim[row_idx - i, row_idx] = float("-inf")            # mask self
+            _, top = sim.topk(K, dim=1)
+            topk_idx[i:end] = top
+        self._hard_neg_indices = topk_idx.cpu().numpy().astype(np.intp)
         dt_knn = time.time() - t0
+        del sigs
 
         logger.info(
             "  encoded %d sigs in %.1fs; built kNN(top-%d) in %.1fs; index ready",

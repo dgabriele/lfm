@@ -406,36 +406,51 @@ class SynthContrastiveGame(nn.Module):
     def encode_for_hard_neg_mining(self, anchor: Tensor) -> Tensor:
         """Per-anchor signature for online hard-negative mining.
 
-        Returns a ``(B, source_dim)`` tensor: mean-pooled-over-positions
-        of the round-trip alien_emb. This is the projection of each
-        passage in the current model's alien space — passages whose
-        signatures are nearest are the model's current confusion set.
+        Returns a ``(B, n_source_positions * embedding_dim)`` tensor: the
+        per-position InfoNCE projection (``message_head`` output) of the
+        round-trip alien_emb, L2-normalised per position and then flattened.
 
-        Inference-only: uses the KV-cached ``generate`` path for AR
-        (O(T) per batch) plus a single re-encode forward (vs the
-        ``_generate_round_trip`` AR loop which is O(T²) without cache).
-        For 50K passages at batch=128 this is the difference between
-        ~10 minutes and ~30 seconds.
+        Why this geometry: the InfoNCE loss scores each (alien_i, source_j)
+        pair as the sum across positions of per-position cosine similarities
+        between ``message_head(alien_emb_i)`` and ``target_proj(source_j)``.
+        Two anchors that the contrastive task confuses must therefore have
+        similar *per-position* InfoNCE projections — and after per-position
+        L2 norm + flatten, their dot product equals the sum-of-per-position
+        cosines, which is the exact InfoNCE confusion ranking.
+
+        Earlier mean-pool signature (B, source_dim) collapsed positional
+        structure that the per-position contrastive loss specifically uses,
+        so its kNN found "near in mean-pool space" pairs that the actual
+        contrastive task discriminated trivially. This signature lives in
+        the same geometry as the loss and produces *genuinely* hard
+        negatives.
+
+        Inference-only: KV-cached generate + single re-encode (vs the
+        slower no-cache AR loop in _generate_round_trip).
         """
         backend = self.synth_lm.backend
 
         # 1) KV-cached AR generation → token_ids, valid_mask
         token_ids, valid_mask = self.generate(anchor)
 
-        # 2) Single re-encode pass through the body (no grad needed; mining
-        #    is purely a similarity-search step).
+        # 2) Single re-encode pass through the body
         prefix = self.synth_lm.projector(anchor).to(backend.dtype)
         token_embs = backend.embed_alien(token_ids).to(prefix.dtype)
         full = torch.cat([prefix, token_embs], dim=1)
         full_hidden = backend.forward_hidden(full)
         alien_hidden = full_hidden[:, prefix.size(1):]
 
-        # 3) Positional pool to (B, P, D), then mean across P for the
-        #    kNN signature (mean is a good proxy and 8x faster than flat).
+        # 3) Positional pool → (B, P, D)
         alien_emb = self._positional_pool(
             alien_hidden, valid_mask, n_pos=self.config.n_source_positions,
         )
-        return alien_emb.mean(dim=1).float()
+
+        # 4) Project to InfoNCE space → (B, P, embedding_dim)
+        msg_alien = self.message_head(alien_emb)
+
+        # 5) Per-position L2 norm + flatten → (B, P * embedding_dim).
+        msg_alien = F.normalize(msg_alien, dim=-1)
+        return msg_alien.flatten(start_dim=1).float()
 
     @torch.no_grad()
     def generate(self, anchor: Tensor) -> tuple[Tensor, Tensor]:
