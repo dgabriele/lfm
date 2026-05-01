@@ -662,8 +662,13 @@ class SynthContrastiveGame(nn.Module):
             if history_pool is not None:
                 prefix = prefix + history_pool.unsqueeze(1).to(prefix.dtype)
 
-            # AR generate (KV-cached)
+            # AR generate (KV-cached). Accumulate alien-token hidden states
+            # into a running sum during the loop — no full hidden tensor is
+            # ever materialised, so memory stays O(B*D) regardless of S.
             hidden, past = backend.forward_hidden(prefix, use_cache=True)
+            D = hidden.size(-1)
+            running_sum = torch.zeros(B, D, device=device, dtype=torch.float32)
+            running_count = torch.zeros(B, device=device, dtype=torch.float32)
             gen_ids: list[Tensor] = []
             done = torch.zeros(B, dtype=torch.bool, device=device)
             temp = max(self.config.generation_temperature, 1e-6)
@@ -675,6 +680,9 @@ class SynthContrastiveGame(nn.Module):
                 else:
                     next_id = torch.multinomial(F.softmax(logits / temp, dim=-1), 1).squeeze(-1)
                 gen_ids.append(next_id)
+                # Mask BEFORE updating done: include hidden iff element hadn't
+                # EOS'd yet, i.e., position t is at-or-before first EOS.
+                weight = (~done).float()                       # (B,)
                 done = done | (next_id == self._eos_id)
                 if done.all():
                     break
@@ -682,20 +690,15 @@ class SynthContrastiveGame(nn.Module):
                 hidden, past = backend.forward_hidden(
                     next_emb, past_key_values=past, use_cache=True,
                 )
+                # hidden is (B, 1, D); accumulate weighted into running pool.
+                running_sum = running_sum + hidden.squeeze(1).float() * weight.unsqueeze(-1)
+                running_count = running_count + weight
             token_ids = torch.stack(gen_ids, dim=1)
             valid_mask = self._build_valid_mask(token_ids)
             sentences.append((token_ids, valid_mask))
 
-            # Encode this sentence into history_pool. Single re-encode pass
-            # over [prefix; tokens] yields hidden states; mean-pool the alien
-            # portion under the valid mask.
-            token_embs = backend.embed_alien(token_ids).to(prefix.dtype)
-            full = torch.cat([prefix, token_embs], dim=1)
-            full_hidden = backend.forward_hidden(full)
-            alien_hidden = full_hidden[:, n_prefix:]
-            m = valid_mask.unsqueeze(-1).to(alien_hidden.dtype)
-            sent_mean = (alien_hidden * m).sum(dim=1) / m.sum(dim=1).clamp(min=1)
-            sent_mean = sent_mean.float()
+            # Per-element mean over valid hidden states.
+            sent_mean = running_sum / running_count.clamp(min=1).unsqueeze(-1)
             history_pool = sent_mean if history_pool is None else history_pool + sent_mean
 
         return sentences
