@@ -29,6 +29,7 @@ correlates with linguistic discrimination, not collapse-discrimination.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,8 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+
+logger = logging.getLogger(__name__)
 
 from lfm.agents.components import embed_tokens_straight_through
 from lfm.agents.config import CurriculumConfig
@@ -313,9 +316,26 @@ class SynthContrastiveGame(nn.Module):
             self.log_temperature.copy_(ckpt["log_temp"])
             # Surgery C: paragraph offsets are new in v4 — silently skip
             # if missing from older checkpoints (they'll keep their fresh
-            # random init).
+            # random init). Also handle K-bump (resume from a smaller-K
+            # ckpt into a larger-K config): copy what we have into the
+            # first n_load positions, leave the rest at fresh init.
             if self.paragraph_offsets is not None and "paragraph_offsets" in ckpt:
-                self.paragraph_offsets.copy_(ckpt["paragraph_offsets"])
+                saved = ckpt["paragraph_offsets"]
+                if saved.shape == self.paragraph_offsets.shape:
+                    self.paragraph_offsets.copy_(saved)
+                elif saved.dim() == 3 and saved.shape[1:] == self.paragraph_offsets.shape[1:] \
+                        and saved.shape[0] <= self.paragraph_offsets.shape[0]:
+                    n_load = saved.shape[0]
+                    self.paragraph_offsets[:n_load].copy_(saved)
+                    logger.info(
+                        "paragraph_offsets: loaded %d/%d from ckpt; rest at fresh init",
+                        n_load, self.paragraph_offsets.shape[0],
+                    )
+                else:
+                    logger.warning(
+                        "paragraph_offsets: ckpt shape %s incompatible with model shape %s — leaving at fresh init",
+                        tuple(saved.shape), tuple(self.paragraph_offsets.shape),
+                    )
         # Surgery D: ctx_proj is new in v5 — silently skip from older
         # checkpoints (it stays at its zero init, which makes v5 with
         # untouched ctx_proj behaviourally identical to v4).
