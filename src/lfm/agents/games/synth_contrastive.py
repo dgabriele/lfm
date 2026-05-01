@@ -485,6 +485,11 @@ class SynthContrastiveGame(nn.Module):
         target_idx = torch.arange(agg_logits.size(0), device=agg_logits.device)
         accuracy = (agg_logits.argmax(dim=1) == target_idx).float().mean()
 
+        # Lexical diagnostics (per-batch, no_grad) — track the surface-token
+        # signals that the offline diagnostic flagged: within-doc lexical
+        # coherence and positional collapse.
+        lex_coh, pos_div_last = self._lexical_diagnostics(exprs)
+
         # Generation diversity diagnostic — across all paragraphs' tokens.
         # Paragraphs may end at different AR lengths (each stops at its own
         # done.all() boundary); right-pad to common max length before concat.
@@ -509,6 +514,8 @@ class SynthContrastiveGame(nn.Module):
             "loss":            total,
             "accuracy":        accuracy,
             "ttr":             ttr,
+            "lex_coh":         lex_coh,
+            "pos_div_last":    pos_div_last,
             **per_sent_terms,
             "n_distractors":   torch.tensor(float(n_dist), device=total.device),
             "n_paragraphs":    torch.tensor(float(K), device=total.device),
@@ -545,6 +552,86 @@ class SynthContrastiveGame(nn.Module):
                 loss = loss + F.relu(cos - target).mean()
                 n_pairs += 1
         return loss / max(n_pairs, 1)
+
+    @torch.no_grad()
+    def _lexical_diagnostics(
+        self, exprs: list[SynthExpressionOutput],
+    ) -> tuple[Tensor, Tensor]:
+        """Per-batch surface-token diagnostics (no_grad, no gradient flow).
+
+        Returns ``(lex_coh, pos_div_last)``:
+          * ``lex_coh``  = mean within-doc Jaccard / mean across-doc Jaccard
+            over the batch. >1 means same-doc sentences share more tokens
+            than random pairs (real topical coherence). =1 means K
+            sentences are functionally lexically independent.
+          * ``pos_div_last`` = (unique first-tokens at last sentence
+            position) / B. <1 indicates positional collapse — the model
+            has stereotyped how to start its last sentence.
+
+        Cost: O(B*K^2) set ops + O(K_cross) cross-pair samples; negligible
+        per step.
+        """
+        K = len(exprs)
+        device = exprs[0].token_ids.device
+        if K < 2:
+            zero = torch.zeros((), device=device)
+            return zero, zero
+        B = exprs[0].token_ids.size(0)
+
+        # Build per-(b, k) token sets from valid positions.
+        token_sets: list[list[set[int]]] = []
+        for b in range(B):
+            sets_for_b: list[set[int]] = []
+            for k in range(K):
+                ids = exprs[k].token_ids[b].tolist()
+                valid = exprs[k].valid_mask[b].tolist()
+                sets_for_b.append({int(t) for t, v in zip(ids, valid) if v})
+            token_sets.append(sets_for_b)
+
+        def _jacc(a: set[int], b: set[int]) -> float:
+            if not a and not b:
+                return 1.0
+            return len(a & b) / max(len(a | b), 1)
+
+        within = []
+        for b in range(B):
+            for i in range(K):
+                for j in range(i + 1, K):
+                    within.append(_jacc(token_sets[b][i], token_sets[b][j]))
+        within_mean = sum(within) / max(len(within), 1)
+
+        # Across-doc: random sentence pairs from different docs in the batch.
+        across = []
+        n_cross = min(B * K, 64)
+        for _ in range(n_cross):
+            a_idx = int(torch.randint(0, B, (1,)).item())
+            b_idx = int(torch.randint(0, B, (1,)).item())
+            if B > 1:
+                while b_idx == a_idx:
+                    b_idx = int(torch.randint(0, B, (1,)).item())
+            ka = int(torch.randint(0, K, (1,)).item())
+            kb = int(torch.randint(0, K, (1,)).item())
+            across.append(_jacc(token_sets[a_idx][ka], token_sets[b_idx][kb]))
+        across_mean = sum(across) / max(len(across), 1)
+
+        lex_coh = within_mean / max(across_mean, 1e-12)
+
+        # Positional diversity at the last sentence position.
+        last_firsts: list[int] = []
+        last = exprs[-1]
+        for b in range(B):
+            ids = last.token_ids[b].tolist()
+            valid = last.valid_mask[b].tolist()
+            for t, v in zip(ids, valid):
+                if v:
+                    last_firsts.append(int(t))
+                    break
+        pos_div = len(set(last_firsts)) / max(len(last_firsts), 1) if last_firsts else 0.0
+
+        return (
+            torch.tensor(lex_coh, device=device, dtype=torch.float32),
+            torch.tensor(pos_div, device=device, dtype=torch.float32),
+        )
 
     @staticmethod
     def _batch_ttr(token_ids: Tensor, valid_mask: Tensor) -> Tensor:
