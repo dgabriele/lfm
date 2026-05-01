@@ -47,6 +47,13 @@ def main() -> None:
                         "an 8GB GPU at max_gen_len=256 (~5GB peak, ~150 docs/sec)")
     p.add_argument("--out", required=True)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--n-sentences", type=int, default=None,
+                   help="number of chain-generated sentences per document; "
+                        "default = config.n_paragraphs. >1 enables chain "
+                        "generation (each sentence conditions on prior).")
+    p.add_argument("--no-chain", action="store_true",
+                   help="disable chain conditioning even with n-sentences>1 "
+                        "(use independent generation per sentence).")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -120,21 +127,35 @@ def main() -> None:
                 break
             batch_idx = rng.integers(0, n_total, size=bs)
             anchor = torch.tensor(embeddings[batch_idx].astype(np.float32)).to(device)
-            # Multi-paragraph generation: K alien expressions per anchor,
-            # concatenated into one document (one line of corpus.txt).
-            # K=1 reduces to legacy single-paragraph behavior.
-            n_para = max(1, getattr(game_cfg, "n_paragraphs", 1))
-            para_texts: list[list[str]] = [[] for _ in range(bs)]
-            for k in range(n_para):
-                tok_ids, valid = game.generate(anchor, paragraph_idx=k)
-                token_ids = tok_ids.cpu().numpy()
-                valid_mask = valid.cpu().numpy()
-                for i in range(bs):
-                    ids = token_ids[i][valid_mask[i]]
-                    text = alien_tok.decode(ids.tolist(), skip_special_tokens=True)
-                    para_texts[i].append(text.replace("\n", " ").strip())
+            # n_sentences sentences per anchor concatenated into one doc.
+            # Chain mode (default): each sentence conditions on a pooled
+            # encoding of the previous ones (Alternative 1 to Surgery C).
+            n_sent = args.n_sentences if args.n_sentences is not None \
+                     else max(1, getattr(game_cfg, "n_paragraphs", 1))
+            if n_sent <= 1 or args.no_chain:
+                # Independent generation per sentence
+                sent_tok_lists: list[list[str]] = [[] for _ in range(bs)]
+                for k in range(n_sent):
+                    tok_ids, valid = game.generate(anchor, paragraph_idx=k)
+                    tn = tok_ids.cpu().numpy()
+                    vn = valid.cpu().numpy()
+                    for i in range(bs):
+                        ids = tn[i][vn[i]]
+                        text = alien_tok.decode(ids.tolist(), skip_special_tokens=True)
+                        sent_tok_lists[i].append(text.replace("\n", " ").strip())
+            else:
+                # Chain generation
+                chain = game.chain_generate(anchor, n_sentences=n_sent)
+                sent_tok_lists = [[] for _ in range(bs)]
+                for tok_ids, valid in chain:
+                    tn = tok_ids.cpu().numpy()
+                    vn = valid.cpu().numpy()
+                    for i in range(bs):
+                        ids = tn[i][vn[i]]
+                        text = alien_tok.decode(ids.tolist(), skip_special_tokens=True)
+                        sent_tok_lists[i].append(text.replace("\n", " ").strip())
             for i in range(bs):
-                doc = " ".join(p for p in para_texts[i] if p)
+                doc = " ".join(s for s in sent_tok_lists[i] if s)
                 f.write(doc + "\n")
                 n_written += 1
             log.info("batch %d/%d  written %d / %d",

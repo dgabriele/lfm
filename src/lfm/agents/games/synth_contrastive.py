@@ -620,6 +620,86 @@ class SynthContrastiveGame(nn.Module):
         token_ids = torch.stack(gen_ids, dim=1)
         return token_ids, self._build_valid_mask(token_ids)
 
+    @torch.no_grad()
+    def chain_generate(
+        self, anchor: Tensor, n_sentences: int,
+    ) -> list[tuple[Tensor, Tensor]]:
+        """Inference-only chain generation (Alternative 1 to Surgery C).
+
+        Generates ``n_sentences`` alien sentences anchored to the same
+        source. Each subsequent sentence's prefix is augmented by a
+        pooled encoding of the previously-generated sentences — so
+        sentence k sees what sentences 0..k-1 produced and can condition
+        on them.
+
+        The pooled history is sentence_0_mean + sentence_1_mean + ...
+        (sum, not average — gives growing context weight as more is said).
+        Added uniformly to all ``n_prefix`` prefix positions before AR.
+
+        For ``k`` beyond the number of trained paragraph_offsets, cycle
+        back: ``offsets[k % K_trained]``. The chain conditioning carries
+        the actual discourse signal regardless.
+
+        Returns a list of ``n_sentences`` ``(token_ids, valid_mask)``
+        pairs.
+        """
+        backend = self.synth_lm.backend
+        device = anchor.device
+        B = anchor.size(0)
+
+        base_prefix = self.synth_lm.projector(anchor).to(backend.dtype)  # (B, n_prefix, D)
+        n_prefix = base_prefix.size(1)
+
+        history_pool: Tensor | None = None    # (B, D), float32
+
+        sentences: list[tuple[Tensor, Tensor]] = []
+        K_trained = self.paragraph_offsets.size(0) if self.paragraph_offsets is not None else 0
+        for k in range(n_sentences):
+            prefix = base_prefix.clone()
+            if K_trained > 0:
+                offset_k = self.paragraph_offsets[k % K_trained].to(prefix.dtype)
+                prefix = prefix + offset_k
+            if history_pool is not None:
+                prefix = prefix + history_pool.unsqueeze(1).to(prefix.dtype)
+
+            # AR generate (KV-cached)
+            hidden, past = backend.forward_hidden(prefix, use_cache=True)
+            gen_ids: list[Tensor] = []
+            done = torch.zeros(B, dtype=torch.bool, device=device)
+            temp = max(self.config.generation_temperature, 1e-6)
+            for t in range(self.config.max_gen_len):
+                logits = backend.alien_logits(hidden[:, -1:]).squeeze(1)
+                logits = self._apply_blockers(logits.unsqueeze(1), gen_ids, t).squeeze(1)
+                if self.config.generation_temperature == 0:
+                    next_id = logits.argmax(dim=-1)
+                else:
+                    next_id = torch.multinomial(F.softmax(logits / temp, dim=-1), 1).squeeze(-1)
+                gen_ids.append(next_id)
+                done = done | (next_id == self._eos_id)
+                if done.all():
+                    break
+                next_emb = backend.embed_alien(next_id.unsqueeze(1))
+                hidden, past = backend.forward_hidden(
+                    next_emb, past_key_values=past, use_cache=True,
+                )
+            token_ids = torch.stack(gen_ids, dim=1)
+            valid_mask = self._build_valid_mask(token_ids)
+            sentences.append((token_ids, valid_mask))
+
+            # Encode this sentence into history_pool. Single re-encode pass
+            # over [prefix; tokens] yields hidden states; mean-pool the alien
+            # portion under the valid mask.
+            token_embs = backend.embed_alien(token_ids).to(prefix.dtype)
+            full = torch.cat([prefix, token_embs], dim=1)
+            full_hidden = backend.forward_hidden(full)
+            alien_hidden = full_hidden[:, n_prefix:]
+            m = valid_mask.unsqueeze(-1).to(alien_hidden.dtype)
+            sent_mean = (alien_hidden * m).sum(dim=1) / m.sum(dim=1).clamp(min=1)
+            sent_mean = sent_mean.float()
+            history_pool = sent_mean if history_pool is None else history_pool + sent_mean
+
+        return sentences
+
     def _build_valid_mask(self, token_ids: Tensor) -> Tensor:
         """Mark positions up to and including the first EOS; 0 after."""
         is_eos = token_ids == self._eos_id
