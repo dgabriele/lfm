@@ -84,7 +84,7 @@ log_temperature_lr: 0.001
 
 log_every: 25
 checkpoint_every: 100
-output_dir: data/synth_contrastive_v3_local   # v3 = v2 + cluster-aware hard-negative ramp
+output_dir: data/synth_contrastive_v4_local   # v4 = v3 + multi-paragraph + coherence loss
 device: cuda
 seed: 42
 
