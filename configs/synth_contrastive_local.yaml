@@ -21,6 +21,8 @@ info_nce_weight: 0.3                # per-sentence anchor stability
 info_nce_aggregate_weight: 0.5     # absolute K-aggregate quality
 residual_weight: 0.3                # Surgery E: monotonic improvement — each new sentence must reduce sub-aggregate InfoNCE by ≥ residual_margin
 residual_margin: 0.05
+token_recurrence_weight: 0.2        # Surgery F: within-doc lexical recurrence — vocabulary footprint cosine sim hinge
+token_recurrence_target: 0.5
 topology_weight: 0.1
 adj_diversity_weight: 0.05
 

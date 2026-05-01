@@ -87,6 +87,16 @@ class SynthContrastiveGameConfig(LFMBaseConfig):
                                            # aggregate InfoNCE by at least
                                            # ``residual_margin``.
     residual_margin: float = 0.05
+    token_recurrence_weight: float = 0.0   # Surgery F: explicit token-level
+                                           # within-doc coherence reward. Computes
+                                           # each sentence's mean softmax
+                                           # distribution over valid positions
+                                           # (vocabulary footprint), takes
+                                           # pairwise cosine sim within doc, hinge
+                                           # below ``token_recurrence_target``.
+                                           # Differentiable analog of within-doc
+                                           # Jaccard. Drives lex_coh upward.
+    token_recurrence_target: float = 0.5
                                            # Set > 0 with n_paragraphs > 1 to enable
                                            # compositional training: each sentence is
                                            # conditioned on a learned encoding of
@@ -478,6 +488,17 @@ class SynthContrastiveGame(nn.Module):
         else:
             per_sent_terms["coherence"] = exprs[0].alien_emb.new_zeros(())
 
+        # Surgery F: token-level within-doc coherence — vocabulary footprint
+        # cosine similarity hinge. Differentiable analog of within-doc
+        # Jaccard; drives lex_coh upward.
+        if K > 1:
+            tok_rec_loss, tok_rec_within_sim = self._token_recurrence_loss(exprs)
+            per_sent_terms["token_recurrence"] = tok_rec_loss
+            per_sent_terms["tok_rec_sim"] = tok_rec_within_sim
+        else:
+            per_sent_terms["token_recurrence"] = exprs[0].alien_emb.new_zeros(())
+            per_sent_terms["tok_rec_sim"] = exprs[0].alien_emb.new_zeros(())
+
         total = self._aggregate(per_sent_terms)
 
         # Accuracy: prefer the aggregate logits when active (the real signal
@@ -552,6 +573,43 @@ class SynthContrastiveGame(nn.Module):
                 loss = loss + F.relu(cos - target).mean()
                 n_pairs += 1
         return loss / max(n_pairs, 1)
+
+    def _token_recurrence_loss(
+        self, exprs: list[SynthExpressionOutput],
+    ) -> tuple[Tensor, Tensor]:
+        """Surgery F: differentiable within-doc token-recurrence loss.
+
+        For each sentence k, compute its *vocabulary footprint*: mean
+        softmax distribution over valid generated positions, shape (B, V).
+        Pairwise cosine similarity between footprints of same-doc
+        sentences indicates how much their token *use* overlaps. Higher
+        similarity ⇒ more shared content tokens ⇒ higher lex_coh.
+
+        Loss is a hinge: ReLU(target - mean_within_pair_sim). Penalty
+        fires when within-doc footprint similarity falls below target.
+
+        Returns ``(loss, raw_within_sim)`` — the loss enters the total
+        loss, the raw similarity is logged as ``tok_rec_sim`` for
+        diagnostic visibility regardless of whether the weight is on.
+        """
+        target = float(self.config.token_recurrence_target)
+        # footprint per sentence: (B, V)
+        footprints = []
+        for expr in exprs:
+            mask = expr.valid_mask.unsqueeze(-1).to(expr.probs.dtype)
+            # mean over valid positions; broadcast mask to (B, T, 1)
+            num = (expr.probs * mask).sum(dim=1)             # (B, V)
+            den = mask.sum(dim=1).clamp(min=1)               # (B, 1)
+            footprints.append(num / den)
+        K = len(footprints)
+        sims = []
+        for i in range(K):
+            for j in range(i + 1, K):
+                cos = F.cosine_similarity(footprints[i], footprints[j], dim=-1)  # (B,)
+                sims.append(cos)
+        within_sim = torch.stack(sims).mean()                # scalar
+        loss = F.relu(torch.tensor(target, device=within_sim.device) - within_sim)
+        return loss, within_sim.detach()
 
     @torch.no_grad()
     def _lexical_diagnostics(
@@ -1127,6 +1185,9 @@ class SynthContrastiveGame(nn.Module):
         # Surgery C — cross-sentence diversity
         if "coherence" in terms and cfg.coherence_weight > 0:
             total = total + cfg.coherence_weight * terms["coherence"]
+        # Surgery F — token-level within-doc lexical recurrence
+        if "token_recurrence" in terms and cfg.token_recurrence_weight > 0:
+            total = total + cfg.token_recurrence_weight * terms["token_recurrence"]
         return total
 
     # ─── curriculum ───────────────────────────────────────────────────────
