@@ -46,7 +46,7 @@ distractor_curriculum_end: 2000
 
 # ── Trainer config ──────────────────────────────────────────────────────
 embedding_store_dir: data/embeddings_qwen_subset   # 50K passage subset for fast iteration on 8GB
-batch_size: 32                   # body is frozen in the game (no body grads/Adam state) so memory budget is much lower than Phase 1 — single-pass batch 32 fits comfortably
+batch_size: 16                   # K=2 paragraphs doubles activation memory; B=16 keeps a consistent 512-way pool. (B=32 OOMs at K=2 even with gradient checkpointing.)
 gradient_accumulation_steps: 1
 steps: 10000   # extended: more anchor coverage + post-warmup online hard-neg mining
 
