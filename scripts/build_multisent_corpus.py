@@ -62,27 +62,41 @@ def _looks_like_paragraph(text: str, min_sentences: int,
     return True
 
 
-def _iter_wikitext(min_sentences: int, min_len: int, max_len: int):
-    """Yield wikitext-103 paragraphs that pass the cheap pre-filter."""
+def _iter_wikitext(min_sentences: int, min_len: int, max_len: int,
+                   shard_id: int = 0, num_shards: int = 1):
+    """Yield wikitext-103 paragraphs that pass the cheap pre-filter,
+    selecting only items whose 'pass-index mod num_shards == shard_id'.
+    The shard split is over the *filter-passing* stream so all shards
+    produce roughly equal output counts.
+    """
     from datasets import load_dataset
     ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
+    pass_idx = 0
     for row in ds:
         text = row["text"]
         if _looks_like_paragraph(text, min_sentences, min_len, max_len):
-            yield text.strip()
+            if pass_idx % num_shards == shard_id:
+                yield text.strip()
+            pass_idx += 1
 
 
-def _iter_cc_news(min_sentences: int, min_len: int, max_len: int):
-    """Yield CC-News article paragraphs (split each article on \\n\\n)."""
+def _iter_cc_news(min_sentences: int, min_len: int, max_len: int,
+                  shard_id: int = 0, num_shards: int = 1):
+    """Yield CC-News article paragraphs (split each article on \\n\\n).
+    Shard by filter-passing index mod num_shards.
+    """
     from datasets import load_dataset
     ds = load_dataset("cc_news", split="train", streaming=True)
+    pass_idx = 0
     for row in ds:
         text = row.get("text", "")
         if not text:
             continue
         for para in text.split("\n\n"):
             if _looks_like_paragraph(para, min_sentences, min_len, max_len):
-                yield para.strip()
+                if pass_idx % num_shards == shard_id:
+                    yield para.strip()
+                pass_idx += 1
 
 
 def main() -> None:
@@ -99,6 +113,13 @@ def main() -> None:
     p.add_argument("--news-fraction", type=float, default=0.2)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--log-every", type=int, default=10_000)
+    p.add_argument("--shard-id", type=int, default=0)
+    p.add_argument("--num-shards", type=int, default=1,
+                   help="run as one shard of N. Each shard processes a "
+                        "disjoint subset of input paragraphs (filter-passing "
+                        "items by index mod num_shards) and writes its own "
+                        "output file. Concat shard outputs to get the final "
+                        "corpus.")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -109,10 +130,19 @@ def main() -> None:
     nlp = spacy.load("en_core_web_sm", disable=["lemmatizer", "tagger", "attribute_ruler"])
     nlp.max_length = 5_000_000  # we filter <500 words anyway
 
-    target_news = int(args.target_paragraphs * args.news_fraction) if args.add_news else 0
-    target_wiki = args.target_paragraphs - target_news
-    log.info("targets: wiki=%d news=%d  (total %d)",
-             target_wiki, target_news, args.target_paragraphs)
+    # Per-shard target: divide global target evenly across shards. Add a
+    # 5% buffer so shard 0 doesn't stop short if filter yield is slightly
+    # uneven across shards.
+    global_total = args.target_paragraphs
+    if args.num_shards > 1:
+        per_shard_target = (global_total + args.num_shards - 1) // args.num_shards
+        log.info("running as shard %d / %d  per-shard target=%d  global=%d",
+                 args.shard_id, args.num_shards, per_shard_target, global_total)
+        global_total = per_shard_target
+    target_news = int(global_total * args.news_fraction) if args.add_news else 0
+    target_wiki = global_total - target_news
+    log.info("targets (this shard): wiki=%d news=%d  (total %d)",
+             target_wiki, target_news, global_total)
 
     def _process_stream(stream, target, kind, n_written, fh):
         """Single-threaded spaCy.pipe — no multiprocessing deadlocks."""
@@ -155,12 +185,18 @@ def main() -> None:
     n_news = 0
     with out_path.open("w") as fh:
         log.info("processing wikitext-103 ...")
-        wiki_iter = _iter_wikitext(args.min_sentences, args.min_len, args.max_len)
+        wiki_iter = _iter_wikitext(
+            args.min_sentences, args.min_len, args.max_len,
+            shard_id=args.shard_id, num_shards=args.num_shards,
+        )
         n_written, n_wiki = _process_stream(wiki_iter, target_wiki, "wiki", n_written, fh)
 
         if args.add_news and n_news < target_news:
             log.info("processing cc_news ...")
-            news_iter = _iter_cc_news(args.min_sentences, args.min_len, args.max_len)
+            news_iter = _iter_cc_news(
+                args.min_sentences, args.min_len, args.max_len,
+                shard_id=args.shard_id, num_shards=args.num_shards,
+            )
             n_written, n_news = _process_stream(news_iter, target_news, "news", n_written, fh)
 
     log.info("done — %d paragraphs (wiki=%d news=%d) → %s",
