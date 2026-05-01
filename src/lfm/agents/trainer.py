@@ -82,30 +82,6 @@ class AgentTrainer:
         from lfm.agents.training_history import TrainingHistory
         self._history = TrainingHistory()
 
-        # Per-step log-line legend. Helps decode abbreviated metric names
-        # from the trainer's compact step= logs without grepping the source.
-        legend_lines = [
-            "step log legend:",
-            "  loss      = total weighted training loss",
-            "  acc       = top-1 accuracy on the contrastive pool",
-            "  nce       = per-sentence InfoNCE  (mean across K paragraphs)",
-            "  nce_agg   = aggregate-of-K InfoNCE  (mean alien_emb vs source)",
-            "  topo      = per-sentence  1 - cos(msg_alien, msg_source)",
-            "  topo_agg  = aggregate     1 - cos(msg_alien_agg, msg_source)",
-            "  nkl       = sum_n weight_n * NgramKL_n  (weighted total)",
-            "  kl2/kl3/kl4 = raw KL per n-gram order against corpus reference",
-            "  adj       = adjacency-diversity hinge on adjacent prob distributions",
-            "  ttr       = type-token ratio over batch's valid generated tokens",
-            "  coh       = cross-paragraph diversity hinge  (cos > target ⇒ penalty)",
-            "  res       = residual loss  (sub-aggregate must improve by ≥ margin)",
-            "  K         = n_paragraphs (sentences per anchor)",
-            "  ndist     = n distractors used (curriculum-ramped)",
-            "  hard      = within-cluster hard-negative ratio (curriculum-ramped)",
-            "  vram      = peak GPU memory in MB",
-        ]
-        for line in legend_lines:
-            logger.info(line)
-
     def _sample_batch(
         self, step: int,
     ) -> tuple[torch.Tensor, torch.Tensor, float, torch.Tensor | None]:
@@ -338,6 +314,29 @@ class AgentTrainer:
                 cfg.curriculum.end_hard_ratio * 100,
                 cfg.curriculum.warmup_steps,
             )
+
+        # Per-step log-line legend — printed right before the loop so the
+        # log file is self-documenting for whoever's reading it later.
+        for line in (
+            "step log legend:",
+            "  loss      = total weighted training loss",
+            "  acc       = top-1 accuracy on the contrastive pool",
+            "  nce       = per-sentence InfoNCE  (mean across K paragraphs)",
+            "  nce_agg   = aggregate-of-K InfoNCE  (mean alien_emb vs source)",
+            "  topo      = per-sentence  1 - cos(msg_alien, msg_source)",
+            "  topo_agg  = aggregate     1 - cos(msg_alien_agg, msg_source)",
+            "  nkl       = sum_n weight_n * NgramKL_n  (weighted total)",
+            "  kl2/kl3/kl4 = raw KL per n-gram order against corpus reference",
+            "  adj       = adjacency-diversity hinge on adjacent prob distributions",
+            "  ttr       = type-token ratio over batch's valid generated tokens",
+            "  coh       = cross-paragraph diversity hinge  (cos > target ⇒ penalty)",
+            "  res       = residual loss  (sub-aggregate must improve by ≥ margin)",
+            "  K         = n_paragraphs (sentences per anchor)",
+            "  ndist     = n distractors used (curriculum-ramped)",
+            "  hard      = within-cluster hard-negative ratio (curriculum-ramped)",
+            "  vram      = peak GPU memory in MB",
+        ):
+            logger.info(line)
 
         results: dict[str, float] = {}
         accum = getattr(cfg, "gradient_accumulation_steps", 1)
