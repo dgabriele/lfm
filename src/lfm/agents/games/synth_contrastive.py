@@ -593,12 +593,18 @@ class SynthContrastiveGame(nn.Module):
         diagnostic visibility regardless of whether the weight is on.
         """
         target = float(self.config.token_recurrence_target)
-        # footprint per sentence: (B, V)
+        V = self._vocab_size
+        # footprint per sentence: (B, V) — empirical token-frequency
+        # distribution via straight-through one-hot. Forward uses the
+        # SAMPLED tokens (so cos sim = real token-overlap, not the
+        # Phase-1-prior-dominated soft distribution); backward gradient
+        # flows through the soft probs.
         footprints = []
         for expr in exprs:
+            hard = F.one_hot(expr.token_ids, num_classes=V).to(expr.probs.dtype)
+            ste = hard + expr.probs - expr.probs.detach()    # (B, S, V)
             mask = expr.valid_mask.unsqueeze(-1).to(expr.probs.dtype)
-            # mean over valid positions; broadcast mask to (B, T, 1)
-            num = (expr.probs * mask).sum(dim=1)             # (B, V)
+            num = (ste * mask).sum(dim=1)                    # (B, V)
             den = mask.sum(dim=1).clamp(min=1)               # (B, 1)
             footprints.append(num / den)
         K = len(footprints)
