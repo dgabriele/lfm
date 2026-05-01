@@ -576,12 +576,16 @@ class SynthContrastiveGame(nn.Module):
         return msg_alien.flatten(start_dim=1).float()
 
     @torch.no_grad()
-    def generate(self, anchor: Tensor) -> tuple[Tensor, Tensor]:
+    def generate(self, anchor: Tensor, paragraph_idx: int = 0) -> tuple[Tensor, Tensor]:
         """Inference-only AR generation with KV caching.
 
         Same sampling/blocking as ``_generate_round_trip``'s AR loop but uses
         ``past_key_values`` so each step is O(1) in sequence length, and
         skips the grad-flowing re-encode + probs computation entirely.
+
+        For multi-paragraph models (Surgery C) ``paragraph_idx`` selects which
+        per-paragraph offset is added to the prefix; default 0 = first
+        paragraph. K=1 models ignore the index.
 
         Returns ``(token_ids, valid_mask)`` shaped ``(B, S)``.
         """
@@ -590,6 +594,8 @@ class SynthContrastiveGame(nn.Module):
         backend = self.synth_lm.backend
 
         prefix = self.synth_lm.projector(anchor).to(backend.dtype)
+        if self.paragraph_offsets is not None:
+            prefix = prefix + self.paragraph_offsets[paragraph_idx].to(prefix.dtype)
         hidden, past = backend.forward_hidden(prefix, use_cache=True)
 
         gen_ids: list[Tensor] = []
