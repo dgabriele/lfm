@@ -463,6 +463,7 @@ class AgentTrainer:
                     ("ngram_kl_n2", "kl2"),
                     ("ngram_kl_n3", "kl3"),
                     ("ngram_kl_n4", "kl4"),
+                    ("naturalness_kl", "nat"),
                     ("adj_div", "adj"),
                     ("adj_diversity", "adj"),
                     ("ttr", "ttr"),

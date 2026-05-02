@@ -35,16 +35,34 @@ token_recurrence_target: 0.5
 topology_weight: 0.1
 adj_diversity_weight: 0.05
 
-# n-gram KL — corpus-distribution match for diversity (rebuilt for multisent corpus)
-# Reference TTR=0.69 in alien-token space; current generation ~0.32 → need strong pressure.
-# n=4 dropped due to OOM at 24GB; weights increased on n=2,3 to compensate.
+# n-gram KL — naturalness anchor (reconstruction_weight is primary diversity driver).
+# Reduced weights: ngram_kl now plays a *floor on surface plausibility* role while
+# reconstruction loss pushes meaning preservation (which forces diversity intrinsically).
 ngram_kl:
   - n: 2
-    weight: 0.3
+    weight: 0.1
     path: data/synth_qwen_multisent/2gram_topk.npz
   - n: 3
-    weight: 0.15
+    weight: 0.05
     path: data/synth_qwen_multisent/3gram_topk.npz
+
+# ── Round-trip meaning preservation (primary linguistic constraint) ─────
+# InverseDecoder reads alien token sequence (surface_emb, no prefix
+# leak); contrastive form: must DISCRIMINATE this anchor from others.
+# Forces alien text to encode source content distinguishably, not just
+# match a global mean. Drives "the alien text carries meaning".
+reconstruction_weight: 1.0
+reconstruction_layers: 2
+
+# ── Naturalness KL: compositional grammar anchor ────────────────────────
+# KL(p_projector || p_phase1_unconditioned). Tethers the prefix-
+# conditioned distribution to Phase 1's natural alien-language grammar:
+# subject-verb-object, sentence boundaries, content/function alternation
+# all carried by Phase 1. The projector must steer minimally — encode
+# source content within the existing grammatical structure rather than
+# replacing it with a non-linguistic code. Together with reconstruction
+# this is the information-bottleneck compositional formulation.
+naturalness_kl_weight: 0.3
 adj_diversity_target: 0.30
 ngram_block: []                 # ngram_kl handles distribution; no hard blocking
 

@@ -50,6 +50,7 @@ from lfm.agents.games.base import (
     _NgramPartial,
 )
 from lfm.config.base import LFMBaseConfig
+from lfm.reconstruction.inverse_decoder import InverseDecoder
 from lfm.synth.config import SynthConfig
 from lfm.synth.model import SynthLM
 
@@ -106,6 +107,29 @@ class SynthContrastiveGameConfig(LFMBaseConfig):
                                            # for encoding *complementary* aspects.
     topology_weight: float = 0.1
     adj_diversity_weight: float = 0.05
+
+    # ── Round-trip meaning preservation (linguistic constraint) ──────────
+    # Train an InverseDecoder over the alien hidden states; loss is
+    # `1 - cos(inv_decoder(alien_hidden), mean_pool(anchor))`. Pushes the
+    # generation to *carry the source content* — only meaning-preserving
+    # text can be inverted, so degenerate / repetitive output is penalized
+    # at the level of intelligibility rather than at surface diversity.
+    # Set 0 to disable; 0.3-1.0 typical when active.
+    reconstruction_weight: float = 0.0
+    reconstruction_layers: int = 2
+
+    # ── Naturalness KL (compositional grammar anchor) ─────────────────────
+    # KL( p_projector(t | prefix, ctx) || p_phase1(t | ctx) ): pull the
+    # projector-conditioned next-token distribution toward Phase 1's
+    # unconditioned distribution. Phase 1 was trained on cipher-encoded
+    # English and already encodes alien-language compositional structure
+    # (subject-verb-object, content/function alternation, sentence
+    # boundaries). This loss says: "modulate Phase 1 only as much as
+    # needed to encode source content; do not abandon its grammar."
+    # Together with reconstruction_weight, this realizes information-
+    # bottleneck compositional encoding: minimum bits to encode source,
+    # within the natural alien-language manifold.
+    naturalness_kl_weight: float = 0.0
 
     # ── n-gram KL anti-collapse: each entry is (n, weight, npz_path) ─────
     # e.g. [{"n": 2, "weight": 0.05, "path": ".../bigram_topk.npz"},
@@ -257,6 +281,18 @@ class SynthContrastiveGame(nn.Module):
         self.adj_diversity = AdjDiversityLoss(config.adj_diversity_target)
         self._ngram_blocker = _NgramBlocker(config.ngram_block or [])
 
+        # Round-trip meaning preservation: only built when active so the
+        # parameter count and VRAM footprint don't grow when disabled.
+        if config.reconstruction_weight > 0:
+            self.inverse_decoder = InverseDecoder(
+                token_dim=self._d_model,
+                output_dim=config.source_dim,
+                num_heads=8,
+                num_layers=config.reconstruction_layers,
+            )
+        else:
+            self.inverse_decoder = None
+
         # Per-paragraph prefix offsets (Surgery C). Small random noise so
         # they diverge during training; with d_model ~896, randn vectors
         # are nearly orthogonal so this gives K usefully-distinct biases
@@ -311,6 +347,10 @@ class SynthContrastiveGame(nn.Module):
             groups.append(
                 {"params": list(self.ctx_proj.parameters()), "lr": cfg.head_lr},
             )
+        if self.inverse_decoder is not None:
+            groups.append(
+                {"params": list(self.inverse_decoder.parameters()), "lr": cfg.head_lr},
+            )
         return groups
 
     def checkpoint_state(self) -> dict:
@@ -324,6 +364,8 @@ class SynthContrastiveGame(nn.Module):
             state["paragraph_offsets"] = self.paragraph_offsets.detach().clone()
         if self.ctx_proj is not None:
             state["ctx_proj"] = self.ctx_proj.state_dict()
+        if self.inverse_decoder is not None:
+            state["inverse_decoder"] = self.inverse_decoder.state_dict()
         return state
 
     def load_checkpoint_state(self, ckpt: dict) -> None:
@@ -359,6 +401,10 @@ class SynthContrastiveGame(nn.Module):
         # untouched ctx_proj behaviourally identical to v4).
         if self.ctx_proj is not None and "ctx_proj" in ckpt:
             self.ctx_proj.load_state_dict(ckpt["ctx_proj"])
+        # Round-trip inverse decoder: silently skip if absent from older
+        # checkpoints — fresh init is fine when activating mid-run.
+        if self.inverse_decoder is not None and "inverse_decoder" in ckpt:
+            self.inverse_decoder.load_state_dict(ckpt["inverse_decoder"])
 
     # ─── main forward ─────────────────────────────────────────────────────
 
@@ -1105,6 +1151,47 @@ class SynthContrastiveGame(nn.Module):
             ap = self.adj_diversity.zero_partial(msg_alien.device)
         terms["adj_diversity"] = self.adj_diversity.finalize(ap)
 
+        # Naturalness KL: pull p_projector toward p_phase1_unconditioned.
+        # Anchor the projector to Phase 1's compositional grammar — Phase 1
+        # already encodes alien-language structure; only deviate as much
+        # as needed for source encoding. p_nat is a target (no_grad).
+        if self.config.naturalness_kl_weight > 0:
+            backend = self.synth_lm.backend
+            with torch.no_grad():
+                nat_hidden = backend.forward_hidden(expr.surface_emb)
+                nat_logits = backend.alien_logits(nat_hidden).float()
+                p_nat = F.softmax(nat_logits, dim=-1).clamp(min=1e-12)
+            log_proj = expr.probs.clamp(min=1e-12).log()
+            log_nat = p_nat.log()
+            kl_per_pos = (expr.probs * (log_proj - log_nat)).sum(-1)         # (B, S)
+            mask_f = expr.valid_mask.float()
+            denom = mask_f.sum().clamp(min=1.0)
+            terms["naturalness_kl"] = (kl_per_pos * mask_f).sum() / denom
+
+        # Round-trip meaning preservation via contrastive discrimination.
+        # The InverseDecoder must produce a recovery that *uniquely* matches
+        # this anchor (vs other anchors in the batch) — a regression loss
+        # against cosine similarity collapses to "output global mean of
+        # anchors" which gets ~0.9 cosine for free because mean-pooled
+        # paragraph embeddings cluster tightly. Contrastive form forces
+        # the alien token sequence to encode discriminative content.
+        # Input is ``surface_emb`` (frozen-embedding-table tokens, no
+        # prefix conditioning) so information must flow through the choice
+        # of generated tokens, not through prefix attention leak.
+        if self.inverse_decoder is not None:
+            B = anchor.size(0)
+            anchor_target = anchor.mean(dim=1).float()                    # (B, source_dim)
+            mask_bool = expr.valid_mask.bool()
+            recovered = self.inverse_decoder(expr.surface_emb.float(), mask_bool)
+            r = F.normalize(recovered, dim=-1)
+            t = F.normalize(anchor_target, dim=-1)
+            logits = r @ t.t() / max(self.config.contrastive_temperature, 1e-3)
+            labels = torch.arange(B, device=recovered.device)
+            terms["reconstruction"] = 0.5 * (
+                F.cross_entropy(logits, labels)
+                + F.cross_entropy(logits.t(), labels)
+            )
+
         return terms, logits
 
     def _info_nce(
@@ -1198,6 +1285,12 @@ class SynthContrastiveGame(nn.Module):
         # Surgery F — token-level within-doc lexical recurrence
         if "token_recurrence" in terms and cfg.token_recurrence_weight > 0:
             total = total + cfg.token_recurrence_weight * terms["token_recurrence"]
+        # Round-trip meaning preservation
+        if "reconstruction" in terms and cfg.reconstruction_weight > 0:
+            total = total + cfg.reconstruction_weight * terms["reconstruction"]
+        # Naturalness anchor — compositional grammar via Phase 1 KL
+        if "naturalness_kl" in terms and cfg.naturalness_kl_weight > 0:
+            total = total + cfg.naturalness_kl_weight * terms["naturalness_kl"]
         return total
 
     # ─── curriculum ───────────────────────────────────────────────────────
