@@ -1,0 +1,93 @@
+# SynthContrastiveGame — Phase 2 on top of multisent Phase 1.
+#
+# Starts clean: n_paragraphs=1, all surgery weights at 0.
+# The multisent Phase 1 substrate should produce discourse-coherent
+# paragraphs natively; we should not need Surgery C/D/E/F unless
+# diagnostics (lex_coh, ttr, pos_div) show collapse after 2-3K steps.
+#
+# Reintroduce in order of evidence:
+#   1. topology_weight / adj_diversity_weight — always fine to have
+#   2. n-gram KL — only if rep_rate climbs above 0.05
+#   3. Surgery C (n_paragraphs>1) — only if single-para game saturates
+#   4. Surgery D/E/F — only if Surgery C composition is not emerging
+
+# ── SynthLM source ──────────────────────────────────────────────────────
+synth_config: configs/synth_multisent_local.yaml
+phase1_checkpoint: data/synth_qwen_multisent/phase1_latest.pt
+
+# ── Source / generation ─────────────────────────────────────────────────
+source_dim: 896
+n_source_positions: 8
+n_prefix_tokens: 8               # must match n_source_positions for per-position projection
+max_gen_len: 256                 # paragraphs can be long; was 48 for sentences
+
+# ── Contrastive loss ────────────────────────────────────────────────────
+contrastive_temperature: 0.07
+embedding_dim: 896
+
+# ── Loss weights — clean slate, no surgery ──────────────────────────────
+info_nce_weight: 1.0
+info_nce_aggregate_weight: 0.0  # Surgery D off
+residual_weight: 0.0            # Surgery E off
+residual_margin: 0.05
+token_recurrence_weight: 0.0    # Surgery F off
+token_recurrence_target: 0.5
+topology_weight: 0.1
+adj_diversity_weight: 0.05
+
+# n-gram KL — corpus-distribution match for diversity (rebuilt for multisent corpus)
+# Reference TTR=0.69 in alien-token space; current generation ~0.32 → need strong pressure.
+# n=4 dropped due to OOM at 24GB; weights increased on n=2,3 to compensate.
+ngram_kl:
+  - n: 2
+    weight: 0.3
+    path: data/synth_qwen_multisent/2gram_topk.npz
+  - n: 3
+    weight: 0.15
+    path: data/synth_qwen_multisent/3gram_topk.npz
+adj_diversity_target: 0.30
+ngram_block: []                 # ngram_kl handles distribution; no hard blocking
+
+# ── Generation control ──────────────────────────────────────────────────
+generation_temperature: 1.0
+eos_token_id: 3
+pad_token_id: 0
+
+# ── Multi-paragraph (Surgery C) — off to start ──────────────────────────
+n_paragraphs: 1
+coherence_weight: 0.0
+coherence_target_cos: 0.5
+
+# ── Curriculum on explicit distractors ──────────────────────────────────
+distractor_curriculum_start: 0
+distractor_curriculum_end: 2000
+
+# ── Online hard-negative mining ─────────────────────────────────────────
+hard_neg_refresh_every: 500
+hard_neg_topk: 100
+hard_neg_warmup: 2000
+
+# ── Trainer config ──────────────────────────────────────────────────────
+embedding_store_dir: data/embeddings_qwen
+batch_size: 32
+gradient_accumulation_steps: 1
+steps: 15000
+num_distractors: 31             # 32-way pool (batch + 31 explicit distractors)
+max_grad_norm: 1.0
+contrastive_scoring: true
+
+projector_lr: 0.0001
+head_lr: 0.0001
+log_temperature_lr: 0.001
+
+log_every: 25
+checkpoint_every: 250
+output_dir: data/synth_contrastive_multisent
+device: cuda
+seed: 42
+
+curriculum:
+  enabled: true
+  warmup_steps: 2000
+  start_hard_ratio: 0.0
+  end_hard_ratio: 1.0

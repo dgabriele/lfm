@@ -750,14 +750,16 @@ class SynthContrastiveGame(nn.Module):
         B = prefix.size(0)
         device = prefix.device
 
-        # 1) Detached autoregressive generation. Only emits token IDs.
+        # 1) Detached AR generation with KV caching. Only emits token IDs.
+        # O(T) instead of O(T^2): prefix forward seeds the cache; each step
+        # forwards only the new token and reads past_key_values.
         with torch.no_grad():
-            context = prefix.detach().clone()
+            prefix_detached = prefix.detach()
+            hidden, past = backend.forward_hidden(prefix_detached, use_cache=True)
             gen_ids: list[Tensor] = []
             done = torch.zeros(B, dtype=torch.bool, device=device)
             temp = max(self.config.generation_temperature, 1e-6)
             for t in range(self.config.max_gen_len):
-                hidden = backend.forward_hidden(context)
                 logits = backend.alien_logits(hidden[:, -1:]).squeeze(1)
                 logits = self._apply_blockers(logits.unsqueeze(1), gen_ids, t).squeeze(1)
                 if temp == 1.0 or self.config.generation_temperature == 0:
@@ -770,7 +772,9 @@ class SynthContrastiveGame(nn.Module):
                 if done.all():
                     break
                 next_emb = backend.embed_alien(next_id.unsqueeze(1))
-                context = torch.cat([context, next_emb], dim=1)
+                hidden, past = backend.forward_hidden(
+                    next_emb, past_key_values=past, use_cache=True,
+                )
 
         token_ids = torch.stack(gen_ids, dim=1)
         valid_mask = self._build_valid_mask(token_ids)
@@ -1063,7 +1067,7 @@ class SynthContrastiveGame(nn.Module):
     def _compute_loss_terms(
         self,
         expr: SynthExpressionOutput,
-        anchor: Tensor,                       # (B, P, source_dim) — never mean-pooled now
+        anchor: Tensor,                       # (B, P, source_dim) — positionally-binned Qwen hidden
         distractors: Tensor | None,           # (B, K, P, source_dim) or None
     ) -> tuple[dict[str, Tensor], Tensor]:
         # Project alien_emb (B, P, D) and source (B, P, source_dim) through

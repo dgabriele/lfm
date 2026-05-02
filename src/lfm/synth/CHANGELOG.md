@@ -46,7 +46,7 @@ SS could not fix a task that has no learnable structure beyond memorization.
 
 ## ARCH-2: Alien LM Phase 1 (current)
 
-**Status: ACTIVE**
+**Status: ACTIVE — v4 multi-sentence retraining in progress (2026-05-01)**
 
 ### v1 final (2026-04-28→29, baseline retained as `phase1_*_v1_baseline.pt`)
 50K steps, batch=16×4, max_len=64, constant LR (cipher 3e-4, body 3e-5),
@@ -86,6 +86,54 @@ the cross-architecture failure mode (multilingual VAE → dep tree VAE →
 current LM all share it) of generations rambling past natural sentence
 ends. Body learns "where am I in the arc of this sentence" — direct
 supervision for sentence completion that next-token CE doesn't provide.
+
+### v4 multi-sentence Phase 1 retraining (started 2026-05-01)
+
+**Motivation:** The contrastive game (Phase 2) was accumulating band-aid loss terms (positional
+pooling, n-gram KL, cross-sentence diversity, residual InfoNCE, token-recurrence) to coerce
+multi-sentence discourse structure out of a model that had never seen it. The root cause was
+that v1–v3 Phase 1 was trained exclusively on *individual sentences* — the body had no learned
+prior for paragraph-level structure. Coherence, lexical burstiness, and cross-sentence coreference
+were expected to emerge from game incentives rather than from the training distribution.
+
+**Strategic decision:** Retrain Phase 1 on multi-sentence paragraphs so that discourse-level
+structure (topic continuity, pronoun chains, Zipfian word reuse, well-formed endings) is part
+of the model's native language prior. This eliminates the need for nearly all of the band-aid
+losses in Phase 2 — the game only needs to learn discriminative conditioning, not invent
+discourse grammar from scratch.
+
+**Corpus (897K paragraphs):**
+- Source: wikitext-103-raw-v1 (597K paragraphs) + CC-News (300K paragraphs)
+- Filter: ≥3 sentences, 40–400 whitespace tokens, alpha ratio >0.50, non-ASCII <5%
+- Post-filter word-count cap: 40–300 words (97.97% retention → 897,374 paragraphs)
+- NER normalization: paragraph-scoped, value-keyed letter-suffix coreference
+  (18 entity types; same entity surface → same letter within paragraph, e.g.
+  `moneyamounta` / `moneyamountb` for two distinct money values; overflow → `z`)
+- Distribution: mean 143 words, median 130, p10=70, p90=239 — every bucket has >25K samples
+- Location: `data/multisent_corpus/passages_normalized.jsonl`
+
+**Fresh tokenizer:**
+- 8000 BPE vocab (vs 232K WordLevel in v3) retrained from scratch on the new cipher-encoded
+  multisent corpus — ensures all 468 placeholder tokens (18 types × 26 letters) are single BPE
+  units with deterministic coreference preserved in alien surface form.
+- Location: `data/synth_qwen_multisent/alien_tokenizer/` + `alien_vocab.json`
+
+**Config changes vs v3:**
+- `phase1_dataset_dir`: individual-sentence corpus → `data/multisent_corpus/passages_normalized.jsonl`
+- `phase1_max_len`: 80 → 512 (paragraph-scale context)
+- `phase1_batch_size`: 24 → 8 (paragraphs are ~6× longer; effective batch 8×3=24 unchanged)
+- `phase1_grad_accum`: 1 → 3 (preserves effective batch size)
+- `phase1_steps`: 50000 → 25000 (paragraphs are ~6× more tokens/step; comparable token coverage)
+- `output_dir`: `data/synth_qwen_multisent` (new directory for this run)
+- Config file: `configs/synth_multisent_local.yaml`
+
+**Run:** Vast.ai instance 35978072 (RTX 3090, India, ~$0.150/hr).
+Corpus filter pass: 874,789 / 897,374 kept (97.5% within 512 token limit).
+Step 1 body frozen (warmup to step 3000). Loss trajectory: ce 8.36 → 5.83 by step 1200.
+
+**What Phase 2 changes:** Once Phase 1 converges, the contrastive game should need only
+standard InfoNCE (no diversity, residual, or token-recurrence losses) — paragraph-level
+coherence will be enforced by the autoregressive prior, not by auxiliary objectives.
 
 ### What it is (architecturally)
 Phase 1: pure causal next-token prediction on cipher-encoded English text.
